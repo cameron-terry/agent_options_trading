@@ -1,8 +1,9 @@
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, model_validator
 
+from options_agent.contracts.results import ValidationRuleId
 from options_agent.contracts.state import ActionTaken, ContextSnapshot, Decision
 
 
@@ -30,6 +31,8 @@ class OutcomeRecord(BaseModel):
     entry-cycle JournalRecord. Position is the stable join spine.
     """
 
+    model_config = ConfigDict(frozen=True)
+
     id: str
     position_id: str
     event_type: OutcomeEventType
@@ -46,12 +49,18 @@ class JournalRecord(BaseModel):
     Never updated after write. Outcome data lives in OutcomeRecord, joined via:
         JournalRecord.position_ids → Position → OutcomeRecord.position_id
 
+    Invariants (enforced by model_validator):
+    - action_taken must equal decision.action_taken.
+    - rejection_rule_ids must be non-empty when action_taken == REJECTED.
+
     Denormalized fields (strategy, underlying, etc.) are a queryable index over
     the nested decision and context_snapshot. They must be derived from those
     objects at write time and must never be set independently — the nested
     objects are the source of truth. If a denormalized field disagrees with its
     source, the nested object wins.
     """
+
+    model_config = ConfigDict(frozen=True)
 
     # Identity
     cycle_id: str
@@ -82,6 +91,19 @@ class JournalRecord(BaseModel):
     prompt_version: str
     model_id: str
 
-    # Rejection index — rule_ids from ValidationResult.reasons when REJECTED;
-    # empty for all other action_taken values
-    rejection_rule_ids: list[str] = []
+    # Rejection index — ValidationRuleId values from ValidationResult.reasons
+    # when action_taken == REJECTED; empty for all other action_taken values
+    rejection_rule_ids: list[ValidationRuleId] = []
+
+    @model_validator(mode="after")
+    def _check_invariants(self) -> "JournalRecord":
+        if self.action_taken != self.decision.action_taken:
+            raise ValueError(
+                f"action_taken={self.action_taken!r} disagrees with "
+                f"decision.action_taken={self.decision.action_taken!r}"
+            )
+        if self.action_taken == ActionTaken.REJECTED and not self.rejection_rule_ids:
+            raise ValueError(
+                "rejection_rule_ids must be non-empty when action_taken == REJECTED"
+            )
+        return self

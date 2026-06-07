@@ -1,5 +1,8 @@
 from datetime import UTC, date, datetime
 
+import pytest
+from pydantic import ValidationError
+
 from options_agent.contracts import (
     ActionTaken,
     ContextSnapshot,
@@ -346,10 +349,10 @@ def test_journal_record_rejected() -> None:
         ),
         position_ids=[],
         order_ids=[],
-        rejection_rule_ids=["NAKED_SHORT"],
+        rejection_rule_ids=[ValidationRuleId.NAKED_SHORT],
     )
     assert jr.action_taken == ActionTaken.REJECTED
-    assert jr.rejection_rule_ids == ["NAKED_SHORT"]
+    assert jr.rejection_rule_ids == [ValidationRuleId.NAKED_SHORT]
     assert jr.position_ids == []
     assert jr.decision.validation_result is not None
     assert not jr.decision.validation_result.passed
@@ -385,9 +388,15 @@ def test_journal_record_rejected_multiple_rules() -> None:
         ),
         position_ids=[],
         order_ids=[],
-        rejection_rule_ids=["MAX_LOSS_CAP", "PORTFOLIO_DELTA_BAND"],
+        rejection_rule_ids=[
+            ValidationRuleId.MAX_LOSS_CAP,
+            ValidationRuleId.PORTFOLIO_DELTA_BAND,
+        ],
     )
-    assert set(jr.rejection_rule_ids) == {"MAX_LOSS_CAP", "PORTFOLIO_DELTA_BAND"}
+    assert set(jr.rejection_rule_ids) == {
+        ValidationRuleId.MAX_LOSS_CAP,
+        ValidationRuleId.PORTFOLIO_DELTA_BAND,
+    }
 
 
 def test_journal_record_rejected_round_trip() -> None:
@@ -411,7 +420,7 @@ def test_journal_record_rejected_round_trip() -> None:
         ),
         position_ids=[],
         order_ids=[],
-        rejection_rule_ids=["EVENT_BLACKOUT"],
+        rejection_rule_ids=[ValidationRuleId.EVENT_BLACKOUT],
     )
     assert JournalRecord.model_validate_json(jr.model_dump_json()) == jr
 
@@ -489,3 +498,149 @@ def test_journal_record_versioning_fields() -> None:
     assert jr.limits_version == "v2.1.0"
     assert jr.prompt_version == "v1.3.0"
     assert jr.model_id == "claude-opus-4-8"
+
+
+# ---------------------------------------------------------------------------
+# JournalRecord — CLOSED and ROLLED
+# ---------------------------------------------------------------------------
+
+
+def test_journal_record_closed() -> None:
+    jr = _make_journal_record(
+        action_taken=ActionTaken.CLOSED,
+        decision=Decision(
+            proposal=_make_proposal(),
+            validation_result=ValidationResult(passed=True),
+            sizing_result=None,
+            action_taken=ActionTaken.CLOSED,
+        ),
+        position_ids=["pos-001"],
+        order_ids=["ord-close-001"],
+        strategy="bull_put_spread",
+        underlying="SPY",
+    )
+    assert jr.action_taken == ActionTaken.CLOSED
+    assert jr.position_ids == ["pos-001"]
+    assert jr.order_ids == ["ord-close-001"]
+
+
+def test_journal_record_closed_round_trip() -> None:
+    jr = _make_journal_record(
+        action_taken=ActionTaken.CLOSED,
+        decision=Decision(
+            proposal=_make_proposal(),
+            validation_result=ValidationResult(passed=True),
+            sizing_result=None,
+            action_taken=ActionTaken.CLOSED,
+        ),
+        position_ids=["pos-001"],
+        order_ids=["ord-close-001"],
+    )
+    assert JournalRecord.model_validate_json(jr.model_dump_json()) == jr
+
+
+def test_journal_record_rolled() -> None:
+    jr = _make_journal_record(
+        action_taken=ActionTaken.ROLLED,
+        decision=Decision(
+            proposal=_make_proposal(),
+            validation_result=ValidationResult(passed=True),
+            sizing_result=SizingResult(
+                contracts=2,
+                sized_max_loss=1750.0,
+                sized_max_profit=250.0,
+                risk_budget_used=0.018,
+                binding_constraint="RISK_BUDGET",
+            ),
+            action_taken=ActionTaken.ROLLED,
+        ),
+        position_ids=["pos-001"],
+        order_ids=["ord-roll-001"],
+        strategy="bull_put_spread",
+        underlying="SPY",
+    )
+    assert jr.action_taken == ActionTaken.ROLLED
+    assert jr.position_ids == ["pos-001"]
+
+
+def test_journal_record_rolled_round_trip() -> None:
+    jr = _make_journal_record(
+        action_taken=ActionTaken.ROLLED,
+        decision=Decision(
+            proposal=_make_proposal(),
+            validation_result=ValidationResult(passed=True),
+            sizing_result=SizingResult(
+                contracts=2,
+                sized_max_loss=1750.0,
+                sized_max_profit=250.0,
+                risk_budget_used=0.018,
+                binding_constraint="RISK_BUDGET",
+            ),
+            action_taken=ActionTaken.ROLLED,
+        ),
+        position_ids=["pos-001"],
+        order_ids=["ord-roll-001"],
+    )
+    assert JournalRecord.model_validate(jr.model_dump()) == jr
+
+
+# ---------------------------------------------------------------------------
+# JournalRecord — model_validator enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_journal_record_mismatched_action_taken_raises() -> None:
+    with pytest.raises(ValidationError, match="disagrees with"):
+        _make_journal_record(
+            action_taken=ActionTaken.OPENED,
+            decision=Decision(
+                proposal=_make_proposal(),
+                validation_result=ValidationResult(passed=True),
+                sizing_result=None,
+                action_taken=ActionTaken.REJECTED,  # mismatch
+            ),
+            rejection_rule_ids=[ValidationRuleId.NAKED_SHORT],
+        )
+
+
+def test_journal_record_rejected_empty_rule_ids_raises() -> None:
+    rejection = ValidationResult(
+        passed=False,
+        reasons=[
+            RejectionReason(
+                rule_id=ValidationRuleId.KILL_SWITCH,
+                severity=Severity.ERROR,
+                human_message="Kill switch engaged",
+            )
+        ],
+    )
+    with pytest.raises(ValidationError, match="rejection_rule_ids must be non-empty"):
+        _make_journal_record(
+            action_taken=ActionTaken.REJECTED,
+            decision=Decision(
+                proposal=_make_proposal(),
+                validation_result=rejection,
+                sizing_result=None,
+                action_taken=ActionTaken.REJECTED,
+            ),
+            position_ids=[],
+            order_ids=[],
+            rejection_rule_ids=[],  # violates invariant
+        )
+
+
+# ---------------------------------------------------------------------------
+# Immutability — frozen=True
+# ---------------------------------------------------------------------------
+
+
+def test_journal_record_is_frozen() -> None:
+    jr = _make_journal_record()
+    with pytest.raises((TypeError, ValidationError)):
+        jr.cycle_id = "mutated"  # type: ignore[misc]
+
+
+def test_outcome_record_is_frozen() -> None:
+    o = _make_outcome_record()
+    with pytest.raises((TypeError, ValidationError)):
+        o.realized_pnl = 999.0  # type: ignore[misc]
