@@ -1,4 +1,9 @@
 from options_agent.config import Config
+from options_agent.contracts.journal import (
+    JournalRecord,
+    OutcomeEventType,
+    OutcomeRecord,
+)
 from options_agent.contracts.proposal import ExitPlan, Leg, TradeProposal
 from options_agent.contracts.results import (
     RejectionReason,
@@ -8,6 +13,7 @@ from options_agent.contracts.results import (
     ValidationRuleId,
 )
 from options_agent.contracts.state import (
+    ActionTaken,
     ContextSnapshot,
     Decision,
     LegFill,
@@ -31,6 +37,7 @@ __all__ = [
     "SizingResult",
     "ValidationResult",
     "ValidationRuleId",
+    "ActionTaken",
     "ContextSnapshot",
     "Decision",
     "LegFill",
@@ -41,6 +48,9 @@ __all__ = [
     "Position",
     "PositionLeg",
     "PositionStatus",
+    "JournalRecord",
+    "OutcomeEventType",
+    "OutcomeRecord",
     "ChainFilterLimits",
     "ExitPlanDefaults",
     "Limits",
