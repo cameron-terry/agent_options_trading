@@ -183,7 +183,7 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 **Suggested issue breakdown**
 - Schema + migrations.
 - Position/Order CRUD + tests.
-- Journal writer + a context-snapshot storage strategy (inline vs. hash+pointer).
+- Journal writer (context-snapshot storage strategy **decided in WP-0.3**: inline `assembled_context: dict` with `context_hash: str` alongside — see `contracts/state.py:ContextSnapshot`).
 - SQLite→Postgres switch behind one config flag.
 
 **Definition of done**

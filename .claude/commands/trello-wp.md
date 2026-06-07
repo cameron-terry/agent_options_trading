@@ -11,6 +11,10 @@ Create Trello tickets for a work package (WP) defined in `docs/WORKSTREAMS.md`.
 
 3. **Creates one epic card** for the WP in the To-Do list summarising: goal, scope in/out, DoD checklist, and an index of all sub-task cards with their destination lists.
 
+   **Card naming convention:**
+   - Epic card: `[WP-N] <Name> — Epic` (e.g. `[WP-2] State & Persistence — Epic`)
+   - Sub-task cards: `[WP-N.x] <short title>` (e.g. `[WP-2.1] Schema + migrations`)
+
 4. **Creates one card per suggested issue** from the WP's breakdown section, triaged into the correct list:
 
    - **To-Do** — scope and implementation details are both fully defined; a developer can start without any open questions.
