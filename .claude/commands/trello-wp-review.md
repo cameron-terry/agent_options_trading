@@ -41,6 +41,24 @@ Run all of these in parallel:
 
 4. **Fetch the PR** using `gh pr view <number> --json title,body,state,files,additions,deletions` and `gh pr diff <number>` to read the actual diff. Read only files touched by the diff — do not scan the whole repo.
 
+### Phase 2.5 — Run author verification steps
+
+After Phase 2 completes and you have the PR body:
+
+1. **Extract verification statements** — scan the PR body for lines matching the pattern `Verify <something>` (in checklist `- [ ] Verify ...` / `- [x] Verify ...` or plain `Verify ...` form). These are claims the author committed to validating.
+
+2. **Run each verification** — for each extracted statement, write a minimal Python snippet and execute it with `uv run python -c "..."`. Each snippet should:
+   - Import only what it needs from `options_agent.contracts` (or other modules touched by the diff).
+   - Assert the specific claim (e.g., `assert len(list(ActionTaken)) == 8`).
+   - Print a single `PASS` line or raise/print the observed value on failure.
+   - Use the real enum/field names from the diff — run a quick `uv run python -c "from options_agent.contracts import X; print(list(X))"` first if you need to confirm exact values before asserting.
+
+3. **Collect results** — record each check as `PASS` or `FAIL (observed: <value>, expected: <value>)`.
+
+**If any check FAILS:** treat it as a concrete bug under `### Bugs and logical inconsistencies`, with the actual vs. expected values. A failing author verification overrides passing static analysis — the code is not correct if the author's own stated claims don't hold.
+
+**If no `Verify` lines are found in the PR body:** write "No author verification steps found." in the Verification results section and proceed.
+
 ### Phase 3 — Deliver the review
 
 Output a structured review using exactly this template:
@@ -51,6 +69,9 @@ Output a structured review using exactly this template:
 **Selected because:** <one sentence from Phase 1 ranking rationale>
 
 ---
+
+### Verification results
+<Results of running author-stated verification steps from the PR body. One line per check: description → PASS / FAIL (observed: ..., expected: ...). If no Verify steps were found in the PR body, write "No author verification steps found.">
 
 ### Implementation analysis
 <Bullet-point findings. Cover all of the following dimensions — omit a dimension only if there is genuinely nothing to say:>
