@@ -14,6 +14,19 @@ alpaca_paper = true
 # correlate trade outcomes with the exact limits active at the time.
 limits_version = "0.1.0"
 
+# Allowed strategy names. agent/prompts.py (WP-6.3) must use these same
+# names so the agent can never propose a strategy the validator will reject.
+allowed_strategies = [
+    "bull_put_spread",
+    "bear_call_spread",
+    "bull_call_spread",
+    "bear_put_spread",
+    "iron_condor",
+    "iron_butterfly",
+    "covered_call",
+    "cash_secured_put",
+]
+
 # Risk / sizing
 max_loss_per_trade_pct = 0.01        # 1% of equity hard ceiling per trade
 max_open_positions = 5
