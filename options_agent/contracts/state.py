@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from options_agent.contracts.proposal import ExitPlan, Leg, TradeProposal
+from options_agent.contracts.results import SizingResult, ValidationResult
 
 
 class LegStatus(StrEnum):
@@ -127,16 +128,11 @@ class Decision(BaseModel):
 
     Not persisted as a standalone entity — lives inside JournalRecord (WP-0.4).
     Covers NO_ACTION and REJECTED cycles (proposal is None for NO_ACTION).
-
-    validation_result and sizing_result are typed Any until WP-0.6 defines
-    ValidationResult and SizingResult; WP-0.4 will tighten these on import.
     """
 
     proposal: TradeProposal | None
-    # Typed Any pending WP-0.6 (ValidationResult).
-    validation_result: Any | None
-    # Typed Any pending WP-0.6 (SizingResult).
-    sizing_result: Any | None
+    validation_result: ValidationResult | None
+    sizing_result: SizingResult | None
     action_taken: str
 
 
