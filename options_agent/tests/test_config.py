@@ -149,6 +149,8 @@ max_open_positions = 5
 max_dollar_delta_pct = 0.20
 max_dollar_vega_pct = 0.025
 max_underlying_concentration_pct = 0.20
+event_blackout_days = 7
+min_buying_power_pct = 0.15
 
 [limits.chain_filter]
 min_open_interest = 500
@@ -173,6 +175,8 @@ time_stop_dte = 21
     assert config.db_url == "sqlite:///test.db"
     assert config.limits.limits_version == "0.1.0"
     assert config.limits.max_loss_per_trade_pct == 0.01
+    assert config.limits.event_blackout_days == 7
+    assert config.limits.min_buying_power_pct == 0.15
     assert config.limits.chain_filter.min_dte == 20
     assert config.limits.chain_filter.max_dte == 45
     assert config.limits.exit_plan_defaults.profit_target_pct == 0.50
