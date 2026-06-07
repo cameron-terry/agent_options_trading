@@ -101,6 +101,8 @@ Once all CI gates are green, commit the work and open a pull request:
 
 2. Move the card to "In Review" using `mcp__trello__move_card`.
 
+3. Update the corresponding WP-epic Trello ticket to reflect the ticket's status.
+
 ## Rules
 
 - Never start implementation without user confirmation in Phase 3.
