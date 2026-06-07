@@ -4,27 +4,9 @@ from pydantic import BaseModel
 
 from options_agent.contracts.proposal import TradeProposal
 from options_agent.contracts.results import SizingResult, ValidationResult
+from options_agent.contracts.state import ActionTaken
 
-
-class ActionTaken(StrEnum):
-    """Coarse outcome of one entry cycle.
-
-    Shared vocabulary for CycleResult and JournalRecord (WP-0.4 must reuse
-    this enum so WP-7 analytics never reconcile two vocabularies for the
-    same fact).
-
-    OPEN / CLOSE / ROLL / NO_ACTION mirror TradeProposal.action (the agent
-    acted or decided there was nothing to do after running).
-    NO_ACTION_GATED means the cycle short-circuited before the agent ran.
-    ERROR means the cycle produced a CycleError before it could complete.
-    """
-
-    OPEN = "OPEN"
-    CLOSE = "CLOSE"
-    ROLL = "ROLL"
-    NO_ACTION = "NO_ACTION"
-    NO_ACTION_GATED = "NO_ACTION_GATED"
-    ERROR = "ERROR"
+__all__ = ["ActionTaken"]  # re-exported; canonical definition lives in state.py
 
 
 class ShortCircuitReason(StrEnum):

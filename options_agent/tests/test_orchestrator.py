@@ -39,12 +39,14 @@ def test_orchestrator_functions_importable() -> None:
 
 def test_action_taken_all_values_present() -> None:
     expected = {
-        ActionTaken.OPEN,
-        ActionTaken.CLOSE,
-        ActionTaken.ROLL,
-        ActionTaken.NO_ACTION,
+        ActionTaken.OPENED,
+        ActionTaken.CLOSED,
+        ActionTaken.ROLLED,
         ActionTaken.NO_ACTION_GATED,
-        ActionTaken.ERROR,
+        ActionTaken.NO_ACTION_AGENT,
+        ActionTaken.SIZED_TO_ZERO,
+        ActionTaken.REJECTED,
+        ActionTaken.EXECUTION_FAILED,
     }
     assert expected == set(ActionTaken)
 
@@ -146,12 +148,12 @@ def test_cycle_result_completed_open() -> None:
     )
     r = CycleResult(
         cycle_id="xyz-456",
-        action_taken=ActionTaken.OPEN,
+        action_taken=ActionTaken.OPENED,
         validation=vr,
         sizing=sr,
         journal_record_id="journal-789",
     )
-    assert r.action_taken == ActionTaken.OPEN
+    assert r.action_taken == ActionTaken.OPENED
     assert r.short_circuit_reason is None
     assert r.validation is not None
     assert r.sizing is not None
@@ -162,11 +164,11 @@ def test_cycle_result_error_path() -> None:
     err = CycleError(stage=CycleStage.EXECUTE, message="timeout", recoverable=True)
     r = CycleResult(
         cycle_id="err-001",
-        action_taken=ActionTaken.ERROR,
+        action_taken=ActionTaken.EXECUTION_FAILED,
         error=err,
         journal_record_id="journal-err-001",
     )
-    assert r.action_taken == ActionTaken.ERROR
+    assert r.action_taken == ActionTaken.EXECUTION_FAILED
     assert r.error is not None
     assert r.error.stage == CycleStage.EXECUTE
 
