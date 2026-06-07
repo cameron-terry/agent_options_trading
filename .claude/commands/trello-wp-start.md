@@ -108,3 +108,4 @@ Once all CI gates are green, commit the work and open a pull request:
 - Never exceed the card's stated scope — if you discover necessary work outside the card, flag it rather than doing it silently.
 - If a dependency card is not "Done", implement against a typed stub and document the assumption in a code comment.
 - If the card is in "Needs Reqs" or "Needs Implementation Details", list every open question and wait for answers — do not invent defaults.
+- If follow-up commits are pushed to the PR after Phase 7 (e.g. to align with another branch or resolve a conflict), post an updated comment on the Trello card explaining what changed and why. Re-check whether any decisions recorded in the Phase 3 briefing or the existing Trello comment are now stale and correct them.
