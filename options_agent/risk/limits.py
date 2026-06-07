@@ -74,6 +74,22 @@ class Limits(BaseModel):
     sector data to universe symbols. The field exists so WP-4 can read it
     without a contract change when sector data becomes available.
 
+    event_blackout_days applies to both confirmed and estimated earnings dates
+    (SymbolSnapshot.days_to_earnings counts down from whichever date is
+    available). The gate condition is:
+        days_to_earnings is not None and days_to_earnings <= event_blackout_days
+    None (no known earnings) MUST pass — do not invert the null case.
+    This is an entry gate only: it does not force-close existing positions.
+    If a wider window for estimated dates is needed later, the clean extension
+    is a separate estimated_event_blackout_days field — do not build that now.
+
+    min_buying_power_pct gates pre-flight against PortfolioState.options_buying_power
+    (not buying_power — the options figure is the honest constraint for spreads).
+    Gate fires when: options_buying_power < min_buying_power_pct * account_equity.
+    Returns ShortCircuitReason.NO_BUYING_POWER so WP-7 can distinguish capital
+    starvation from other gate failures. Percentage form keeps this consistent
+    with all other equity-relative limits.
+
     limits_version must be stamped into every ContextSnapshot and
     JournalRecord so WP-7 analytics can correlate trade outcomes with the
     exact limits active at the time. Bump it whenever any threshold changes.
@@ -112,6 +128,12 @@ class Limits(BaseModel):
             }
         )
     )
+
+    # Event proximity (entry gate only — does not affect open positions)
+    event_blackout_days: int = Field(default=5, ge=0)
+
+    # Buying power floor (pre-flight gate; reads options_buying_power)
+    min_buying_power_pct: float = Field(default=0.10, gt=0, le=1.0)
 
     # Nested limits
     chain_filter: ChainFilterLimits = Field(default_factory=ChainFilterLimits)

@@ -74,6 +74,8 @@ def test_limits_defaults() -> None:
     assert limits.min_total_theta is None
     assert limits.max_underlying_concentration_pct == 0.20
     assert limits.max_sector_concentration_pct is None
+    assert limits.event_blackout_days == 5
+    assert limits.min_buying_power_pct == 0.10
     assert isinstance(limits.chain_filter, ChainFilterLimits)
     assert isinstance(limits.exit_plan_defaults, ExitPlanDefaults)
 
@@ -92,6 +94,22 @@ def test_limits_optional_fields_settable() -> None:
     limits = Limits(min_total_theta=0.5, max_sector_concentration_pct=0.30)
     assert limits.min_total_theta == 0.5
     assert limits.max_sector_concentration_pct == 0.30
+
+
+def test_limits_event_blackout_days_override() -> None:
+    limits = Limits(event_blackout_days=3)
+    assert limits.event_blackout_days == 3
+
+
+def test_limits_event_blackout_days_zero_allowed() -> None:
+    # Zero disables the blackout — valid for testing without excluding all names.
+    limits = Limits(event_blackout_days=0)
+    assert limits.event_blackout_days == 0
+
+
+def test_limits_min_buying_power_pct_override() -> None:
+    limits = Limits(min_buying_power_pct=0.05)
+    assert limits.min_buying_power_pct == 0.05
 
 
 # ---------------------------------------------------------------------------
