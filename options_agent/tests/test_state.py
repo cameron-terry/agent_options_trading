@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from options_agent.contracts import (
     ContextSnapshot,
@@ -22,7 +22,7 @@ from options_agent.contracts import (
 
 _LEG = Leg(right="put", side="sell", strike=450.0, expiration=date(2026, 7, 18))
 _EXIT_PLAN = ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21)
-_NOW = datetime(2026, 6, 7, 14, 30, tzinfo=timezone.utc)
+_NOW = datetime(2026, 6, 7, 14, 30, tzinfo=UTC)
 _TODAY = date(2026, 6, 7)
 
 

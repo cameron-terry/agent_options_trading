@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel
@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from options_agent.contracts.proposal import ExitPlan, Leg, TradeProposal
 
 
-class LegStatus(str, Enum):
+class LegStatus(StrEnum):
     OPEN = "OPEN"
     ASSIGNED = "ASSIGNED"
     EXERCISED = "EXERCISED"
@@ -15,7 +15,7 @@ class LegStatus(str, Enum):
     CLOSED = "CLOSED"
 
 
-class PositionStatus(str, Enum):
+class PositionStatus(StrEnum):
     PENDING_OPEN = "PENDING_OPEN"
     OPEN = "OPEN"
     PENDING_CLOSE = "PENDING_CLOSE"
@@ -24,13 +24,13 @@ class PositionStatus(str, Enum):
     ASSIGNED = "ASSIGNED"
 
 
-class OrderRole(str, Enum):
+class OrderRole(StrEnum):
     OPEN = "OPEN"
     CLOSE = "CLOSE"
     ROLL = "ROLL"
 
 
-class OrderStatus(str, Enum):
+class OrderStatus(StrEnum):
     PENDING_SUBMIT = "PENDING_SUBMIT"
     WORKING = "WORKING"
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
@@ -41,7 +41,7 @@ class OrderStatus(str, Enum):
 
 
 class PositionLeg(BaseModel):
-    """One leg of a held multi-leg position, wrapping the contract spec with fill details."""
+    """One leg of a held position, wrapping the contract spec with fill details."""
 
     leg: Leg
     filled_qty: int
@@ -50,7 +50,7 @@ class PositionLeg(BaseModel):
 
 
 class LegFill(BaseModel):
-    """Per-leg fill detail as reported by the broker — source of truth for slippage analysis."""
+    """Per-leg fill detail from the broker — source of truth for slippage analysis."""
 
     leg: Leg
     filled_qty: int
@@ -59,16 +59,18 @@ class LegFill(BaseModel):
 
 class Position(BaseModel):
     """
-    One strategy-level position record (one iron condor = one Position regardless of leg count).
+    One strategy-level position record (one iron condor = one Position).
 
     Lifecycle of orders: Order.position_id links many Orders to this Position.
     opening_order_id is an immutable convenience pointer set once at open.
     broker_order_id lives only on Order — never duplicated here.
 
-    entry_net_amount sign convention: positive = net debit paid, negative = net credit received.
-    current_mark and unrealized_pnl are cached snapshots from the last reconcile; not authoritative.
-    nearest_expiration is denormalised for cheap DTE computation by the monitor (WP-5).
-    est_max_loss / est_max_profit are carried from the proposal for use by exit rules.
+    entry_net_amount sign convention:
+        positive = net debit paid, negative = net credit received.
+    current_mark and unrealized_pnl are cached snapshots from the last
+    reconcile; not authoritative.
+    nearest_expiration is denormalised for cheap DTE computation by WP-5.
+    est_max_loss / est_max_profit are carried from the proposal for exit rules.
     """
 
     id: str
@@ -93,12 +95,17 @@ class Position(BaseModel):
 
 class Order(BaseModel):
     """
-    Broker-facing order entity. position_id is the FK linking this Order to its Position.
-    role distinguishes opening, closing, and roll orders — use this instead of a closing_order_id
-    on Position, since a position may have multiple closing/roll orders (partial closes, re-prices).
+    Broker-facing order entity.
 
-    broker_status_raw preserves Alpaca's exact status string so mapping bugs are recoverable.
-    legs_filled is the per-leg source of truth; net_fill_price and filled_qty are derived.
+    position_id is the FK linking this Order to its Position.
+    role (OPEN/CLOSE/ROLL) distinguishes order purpose — use this instead of
+    a closing_order_id on Position, since a position may have multiple
+    closing/roll orders (partial closes, re-prices).
+
+    broker_status_raw preserves Alpaca's exact status string alongside the
+    canonical enum so mapping bugs remain recoverable.
+    legs_filled is the per-leg source of truth; net_fill_price and filled_qty
+    are derived.
     """
 
     id: str
@@ -116,18 +123,19 @@ class Order(BaseModel):
 
 class Decision(BaseModel):
     """
-    Embedded value type capturing the reasoning outcome of one entry cycle.
+    Embedded value type for the reasoning outcome of one entry cycle.
+
     Not persisted as a standalone entity — lives inside JournalRecord (WP-0.4).
-    Covers NO_ACTION and REJECTED cycles (proposal is None for pure NO_ACTION cycles).
+    Covers NO_ACTION and REJECTED cycles (proposal is None for NO_ACTION).
 
     validation_result and sizing_result are typed Any until WP-0.6 defines
-    ValidationResult and SizingResult; WP-0.4 will tighten these when it imports both.
+    ValidationResult and SizingResult; WP-0.4 will tighten these on import.
     """
 
     proposal: TradeProposal | None
-    # Typed Any pending WP-0.6 (ValidationResult); WP-0.4 will import the real type.
+    # Typed Any pending WP-0.6 (ValidationResult).
     validation_result: Any | None
-    # Typed Any pending WP-0.6 (SizingResult); WP-0.4 will import the real type.
+    # Typed Any pending WP-0.6 (SizingResult).
     sizing_result: Any | None
     action_taken: str
 
@@ -135,8 +143,9 @@ class Decision(BaseModel):
 class ContextSnapshot(BaseModel):
     """
     The assembled, post-filter context bundle the agent actually saw.
-    Stored inline (not as a hash+pointer) for self-contained journal queryability.
-    context_hash is stored alongside to support reproducibility queries in WP-7
+
+    Stored inline (not hash+pointer) for self-contained journal queryability.
+    context_hash is stored alongside to support WP-7 reproducibility queries
     (e.g. 'did identical context produce different proposals?').
     model_id and prompt_version enable honest before/after prompt analysis.
     """
