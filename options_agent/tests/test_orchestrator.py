@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from options_agent.config import Config
 from options_agent.contracts import (
@@ -76,6 +77,7 @@ def test_short_circuit_reason_all_values_present() -> None:
 
 def test_cycle_stage_all_values_present() -> None:
     expected = {
+        # Entry cycle
         CycleStage.RECONCILE,
         CycleStage.GATES,
         CycleStage.ASSEMBLE,
@@ -84,6 +86,10 @@ def test_cycle_stage_all_values_present() -> None:
         CycleStage.SIZE,
         CycleStage.EXECUTE,
         CycleStage.JOURNAL,
+        # Monitor cycle
+        CycleStage.STOP_EVAL,
+        CycleStage.PROFIT_EVAL,
+        CycleStage.TIME_EVAL,
     }
     assert expected == set(CycleStage)
 
@@ -180,6 +186,15 @@ def test_cycle_result_round_trip() -> None:
         short_circuit_reason=ShortCircuitReason.MARKET_CLOSED,
     )
     assert CycleResult.model_validate(r.model_dump()) == r
+
+
+def test_cycle_result_invariant_enforced() -> None:
+    with pytest.raises(ValidationError, match="NO_ACTION_GATED"):
+        CycleResult(
+            cycle_id="bad-001",
+            action_taken=ActionTaken.OPENED,
+            short_circuit_reason=ShortCircuitReason.MARKET_CLOSED,
+        )
 
 
 # ---------------------------------------------------------------------------

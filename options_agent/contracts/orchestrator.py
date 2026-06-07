@@ -1,12 +1,10 @@
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from options_agent.contracts.proposal import TradeProposal
 from options_agent.contracts.results import SizingResult, ValidationResult
 from options_agent.contracts.state import ActionTaken
-
-__all__ = ["ActionTaken"]  # re-exported; canonical definition lives in state.py
 
 
 class ShortCircuitReason(StrEnum):
@@ -34,13 +32,20 @@ class ShortCircuitReason(StrEnum):
 
 
 class CycleStage(StrEnum):
-    """Stage of the entry cycle where a CycleError occurred.
+    """Stage at which a CycleError occurred — shared by entry and monitor cycles.
 
-    Used by WP-7 to cluster failures: EXECUTE failures point to broker
-    problems; REASON failures point to model problems; JOURNAL failures
-    are the most dangerous (cycle may have acted without a record).
+    Entry-cycle stages (RECONCILE → JOURNAL) map to the 9-step flow in
+    run_entry_cycle(). WP-7 can cluster entry failures by stage: EXECUTE
+    failures point to broker problems; REASON to model problems; JOURNAL
+    to the most dangerous case (cycle may have acted without a record).
+
+    Monitor-cycle stages (STOP_EVAL, PROFIT_EVAL, TIME_EVAL) let WP-5
+    log per-position failures with a meaningful stage rather than a
+    misfit entry-cycle value. WP-7 uses these to distinguish a stop-loss
+    eval failure from a profit-target eval failure in the monitor loop.
     """
 
+    # Entry cycle
     RECONCILE = "RECONCILE"
     GATES = "GATES"
     ASSEMBLE = "ASSEMBLE"
@@ -49,6 +54,11 @@ class CycleStage(StrEnum):
     SIZE = "SIZE"
     EXECUTE = "EXECUTE"
     JOURNAL = "JOURNAL"
+
+    # Monitor cycle
+    STOP_EVAL = "STOP_EVAL"
+    PROFIT_EVAL = "PROFIT_EVAL"
+    TIME_EVAL = "TIME_EVAL"
 
 
 class CycleError(BaseModel):
@@ -87,6 +97,18 @@ class CycleResult(BaseModel):
     sizing: SizingResult | None = None
     error: CycleError | None = None
     journal_record_id: str | None = None
+
+    @model_validator(mode="after")
+    def _short_circuit_implies_gated(self) -> "CycleResult":
+        if (
+            self.short_circuit_reason is not None
+            and self.action_taken != ActionTaken.NO_ACTION_GATED
+        ):
+            raise ValueError(
+                "short_circuit_reason is set but action_taken is "
+                f"{self.action_taken!r} — must be NO_ACTION_GATED"
+            )
+        return self
 
 
 class MonitorResult(BaseModel):

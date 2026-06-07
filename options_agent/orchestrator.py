@@ -1,11 +1,10 @@
 from options_agent.config import Config
 from options_agent.contracts.orchestrator import (
-    ActionTaken,
     CycleResult,
     MonitorResult,
     ShortCircuitReason,
 )
-from options_agent.contracts.state import Position
+from options_agent.contracts.state import ActionTaken, Position
 
 
 def run_entry_cycle(config: Config) -> CycleResult:
