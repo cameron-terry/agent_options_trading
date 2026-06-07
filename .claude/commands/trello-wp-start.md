@@ -66,24 +66,37 @@ Only begin after the user confirms (or after answering any open questions):
 
 4. Notify and iterate with user as necessary until user is satisfied. Do not ask if the user is satisfied, they will notify.
 
-### Phase 5 — Wait for explicit user approval
+### Phase 5 — Open a PR
 
-**Do not touch Trello until the user explicitly approves.** After implementation the user must test the changes themselves. Your role here is to wait.
+Once implementation is stable and all local CI gates pass, commit the work and open a pull request:
 
-When the user signals approval (e.g. "looks good", "ship it", "move the card"), proceed to Phase 6. Any other response — questions, change requests, bug reports — means Phase 4 is still active; address the feedback and wait again.
+1. Stage and commit all changes with a message that summarises the WP scope and any non-obvious decisions made during implementation (toolchain choices, schema resolutions, dependency assumptions, etc.).
 
-### Phase 6 — Update Trello
+2. Push the branch and create a PR using `gh pr create`. The PR body should include:
+   - **Summary** — bullet points describing what was built
+   - **Decisions resolved** — a table of any design/toolchain choices made during this WP (the "why" future readers need), drawn from the Phase 3 briefing and any follow-up discussion
+   - **Test plan** — a checklist the reviewer can run manually to verify the acceptance criteria
 
-Only after explicit user approval in Phase 5:
+3. Post the PR URL to the user and wait for them to review and test.
 
-5. Post a comment on the Trello card summarising what was done and the branch name, using `mcp__trello__trello_add_comment`.
+### Phase 6 — Wait for explicit user approval
 
-6. Move the card to "In Review" using `mcp__trello__move_card`.
+**Do not touch Trello until the user explicitly approves.** The user must test the changes and review the PR themselves.
+
+When the user signals approval (e.g. "looks good", "ship it", "move the card"), proceed to Phase 7. Any other response — questions, change requests, bug reports — means Phase 4 is still active; address the feedback, update the PR, and wait again.
+
+### Phase 7 — Update Trello
+
+Only after explicit user approval in Phase 6:
+
+1. Post a comment on the Trello card summarising what was done and linking the PR, using `mcp__trello__trello_add_comment`.
+
+2. Move the card to "In Review" using `mcp__trello__move_card`.
 
 ## Rules
 
 - Never start implementation without user confirmation in Phase 3.
-- Never update Trello (comment or card move) without explicit user approval in Phase 5.
+- Never update Trello (comment or card move) without explicit user approval in Phase 6.
 - Never exceed the card's stated scope — if you discover necessary work outside the card, flag it rather than doing it silently.
 - If a dependency card is not "Done", implement against a typed stub and document the assumption in a code comment.
 - If the card is in "Needs Reqs" or "Needs Implementation Details", list every open question and wait for answers — do not invent defaults.
