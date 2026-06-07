@@ -1,5 +1,7 @@
 from datetime import UTC, date, datetime
 
+import pytest
+
 from options_agent.contracts import (
     ChainFilterParams,
     EarningsEvent,
@@ -211,6 +213,15 @@ def test_option_contract_round_trip() -> None:
     assert OptionContract.model_validate(_CONTRACT.model_dump()) == _CONTRACT
 
 
+def test_option_contract_invalid_right_rejected() -> None:
+    from pydantic import ValidationError
+
+    bad: dict = _CONTRACT.model_dump()
+    bad["right"] = "forward"  # only "call" or "put" are valid
+    with pytest.raises(ValidationError):
+        OptionContract.model_validate(bad)
+
+
 # ---------------------------------------------------------------------------
 # FilteredChain
 # ---------------------------------------------------------------------------
@@ -303,6 +314,12 @@ def test_portfolio_state_round_trip() -> None:
 def test_portfolio_state_round_trip_json() -> None:
     ps = _make_portfolio_state()
     assert PortfolioState.model_validate_json(ps.model_dump_json()) == ps
+
+
+def test_portfolio_state_empty_positions() -> None:
+    ps = _make_portfolio_state(positions=[])
+    assert ps.positions == []
+    assert ps.account_equity == 50_000.0
 
 
 # ---------------------------------------------------------------------------
