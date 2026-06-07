@@ -74,6 +74,8 @@ def test_limits_defaults() -> None:
     assert limits.min_total_theta is None
     assert limits.max_underlying_concentration_pct == 0.20
     assert limits.max_sector_concentration_pct is None
+    assert limits.event_blackout_days == 5
+    assert limits.min_buying_power_pct == 0.10
     assert isinstance(limits.chain_filter, ChainFilterLimits)
     assert isinstance(limits.exit_plan_defaults, ExitPlanDefaults)
 
@@ -92,6 +94,22 @@ def test_limits_optional_fields_settable() -> None:
     limits = Limits(min_total_theta=0.5, max_sector_concentration_pct=0.30)
     assert limits.min_total_theta == 0.5
     assert limits.max_sector_concentration_pct == 0.30
+
+
+def test_limits_event_blackout_days_override() -> None:
+    limits = Limits(event_blackout_days=3)
+    assert limits.event_blackout_days == 3
+
+
+def test_limits_event_blackout_days_zero_allowed() -> None:
+    # Zero disables the blackout — valid for testing without excluding all names.
+    limits = Limits(event_blackout_days=0)
+    assert limits.event_blackout_days == 0
+
+
+def test_limits_min_buying_power_pct_override() -> None:
+    limits = Limits(min_buying_power_pct=0.05)
+    assert limits.min_buying_power_pct == 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +149,8 @@ max_open_positions = 5
 max_dollar_delta_pct = 0.20
 max_dollar_vega_pct = 0.025
 max_underlying_concentration_pct = 0.20
+event_blackout_days = 7
+min_buying_power_pct = 0.15
 
 [limits.chain_filter]
 min_open_interest = 500
@@ -155,6 +175,8 @@ time_stop_dte = 21
     assert config.db_url == "sqlite:///test.db"
     assert config.limits.limits_version == "0.1.0"
     assert config.limits.max_loss_per_trade_pct == 0.01
+    assert config.limits.event_blackout_days == 7
+    assert config.limits.min_buying_power_pct == 0.15
     assert config.limits.chain_filter.min_dte == 20
     assert config.limits.chain_filter.max_dte == 45
     assert config.limits.exit_plan_defaults.profit_target_pct == 0.50
