@@ -66,15 +66,24 @@ Only begin after the user confirms (or after answering any open questions):
 
 4. Notify and iterate with user as necessary until user is satisfied. Do not ask if the user is satisfied, they will notify.
 
-### Phase 5 — Update Trello
+### Phase 5 — Wait for explicit user approval
 
-5. When done, post a comment on the Trello card summarising what was done and the branch name, using `mcp__trello__trello_add_comment`.
+**Do not touch Trello until the user explicitly approves.** After implementation the user must test the changes themselves. Your role here is to wait.
+
+When the user signals approval (e.g. "looks good", "ship it", "move the card"), proceed to Phase 6. Any other response — questions, change requests, bug reports — means Phase 4 is still active; address the feedback and wait again.
+
+### Phase 6 — Update Trello
+
+Only after explicit user approval in Phase 5:
+
+5. Post a comment on the Trello card summarising what was done and the branch name, using `mcp__trello__trello_add_comment`.
 
 6. Move the card to "In Review" using `mcp__trello__move_card`.
 
 ## Rules
 
 - Never start implementation without user confirmation in Phase 3.
+- Never update Trello (comment or card move) without explicit user approval in Phase 5.
 - Never exceed the card's stated scope — if you discover necessary work outside the card, flag it rather than doing it silently.
 - If a dependency card is not "Done", implement against a typed stub and document the assumption in a code comment.
 - If the card is in "Needs Reqs" or "Needs Implementation Details", list every open question and wait for answers — do not invent defaults.
