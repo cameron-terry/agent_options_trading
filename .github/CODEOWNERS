@@ -1,0 +1,7 @@
+# CODEOWNERS — Agentic Trading System
+#
+# Any PR touching options_agent/contracts/ requires lead sign-off.
+# See docs/CONTRACT_CHANGE_POLICY.md for the full change process.
+
+/options_agent/contracts/ @cameron-terry
+/docs/CONTRACT_CHANGE_POLICY.md @cameron-terry
