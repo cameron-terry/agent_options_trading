@@ -8,6 +8,34 @@ from options_agent.contracts.proposal import ExitPlan, Leg, TradeProposal
 from options_agent.contracts.results import SizingResult, ValidationResult
 
 
+class ActionTaken(StrEnum):
+    """Outcome of one entry cycle — primary grouping key for all WP-7 analytics.
+
+    Enum values are used directly as DB/JSON strings; never pass a free str
+    where ActionTaken is expected (same discipline as ValidationRuleId).
+
+    OPENED          — proposal passed validation and sizing; order submitted.
+    CLOSED          — cycle explicitly closed an existing position.
+    ROLLED          — cycle rolled a position to new strikes or expiry.
+    NO_ACTION_GATED — short-circuited before the LLM call (kill-switch, blackout,
+                      buying power, max-positions gate).
+    NO_ACTION_AGENT — LLM was called; agent returned action=NO_ACTION.
+    SIZED_TO_ZERO   — proposal passed validation but sizing returned 0 contracts;
+                      not a rejection and not an agent no-action.
+    REJECTED        — proposal failed deterministic validation (ERROR rules fired).
+    EXECUTION_FAILED — passed validation and sizing, but broker rejected the order.
+    """
+
+    OPENED = "OPENED"
+    CLOSED = "CLOSED"
+    ROLLED = "ROLLED"
+    NO_ACTION_GATED = "NO_ACTION_GATED"
+    NO_ACTION_AGENT = "NO_ACTION_AGENT"
+    SIZED_TO_ZERO = "SIZED_TO_ZERO"
+    REJECTED = "REJECTED"
+    EXECUTION_FAILED = "EXECUTION_FAILED"
+
+
 class LegStatus(StrEnum):
     OPEN = "OPEN"
     ASSIGNED = "ASSIGNED"
@@ -133,7 +161,7 @@ class Decision(BaseModel):
     proposal: TradeProposal | None
     validation_result: ValidationResult | None
     sizing_result: SizingResult | None
-    action_taken: str
+    action_taken: ActionTaken
 
 
 class ContextSnapshot(BaseModel):

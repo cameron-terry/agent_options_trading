@@ -1,6 +1,7 @@
 from datetime import UTC, date, datetime
 
 from options_agent.contracts import (
+    ActionTaken,
     ContextSnapshot,
     Decision,
     ExitPlan,
@@ -116,7 +117,7 @@ def _make_decision(**overrides: object) -> Decision:
         "proposal": _make_proposal(),
         "validation_result": None,
         "sizing_result": None,
-        "action_taken": "OPEN",
+        "action_taken": ActionTaken.OPENED,
     }
     defaults.update(overrides)
     return Decision(**defaults)
@@ -332,15 +333,15 @@ def test_order_no_broker_order_id_on_position() -> None:
 def test_decision_construction() -> None:
     d = _make_decision()
     assert d.proposal is not None
-    assert d.action_taken == "OPEN"
+    assert d.action_taken == ActionTaken.OPENED
     assert d.validation_result is None
     assert d.sizing_result is None
 
 
 def test_decision_no_action() -> None:
-    d = _make_decision(proposal=None, action_taken="NO_ACTION")
+    d = _make_decision(proposal=None, action_taken=ActionTaken.NO_ACTION_AGENT)
     assert d.proposal is None
-    assert d.action_taken == "NO_ACTION"
+    assert d.action_taken == ActionTaken.NO_ACTION_AGENT
 
 
 def test_decision_round_trip() -> None:
