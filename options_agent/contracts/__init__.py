@@ -16,6 +16,13 @@ from options_agent.contracts.journal import (
     OutcomeEventType,
     OutcomeRecord,
 )
+from options_agent.contracts.orchestrator import (
+    CycleError,
+    CycleResult,
+    CycleStage,
+    MonitorResult,
+    ShortCircuitReason,
+)
 from options_agent.contracts.proposal import ExitPlan, Leg, TradeProposal
 from options_agent.contracts.results import (
     RejectionReason,
@@ -79,6 +86,12 @@ __all__ = [
     "JournalRecord",
     "OutcomeEventType",
     "OutcomeRecord",
+    # orchestrator types
+    "CycleError",
+    "CycleResult",
+    "CycleStage",
+    "MonitorResult",
+    "ShortCircuitReason",
     # limits
     "ChainFilterLimits",
     "ExitPlanDefaults",
