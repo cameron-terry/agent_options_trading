@@ -66,9 +66,25 @@ Only begin after the user confirms (or after answering any open questions):
 
 4. Notify and iterate with user as necessary until user is satisfied. Do not ask if the user is satisfied, they will notify.
 
-### Phase 5 — Open a PR
+### Phase 5 — Validate CI locally
 
-Once implementation is stable and all local CI gates pass, commit the work and open a pull request:
+Before opening a PR, reproduce the full CI pipeline locally in this exact order:
+
+```bash
+uv run ruff check .          # lint
+uv run ruff format --check . # format
+uv run pyright               # type check
+uv run pytest                # tests
+```
+
+**All four gates must be green.** If any fail:
+- Fix the failures (do not skip or suppress checks).
+- Re-run the full sequence from the top until all four pass.
+- Do not proceed to Phase 6 while any gate is red.
+
+### Phase 6 — Open a PR
+
+Once all CI gates are green, commit the work and open a pull request:
 
 1. Stage and commit all changes with a message that summarises the WP scope and any non-obvious decisions made during implementation (toolchain choices, schema resolutions, dependency assumptions, etc.).
 
@@ -79,15 +95,15 @@ Once implementation is stable and all local CI gates pass, commit the work and o
 
 3. Post the PR URL to the user and wait for them to review and test.
 
-### Phase 6 — Wait for explicit user approval
+### Phase 7 — Wait for explicit user approval
 
 **Do not touch Trello until the user explicitly approves.** The user must test the changes and review the PR themselves.
 
-When the user signals approval (e.g. "looks good", "ship it", "move the card"), proceed to Phase 7. Any other response — questions, change requests, bug reports — means Phase 4 is still active; address the feedback, update the PR, and wait again.
+When the user signals approval (e.g. "looks good", "ship it", "move the card"), proceed to Phase 8. Any other response — questions, change requests, bug reports — means Phase 4 is still active; address the feedback, re-run CI (Phase 5), update the PR, and wait again.
 
-### Phase 7 — Update Trello
+### Phase 8 — Update Trello
 
-Only after explicit user approval in Phase 6:
+Only after explicit user approval in Phase 7:
 
 1. Post a comment on the Trello card summarising what was done and linking the PR, using `mcp__trello__trello_add_comment`.
 
@@ -96,7 +112,8 @@ Only after explicit user approval in Phase 6:
 ## Rules
 
 - Never start implementation without user confirmation in Phase 3.
-- Never update Trello (comment or card move) without explicit user approval in Phase 6.
+- Never open a PR (Phase 6) until all four CI gates pass (Phase 5): ruff check, ruff format, pyright, pytest.
+- Never update Trello (comment or card move) without explicit user approval in Phase 7.
 - Never exceed the card's stated scope — if you discover necessary work outside the card, flag it rather than doing it silently.
 - If a dependency card is not "Done", implement against a typed stub and document the assumption in a code comment.
 - If the card is in "Needs Reqs" or "Needs Implementation Details", list every open question and wait for answers — do not invent defaults.
