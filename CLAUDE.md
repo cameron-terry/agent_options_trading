@@ -10,6 +10,7 @@ Project-specific slash commands live in `.claude/commands/`. Each `.md` file is 
 | `/trello-wp-review` | `.claude/commands/trello-wp-review.md` | Pick the highest-priority "In Review" Trello ticket and deliver a deep code review, including running author-stated verification steps |
 | `/trello-wp-start` | `.claude/commands/trello-wp-start.md` | Fetch a Trello ticket and begin implementation |
 | `/trello-wp-status` | `.claude/commands/trello-wp-status.md` | Summarize the status of a work package |
+| `/trello-wp-evaluate` | `.claude/commands/trello-wp-evaluate.md` | Evaluate completed/in-review WP work for vision drift and unaddressed cross-WP concerns |
 
 ## Git workflow
 
