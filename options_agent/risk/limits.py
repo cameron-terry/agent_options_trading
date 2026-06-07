@@ -94,6 +94,25 @@ class Limits(BaseModel):
     max_underlying_concentration_pct: float = Field(default=0.20, gt=0, le=1.0)
     max_sector_concentration_pct: float | None = Field(default=None)
 
+    # Allowed strategy names — proposals with strategy not in this set are
+    # rejected by validate_structural() with UNKNOWN_STRATEGY. The playbook in
+    # agent/prompts.py (WP-6.3) must import these same names so it is
+    # impossible for the agent to propose a strategy the validator will reject.
+    allowed_strategies: frozenset[str] = Field(
+        default=frozenset(
+            {
+                "bull_put_spread",
+                "bear_call_spread",
+                "bull_call_spread",
+                "bear_put_spread",
+                "iron_condor",
+                "iron_butterfly",
+                "covered_call",
+                "cash_secured_put",
+            }
+        )
+    )
+
     # Nested limits
     chain_filter: ChainFilterLimits = Field(default_factory=ChainFilterLimits)
     exit_plan_defaults: ExitPlanDefaults = Field(default_factory=ExitPlanDefaults)
