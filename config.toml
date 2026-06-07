@@ -1,0 +1,48 @@
+# options_agent operational configuration
+# Secrets (ALPACA_API_KEY, ALPACA_SECRET_KEY) go in environment variables — not here.
+# Load with: Config.from_toml(Path("config.toml"))
+
+universe_file = "universe.txt"
+timezone = "America/New_York"
+entry_times = ["10:30", "13:00", "15:00"]
+blackout_minutes = 30
+db_url = "sqlite:///options_agent.db"
+alpaca_paper = true
+
+[limits]
+# Bump limits_version whenever any threshold changes so WP-7 analytics can
+# correlate trade outcomes with the exact limits active at the time.
+limits_version = "0.1.0"
+
+# Risk / sizing
+max_loss_per_trade_pct = 0.01        # 1% of equity hard ceiling per trade
+max_open_positions = 5
+
+# Greek bands expressed as fractions of account equity.
+# max_dollar_delta_pct: |net dollar-delta| ≤ pct × equity
+# max_dollar_vega_pct:  |net dollar-vega per 1 vol pt| ≤ pct × equity
+max_dollar_delta_pct = 0.20
+max_dollar_vega_pct = 0.025
+
+# Concentration caps
+max_underlying_concentration_pct = 0.20
+# max_sector_concentration_pct disabled until WP-3 attaches sector data
+# max_sector_concentration_pct = 0.30
+
+# min_total_theta left unconstrained (omit = None) so long-premium strategies
+# (debit spreads in low-IV regimes) are not silently banned.
+# min_total_theta = 0.0
+
+[limits.chain_filter]
+min_open_interest = 500
+max_spread_pct_of_mid = 0.10   # primary rule: spread ≤ 10% of mid
+max_spread_abs_floor = 0.05    # also pass if spread ≤ $0.05 (prevents false exclusions)
+min_dte = 20
+max_dte = 45
+min_abs_delta = 0.15
+max_abs_delta = 0.45
+
+[limits.exit_plan_defaults]
+profit_target_pct = 0.50   # close at 50% of max profit
+stop_loss_mult = 2.0       # stop at loss = 2× abs(entry_net_amount)
+time_stop_dte = 21         # close at 21 DTE regardless of P&L

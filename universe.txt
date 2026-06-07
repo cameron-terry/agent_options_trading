@@ -1,0 +1,5 @@
+SPY
+QQQ
+IWM
+AAPL
+MSFT
