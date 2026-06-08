@@ -34,6 +34,9 @@ select = ["E", "F", "I", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["options_agent/tests"]
+markers = [
+    "integration: live-network tests; skipped when ALPACA_API_KEY is absent",
+]
 
 [tool.pyright]
 pythonVersion = "3.12"
