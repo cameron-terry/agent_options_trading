@@ -33,7 +33,10 @@ class ValidationRuleId(StrEnum):
     EVENT_BLACKOUT = "EVENT_BLACKOUT"
     BUYING_POWER = "BUYING_POWER"
     DUPLICATE_POSITION = "DUPLICATE_POSITION"
+    CONFLICTING_POSITION = "CONFLICTING_POSITION"
     KILL_SWITCH = "KILL_SWITCH"
+    # Emitted when required market/event data is absent; validator fails closed.
+    EVENT_DATA_MISSING = "EVENT_DATA_MISSING"
 
     # Advisory rules — WARNING severity (non-blocking)
     LOW_CONVICTION = "LOW_CONVICTION"

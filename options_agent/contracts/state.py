@@ -8,6 +8,19 @@ from options_agent.contracts.proposal import ExitPlan, Leg, TradeProposal
 from options_agent.contracts.results import SizingResult, ValidationResult
 
 
+class KillSwitchState(StrEnum):
+    """System-wide kill-switch flag written by WP-7 and read at the top of every cycle.
+
+    NONE    — system operating normally.
+    HALT    — no new entries; monitor exits continue.
+    FLATTEN — close all open positions immediately; no new entries.
+    """
+
+    NONE = "NONE"
+    HALT = "HALT"
+    FLATTEN = "FLATTEN"
+
+
 class ActionTaken(StrEnum):
     """Outcome of one entry cycle — primary grouping key for all WP-7 analytics.
 

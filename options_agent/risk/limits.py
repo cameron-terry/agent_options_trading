@@ -53,6 +53,53 @@ class ExitPlanDefaults(BaseModel):
     time_stop_dte: int = Field(default=21, ge=0)
 
 
+class ExitPlanBounds(BaseModel):
+    """Policy bounds checked by the validator against a proposal's exit_plan.
+
+    Distinct from ExitPlanDefaults, which answers "what's a sensible default?"
+    These answer "what does policy allow?" — a separately-tunable question.
+    All bounds are inclusive. Bump limits_version on any change.
+
+    stop_loss_mult is applied against entry_net_amount (signed: positive for
+    debits, negative for credits) per the WP-0.3 convention. Bounds here apply
+    to the raw multiplier regardless of credit/debit direction.
+    """
+
+    profit_target_pct_min: float = Field(default=0.25, gt=0, le=1.0)
+    profit_target_pct_max: float = Field(default=1.0, gt=0, le=1.0)
+    stop_loss_mult_min: float = Field(default=1.5, gt=0)
+    stop_loss_mult_max: float = Field(default=5.0, gt=0)
+    time_stop_dte_min: int = Field(default=7, ge=0)
+    time_stop_dte_max: int = Field(default=45, ge=0)
+
+    @model_validator(mode="after")
+    def _profit_target_range_valid(self) -> "ExitPlanBounds":
+        if self.profit_target_pct_min >= self.profit_target_pct_max:
+            raise ValueError(
+                f"profit_target_pct_min ({self.profit_target_pct_min}) must be"
+                f" < profit_target_pct_max ({self.profit_target_pct_max})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _stop_loss_mult_range_valid(self) -> "ExitPlanBounds":
+        if self.stop_loss_mult_min >= self.stop_loss_mult_max:
+            raise ValueError(
+                f"stop_loss_mult_min ({self.stop_loss_mult_min}) must be"
+                f" < stop_loss_mult_max ({self.stop_loss_mult_max})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _time_stop_dte_range_valid(self) -> "ExitPlanBounds":
+        if self.time_stop_dte_min >= self.time_stop_dte_max:
+            raise ValueError(
+                f"time_stop_dte_min ({self.time_stop_dte_min}) must be"
+                f" < time_stop_dte_max ({self.time_stop_dte_max})"
+            )
+        return self
+
+
 class Limits(BaseModel):
     """All numeric risk thresholds and filter parameters in one place.
 
@@ -135,6 +182,17 @@ class Limits(BaseModel):
     # Buying power floor (pre-flight gate; reads options_buying_power)
     min_buying_power_pct: float = Field(default=0.10, gt=0, le=1.0)
 
+    # Duplicate detection: positions on same underlying with same strategy
+    # whose nearest expiration is within this many calendar days of the proposal's
+    # earliest leg expiration are considered duplicates.
+    expiration_overlap_days: int = Field(default=5, ge=0)
+
+    # Conflict detection: when |proposal.net_delta| exceeds this tolerance,
+    # check for existing positions with opposing delta direction on same underlying.
+    # Uses strategy-family heuristic until Position carries live delta (WP-0 gap).
+    opposing_delta_tolerance: float = Field(default=0.05, ge=0)
+
     # Nested limits
     chain_filter: ChainFilterLimits = Field(default_factory=ChainFilterLimits)
     exit_plan_defaults: ExitPlanDefaults = Field(default_factory=ExitPlanDefaults)
+    exit_plan_bounds: ExitPlanBounds = Field(default_factory=ExitPlanBounds)

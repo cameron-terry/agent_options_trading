@@ -1,7 +1,7 @@
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class Leg(BaseModel):
@@ -13,9 +13,10 @@ class Leg(BaseModel):
 
 
 class ExitPlan(BaseModel):
-    profit_target_pct: float
-    stop_loss_mult: float
-    time_stop_dte: int
+    # Structural invariants only — policy bounds live in Limits.exit_plan_bounds.
+    profit_target_pct: float = Field(gt=0, le=1.0)
+    stop_loss_mult: float = Field(gt=0)
+    time_stop_dte: int = Field(ge=0)
 
 
 class TradeProposal(BaseModel):
