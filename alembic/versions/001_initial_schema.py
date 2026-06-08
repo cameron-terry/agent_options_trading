@@ -98,6 +98,7 @@ def upgrade() -> None:
         sa.Column("realized_pnl", sa.Float(), nullable=False),
         sa.Column("fill_price", sa.Float(), nullable=True),
         sa.Column("closing_order_id", sa.String(), nullable=True),
+        sa.ForeignKeyConstraint(["position_id"], ["positions.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(

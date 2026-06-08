@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from unittest.mock import MagicMock, patch
 
 import pytest
 from alembic.config import Config
@@ -86,9 +87,7 @@ _OUTCOME_COLS = {
 
 
 def _alembic_cfg(db_path: str) -> Config:
-    project_root = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..")
-    )
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     ini = os.path.join(project_root, "alembic.ini")
     cfg = Config(ini)
     cfg.set_main_option("script_location", os.path.join(project_root, "alembic"))
@@ -163,6 +162,15 @@ def test_orders_foreign_key_to_positions(mem_engine):
     )
 
 
+def test_outcome_records_foreign_key_to_positions(mem_engine):
+    fks = inspect(mem_engine).get_foreign_keys("outcome_records")
+    assert any(
+        fk["referred_table"] == "positions"
+        and fk["constrained_columns"] == ["position_id"]
+        for fk in fks
+    )
+
+
 # ---------------------------------------------------------------------------
 # Alembic migration: upgrade → verify → downgrade → verify
 # ---------------------------------------------------------------------------
@@ -197,26 +205,54 @@ def test_migration_downgrade_removes_all_tables():
         os.unlink(db_path)
 
 
-def test_migration_schema_matches_metadata():
-    """Columns after migration must match what metadata.create_all would produce."""
+def test_migration_columns_match_metadata():
+    """Migration-created schema must have identical columns to metadata.create_all.
+
+    Compares both paths directly so drift between db.py and
+    001_initial_schema.py is caught without a hardcoded intermediary.
+    """
+    # metadata path
+    meta_eng = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}
+    )
+    metadata.create_all(meta_eng)
+    meta_cols = {
+        tbl: {c["name"] for c in inspect(meta_eng).get_columns(tbl)}
+        for tbl in _ALL_TABLES
+    }
+    meta_eng.dispose()
+
+    # migration path
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
     try:
         command.upgrade(_alembic_cfg(db_path), "head")
-        eng = create_engine(f"sqlite:///{db_path}")
-        insp = inspect(eng)
-        assert {c["name"] for c in insp.get_columns("positions")} == _POSITIONS_COLS
-        assert {c["name"] for c in insp.get_columns("orders")} == _ORDERS_COLS
-        assert {c["name"] for c in insp.get_columns("journal_records")} == _JOURNAL_COLS
-        assert {c["name"] for c in insp.get_columns("outcome_records")} == _OUTCOME_COLS
-        eng.dispose()
+        mig_eng = create_engine(f"sqlite:///{db_path}")
+        mig_cols = {
+            tbl: {c["name"] for c in inspect(mig_eng).get_columns(tbl)}
+            for tbl in _ALL_TABLES
+        }
+        mig_eng.dispose()
     finally:
         os.unlink(db_path)
+
+    assert meta_cols == mig_cols
 
 
 # ---------------------------------------------------------------------------
 # build_engine + get_connection
 # ---------------------------------------------------------------------------
+
+
+_POS_INSERT = (
+    "INSERT INTO positions (id, underlying, strategy, legs, quantity, "
+    "entry_net_amount, current_mark, marked_at, unrealized_pnl, "
+    "exit_plan, status, opened_at, nearest_expiration, "
+    "est_max_loss, est_max_profit, opening_order_id) "
+    "VALUES ('p1', 'SPY', 'bull_put_spread', '[]', 1, -100.0, -80.0, "
+    "'2026-06-07T14:30:00+00:00', 20.0, '{}', 'OPEN', "
+    "'2026-06-07T14:30:00+00:00', '2026-07-18', 500.0, 100.0, 'o1')"
+)
 
 
 def test_build_engine_sqlite():
@@ -225,22 +261,50 @@ def test_build_engine_sqlite():
     eng.dispose()
 
 
+def test_build_engine_postgres_url_takes_non_sqlite_path():
+    # Verifies the non-sqlite branch calls create_engine without connect_args
+    # injection. Patches sa.create_engine so no DBAPI driver is required.
+    pg_url = "postgresql+psycopg2://user:pass@localhost/test"
+    with patch("options_agent.state.db.sa.create_engine") as mock_ce:
+        mock_ce.return_value = MagicMock()
+        build_engine(pg_url)
+        mock_ce.assert_called_once_with(pg_url)
+
+
 def test_get_connection_commits_on_success():
     eng = build_engine("sqlite:///:memory:")
     metadata.create_all(eng)
     with get_connection(eng) as conn:
-        conn.execute(
-            text(
-                "INSERT INTO positions (id, underlying, strategy, legs, quantity, "
-                "entry_net_amount, current_mark, marked_at, unrealized_pnl, "
-                "exit_plan, status, opened_at, nearest_expiration, "
-                "est_max_loss, est_max_profit, opening_order_id) "
-                "VALUES ('p1', 'SPY', 'bull_put_spread', '[]', 1, -100.0, -80.0, "
-                "'2026-06-07T14:30:00+00:00', 20.0, '{}', 'OPEN', "
-                "'2026-06-07T14:30:00+00:00', '2026-07-18', 500.0, 100.0, 'o1')"
-            )
-        )
+        conn.execute(text(_POS_INSERT))
     with get_connection(eng) as conn:
         row = conn.execute(text("SELECT id FROM positions WHERE id = 'p1'")).fetchone()
     assert row is not None
+    eng.dispose()
+
+
+def test_get_connection_rolls_back_on_error():
+    eng = build_engine("sqlite:///:memory:")
+    metadata.create_all(eng)
+    # Insert a row in one transaction, then fail a second — row must not appear.
+    with get_connection(eng) as conn:
+        conn.execute(text(_POS_INSERT))
+    try:
+        with get_connection(eng) as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO positions (id, underlying, strategy, legs, quantity, "
+                    "entry_net_amount, current_mark, marked_at, unrealized_pnl, "
+                    "exit_plan, status, opened_at, nearest_expiration, "
+                    "est_max_loss, est_max_profit, opening_order_id) "
+                    "VALUES ('p2', 'QQQ', 'iron_condor', '[]', 1, -200.0, -180.0, "
+                    "'2026-06-07T14:30:00+00:00', 20.0, '{}', 'OPEN', "
+                    "'2026-06-07T14:30:00+00:00', '2026-07-18', 600.0, 150.0, 'o2')"
+                )
+            )
+            raise RuntimeError("simulated failure")
+    except RuntimeError:
+        pass
+    with get_connection(eng) as conn:
+        row = conn.execute(text("SELECT id FROM positions WHERE id = 'p2'")).fetchone()
+    assert row is None, "rolled-back row must not be visible after error"
     eng.dispose()
