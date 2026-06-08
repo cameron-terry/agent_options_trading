@@ -1,0 +1,283 @@
+"""Position and Order CRUD primitives (WP-2.2).
+
+All functions accept a SQLAlchemy Core ``Connection`` from
+``state.db.get_connection`` and operate synchronously.
+
+Mutation policy:
+- Position and Order are mutable-in-place (status transitions, fill updates).
+  update_position / patch_order may be called multiple times over a record's
+  lifecycle — this is by design.
+- JournalRecord and OutcomeRecord are append-only; their writes belong to
+  WP-2.3 and must never call UPDATE on those tables.
+
+Two-phase Order flow (crash-safety invariant):
+  insert_order writes a PENDING_SUBMIT row *before* submitting to the broker
+  so that a crash between "broker accepted" and "row written" leaves a
+  local breadcrumb that reconcile (WP-1) can diff against broker state.
+  patch_order then fills in broker_order_id and transitions status as
+  broker confirmations arrive.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from typing import Any
+
+import sqlalchemy as sa
+from sqlalchemy.engine import Connection
+
+from options_agent.contracts.state import (
+    LegFill,
+    Order,
+    OrderStatus,
+    Position,
+    PositionStatus,
+)
+from options_agent.state.db import orders_table, positions_table
+
+# ---------------------------------------------------------------------------
+# Serialization helpers — Pydantic → DB row and back
+# ---------------------------------------------------------------------------
+
+_TERMINAL_POSITION_STATUSES = {
+    PositionStatus.CLOSED,
+    PositionStatus.EXPIRED,
+    PositionStatus.ASSIGNED,
+}
+
+_TERMINAL_ORDER_STATUSES = {
+    OrderStatus.FILLED,
+    OrderStatus.CANCELLED,
+    OrderStatus.REJECTED,
+    OrderStatus.EXPIRED,
+}
+
+
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    """Re-attach UTC to a naive datetime returned by SQLite's DateTime column.
+
+    SQLite stores datetimes as strings and strips timezone info on read-back.
+    All datetimes in this system are UTC; restoring tz-awareness ensures
+    Pydantic model equality holds across DB round-trips.
+    """
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+def _pos_to_row(pos: Position) -> dict[str, Any]:
+    return {
+        "id": pos.id,
+        "underlying": pos.underlying,
+        "strategy": pos.strategy,
+        "legs": json.dumps([leg.model_dump(mode="json") for leg in pos.legs]),
+        "quantity": pos.quantity,
+        "entry_net_amount": pos.entry_net_amount,
+        "current_mark": pos.current_mark,
+        "marked_at": pos.marked_at,
+        "unrealized_pnl": pos.unrealized_pnl,
+        "realized_pnl": pos.realized_pnl,
+        "exit_plan": json.dumps(pos.exit_plan.model_dump(mode="json")),
+        "status": pos.status.value,
+        "opened_at": pos.opened_at,
+        "closed_at": pos.closed_at,
+        "nearest_expiration": pos.nearest_expiration,
+        "est_max_loss": pos.est_max_loss,
+        "est_max_profit": pos.est_max_profit,
+        "opening_order_id": pos.opening_order_id,
+    }
+
+
+def _row_to_pos(row: Any) -> Position:
+    d = dict(row._mapping)
+    d["legs"] = json.loads(d["legs"]) if isinstance(d["legs"], str) else d["legs"]
+    raw = d["exit_plan"]
+    d["exit_plan"] = json.loads(raw) if isinstance(raw, str) else raw
+    d["marked_at"] = _ensure_utc(d["marked_at"])
+    d["opened_at"] = _ensure_utc(d["opened_at"])
+    d["closed_at"] = _ensure_utc(d["closed_at"])
+    return Position.model_validate(d)
+
+
+def _order_to_row(order: Order) -> dict[str, Any]:
+    return {
+        "id": order.id,
+        "broker_order_id": order.broker_order_id,
+        "position_id": order.position_id,
+        "role": order.role.value,
+        "status": order.status.value,
+        "broker_status_raw": order.broker_status_raw,
+        "submitted_at": order.submitted_at,
+        "filled_at": order.filled_at,
+        "legs_filled": json.dumps(
+            [lf.model_dump(mode="json") for lf in order.legs_filled]
+        ),
+        "net_fill_price": order.net_fill_price,
+        "filled_qty": order.filled_qty,
+    }
+
+
+def _row_to_order(row: Any) -> Order:
+    d = dict(row._mapping)
+    d["legs_filled"] = (
+        json.loads(d["legs_filled"])
+        if isinstance(d["legs_filled"], str)
+        else d["legs_filled"]
+    )
+    d["submitted_at"] = _ensure_utc(d["submitted_at"])
+    d["filled_at"] = _ensure_utc(d["filled_at"])
+    return Order.model_validate(d)
+
+
+# ---------------------------------------------------------------------------
+# Position CRUD
+# ---------------------------------------------------------------------------
+
+
+def insert_position(conn: Connection, position: Position) -> None:
+    """Insert a new Position row. Raises IntegrityError if id already exists."""
+    conn.execute(positions_table.insert().values(**_pos_to_row(position)))
+
+
+def get_position(conn: Connection, position_id: str) -> Position | None:
+    """Return the Position with the given id, or None if not found."""
+    row = conn.execute(
+        sa.select(positions_table).where(positions_table.c.id == position_id)
+    ).first()
+    return _row_to_pos(row) if row is not None else None
+
+
+def update_position(conn: Connection, position: Position) -> None:
+    """Overwrite all mutable fields of an existing Position row.
+
+    Callers own the Position object and pass the updated version here; this
+    function does not validate that the transition is legal — that is the
+    responsibility of the caller (WP-1 reconcile, WP-5 monitor).
+
+    Raises KeyError if no row with position.id exists — a missing row means
+    either a bug in the caller or a data-integrity violation that should not
+    be silently swallowed.
+    """
+    row = _pos_to_row(position)
+    pk = row.pop("id")
+    result = conn.execute(
+        positions_table.update().where(positions_table.c.id == pk).values(**row)
+    )
+    if result.rowcount == 0:
+        raise KeyError(f"Position {pk!r} not found")
+
+
+def list_open_positions(conn: Connection) -> list[Position]:
+    """Return all non-terminal positions (PENDING_OPEN, OPEN, PENDING_CLOSE).
+
+    Results are ordered by opened_at ascending for stable iteration across
+    both SQLite and Postgres.
+    """
+    terminal_values = [s.value for s in _TERMINAL_POSITION_STATUSES]
+    rows = conn.execute(
+        sa.select(positions_table)
+        .where(positions_table.c.status.notin_(terminal_values))
+        .order_by(positions_table.c.opened_at)
+    ).fetchall()
+    return [_row_to_pos(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Order CRUD — two-phase flow
+# ---------------------------------------------------------------------------
+
+
+def insert_order(conn: Connection, order: Order) -> None:
+    """Insert a new Order row (phase 1 of the two-phase flow).
+
+    Callers should pass an Order with:
+      - status=PENDING_SUBMIT
+      - broker_order_id="" (not yet assigned)
+      - broker_status_raw="" (not yet known)
+
+    The row must exist in the DB *before* the order is submitted to the broker
+    so that a crash in the submission window leaves a PENDING_SUBMIT breadcrumb
+    that WP-1 reconcile can detect and resolve against broker state.
+    """
+    conn.execute(orders_table.insert().values(**_order_to_row(order)))
+
+
+def get_order(conn: Connection, order_id: str) -> Order | None:
+    """Return the Order with the given id, or None if not found."""
+    row = conn.execute(
+        sa.select(orders_table).where(orders_table.c.id == order_id)
+    ).first()
+    return _row_to_order(row) if row is not None else None
+
+
+def patch_order(
+    conn: Connection,
+    order_id: str,
+    *,
+    broker_order_id: str | None = None,
+    status: OrderStatus | None = None,
+    broker_status_raw: str | None = None,
+    filled_at: datetime | None = None,
+    legs_filled: list[LegFill] | None = None,
+    net_fill_price: float | None = None,
+    filled_qty: int | None = None,
+) -> None:
+    """Update named fields on an existing Order row (phase 2 of the two-phase flow).
+
+    Only the fields explicitly passed (not None) are written; others are left
+    unchanged. This makes the call idempotent: patching with the same values
+    twice produces the same DB state — a requirement for WP-1 reconcile and
+    WP-5 monitor, which may both see the same broker update before local state
+    settles.
+
+    legs_filled accepts LegFill Pydantic objects (same as insert_order), not
+    pre-serialized dicts — serialization is handled internally.
+
+    broker_status_raw should always accompany a status update so that Alpaca's
+    exact status string is preserved alongside the mapped enum; this keeps
+    any mapping bugs recoverable from the DB.
+
+    Raises KeyError if no row with order_id exists.
+    """
+    updates: dict[str, Any] = {}
+    if broker_order_id is not None:
+        updates["broker_order_id"] = broker_order_id
+    if status is not None:
+        updates["status"] = status.value
+    if broker_status_raw is not None:
+        updates["broker_status_raw"] = broker_status_raw
+    if filled_at is not None:
+        updates["filled_at"] = filled_at
+    if legs_filled is not None:
+        updates["legs_filled"] = json.dumps(
+            [lf.model_dump(mode="json") for lf in legs_filled]
+        )
+    if net_fill_price is not None:
+        updates["net_fill_price"] = net_fill_price
+    if filled_qty is not None:
+        updates["filled_qty"] = filled_qty
+
+    if not updates:
+        return
+
+    result = conn.execute(
+        orders_table.update().where(orders_table.c.id == order_id).values(**updates)
+    )
+    if result.rowcount == 0:
+        raise KeyError(f"Order {order_id!r} not found")
+
+
+def list_pending_orders(conn: Connection) -> list[Order]:
+    """Return all non-terminal orders (PENDING_SUBMIT, WORKING, PARTIALLY_FILLED).
+
+    Results are ordered by submitted_at ascending for stable iteration across
+    both SQLite and Postgres.
+    """
+    terminal_values = [s.value for s in _TERMINAL_ORDER_STATUSES]
+    rows = conn.execute(
+        sa.select(orders_table)
+        .where(orders_table.c.status.notin_(terminal_values))
+        .order_by(orders_table.c.submitted_at)
+    ).fetchall()
+    return [_row_to_order(r) for r in rows]
