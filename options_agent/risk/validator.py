@@ -1,3 +1,5 @@
+import math
+
 from pydantic import ValidationError
 
 from options_agent.contracts.data import FilteredChain, PortfolioState, SymbolSnapshot
@@ -29,6 +31,8 @@ _STRATEGY_DELTA_SIGN: dict[str, int] = {
     "iron_condor": 0,
     "iron_butterfly": 0,
 }
+
+_OPTION_MULTIPLIER = 100  # shares per US equity options contract
 
 
 def validate_from_dict(raw: dict, limits: Limits) -> ValidationResult:
@@ -148,8 +152,235 @@ def validate_market_access(
     return reasons
 
 
+def validate_risk_caps(
+    proposal: TradeProposal,
+    portfolio_state: PortfolioState,
+    limits: Limits,
+    *,
+    contracts: int,
+    underlying_price: float,
+) -> ValidationResult:
+    """Risk-cap checks that require portfolio state and the sized contract count.
+
+    Called after validate_structural() passes and after size() determines the
+    contract count. Intended call order in the entry cycle (WP-8):
+      1. validate_structural(proposal, limits)     -- structural, no portfolio needed
+      2. size(proposal, portfolio_state, limits)         -- determines contracts
+      3. validate_risk_caps(proposal, portfolio_state, limits,
+                            contracts=result.contracts, underlying_price=price)
+
+    All checks run independently -- every failure is collected rather than
+    fast-failing, so the orchestrator can journal the full rejection picture.
+    Exception: MAX_LOSS_NOT_FINITE short-circuits immediately (subsequent checks
+    would compare against a corrupted value).
+
+    Checks:
+      MAX_LOSS_NOT_FINITE   -- est_max_loss is finite and positive (must run first)
+      MAX_LOSS_CAP          -- per-contract est_max_loss <= per-trade risk budget
+      PORTFOLIO_DELTA_BAND  -- post-trade |net_dollar_delta| within configured band
+      PORTFOLIO_VEGA_BAND   -- post-trade |net_dollar_vega| within configured band
+      PORTFOLIO_THETA_FLOOR -- post-trade net_dollar_theta >= floor (opt-in; skipped
+                               when limits.min_total_theta is None)
+      CONCENTRATION_UNDERLYING -- post-trade underlying risk-weight <= cap
+        (sector deferred until Position carries sector data from WP-3)
+
+    Greek unit convention (confirmed with WP-4 owner):
+      dollar_delta = proposal.net_delta x underlying_price x 100 x contracts
+        Notional-equivalent $ of underlying exposure. Matches the interpretation of
+        max_dollar_delta_pct as "net directional exposure <= N% of account value".
+      dollar_vega  = proposal.net_vega x 100 x contracts
+        $ per 1 vol-point (1%) move in IV; no underlying_price factor needed.
+      dollar_theta = proposal.net_theta x 100 x contracts
+        $ time decay per calendar day.
+    PortfolioState.net_dollar_* must be computed using this same convention by
+    context/portfolio.py (WP-3/6 scope). This resolves the "Confirm units" note
+    in the PortfolioState docstring.
+
+    NO_ACTION proposals pass unconditionally -- there is no trade to check.
+    """
+    if proposal.action == "NO_ACTION":
+        return ValidationResult(passed=True, reasons=[])
+
+    # Finiteness check before any comparison -- a NaN/inf est_max_loss would silently
+    # corrupt subsequent comparisons (nan <= x is always False; the rejection would
+    # appear as MAX_LOSS_CAP when the real problem is a malformed number).
+    if not math.isfinite(proposal.est_max_loss) or proposal.est_max_loss <= 0:
+        return ValidationResult(
+            passed=False,
+            reasons=[
+                RejectionReason(
+                    rule_id=ValidationRuleId.MAX_LOSS_NOT_FINITE,
+                    severity=Severity.ERROR,
+                    human_message=(
+                        f"est_max_loss {proposal.est_max_loss!r} must be a finite"
+                        " positive number; check the proposal's risk parameters"
+                    ),
+                    field_affected="est_max_loss",
+                    observed=(
+                        proposal.est_max_loss
+                        if math.isfinite(proposal.est_max_loss)
+                        else None
+                    ),
+                )
+            ],
+        )
+
+    reasons: list[RejectionReason] = []
+    _check_max_loss_cap(proposal, portfolio_state, limits, reasons)
+    _check_greek_bands(
+        proposal, portfolio_state, limits, contracts, underlying_price, reasons
+    )
+    _check_concentration(proposal, portfolio_state, limits, contracts, reasons)
+
+    if reasons:
+        return ValidationResult(passed=False, reasons=reasons)
+    return ValidationResult(passed=True, reasons=[])
+
+
 # ---------------------------------------------------------------------------
-# Private sub-checks
+# Private sub-checks for validate_risk_caps
+# ---------------------------------------------------------------------------
+
+
+def _check_max_loss_cap(
+    proposal: TradeProposal,
+    portfolio_state: PortfolioState,
+    limits: Limits,
+    reasons: list[RejectionReason],
+) -> None:
+    max_loss_cap = limits.max_loss_per_trade_pct * portfolio_state.account_equity
+    if proposal.est_max_loss > max_loss_cap:
+        reasons.append(
+            RejectionReason(
+                rule_id=ValidationRuleId.MAX_LOSS_CAP,
+                severity=Severity.ERROR,
+                human_message=(
+                    f"est_max_loss {proposal.est_max_loss:.2f} exceeds per-trade cap"
+                    f" {max_loss_cap:.2f} ({limits.max_loss_per_trade_pct:.1%} of"
+                    f" equity {portfolio_state.account_equity:.2f})"
+                ),
+                field_affected="est_max_loss",
+                observed=proposal.est_max_loss,
+                limit=max_loss_cap,
+            )
+        )
+
+
+def _check_greek_bands(
+    proposal: TradeProposal,
+    portfolio_state: PortfolioState,
+    limits: Limits,
+    contracts: int,
+    underlying_price: float,
+    reasons: list[RejectionReason],
+) -> None:
+    # Delta: dollar_delta = net_delta x underlying_price x 100 x contracts
+    dollar_delta_added = (
+        proposal.net_delta * underlying_price * _OPTION_MULTIPLIER * contracts
+    )
+    post_dollar_delta = portfolio_state.net_dollar_delta + dollar_delta_added
+    delta_cap = limits.max_dollar_delta_pct * portfolio_state.account_equity
+    if abs(post_dollar_delta) > delta_cap:
+        reasons.append(
+            RejectionReason(
+                rule_id=ValidationRuleId.PORTFOLIO_DELTA_BAND,
+                severity=Severity.ERROR,
+                human_message=(
+                    f"post-trade net_dollar_delta {post_dollar_delta:.2f} would exceed"
+                    f" band +-{delta_cap:.2f}"
+                    f" (+-{limits.max_dollar_delta_pct:.1%} of equity)"
+                ),
+                field_affected="net_delta",
+                observed=post_dollar_delta,
+                limit=delta_cap,
+            )
+        )
+
+    # Vega: dollar_vega = net_vega x 100 x contracts (no underlying_price factor)
+    dollar_vega_added = proposal.net_vega * _OPTION_MULTIPLIER * contracts
+    post_dollar_vega = portfolio_state.net_dollar_vega + dollar_vega_added
+    vega_cap = limits.max_dollar_vega_pct * portfolio_state.account_equity
+    if abs(post_dollar_vega) > vega_cap:
+        reasons.append(
+            RejectionReason(
+                rule_id=ValidationRuleId.PORTFOLIO_VEGA_BAND,
+                severity=Severity.ERROR,
+                human_message=(
+                    f"post-trade net_dollar_vega {post_dollar_vega:.2f} would exceed"
+                    f" band +-{vega_cap:.2f}"
+                    f" (+-{limits.max_dollar_vega_pct:.1%} of equity)"
+                ),
+                field_affected="net_vega",
+                observed=post_dollar_vega,
+                limit=vega_cap,
+            )
+        )
+
+    # Theta: opt-in (None = unconstrained; a non-None floor would ban long-premium
+    # strategies such as debit spreads in low-IV regimes -- see limits.py docstring)
+    if limits.min_total_theta is not None:
+        # dollar_theta = net_theta x 100 x contracts
+        dollar_theta_added = proposal.net_theta * _OPTION_MULTIPLIER * contracts
+        post_dollar_theta = portfolio_state.net_dollar_theta + dollar_theta_added
+        if post_dollar_theta < limits.min_total_theta:
+            reasons.append(
+                RejectionReason(
+                    rule_id=ValidationRuleId.PORTFOLIO_THETA_FLOOR,
+                    severity=Severity.ERROR,
+                    human_message=(
+                        f"post-trade net_dollar_theta {post_dollar_theta:.2f}"
+                        f" would fall below floor {limits.min_total_theta:.2f}"
+                    ),
+                    field_affected="net_theta",
+                    observed=post_dollar_theta,
+                    limit=limits.min_total_theta,
+                )
+            )
+
+
+def _check_concentration(
+    proposal: TradeProposal,
+    portfolio_state: PortfolioState,
+    limits: Limits,
+    contracts: int,
+    reasons: list[RejectionReason],
+) -> None:
+    equity = portfolio_state.account_equity
+    open_positions = [
+        p for p in portfolio_state.positions if p.status == PositionStatus.OPEN
+    ]
+
+    # Underlying concentration: risk-weighted by est_max_loss x qty / equity.
+    # est_max_loss is per-contract on both Position and TradeProposal
+    # (WP-0.3 convention).
+    existing_risk = sum(
+        p.est_max_loss * p.quantity
+        for p in open_positions
+        if p.underlying == proposal.underlying
+    )
+    post_pct = (existing_risk + proposal.est_max_loss * contracts) / equity
+    if post_pct > limits.max_underlying_concentration_pct:
+        reasons.append(
+            RejectionReason(
+                rule_id=ValidationRuleId.CONCENTRATION_UNDERLYING,
+                severity=Severity.ERROR,
+                human_message=(
+                    f"post-trade {proposal.underlying} concentration {post_pct:.1%}"
+                    f" would exceed cap {limits.max_underlying_concentration_pct:.1%}"
+                ),
+                field_affected="underlying",
+                observed=post_pct,
+                limit=limits.max_underlying_concentration_pct,
+            )
+        )
+
+    # Sector concentration: deferred until Position carries sector data (WP-3).
+    # When limits.max_sector_concentration_pct is not None, implement analogously
+    # using a sector key on Position (CONCENTRATION_SECTOR rule ID).
+
+
+# ---------------------------------------------------------------------------
+# Private sub-checks for validate_structural
 # ---------------------------------------------------------------------------
 
 
@@ -158,7 +389,7 @@ def _check_naked_short(legs: list[Leg]) -> RejectionReason | None:
 
     For each option right (call/put), the total buy ratio across all legs must
     be >= the total sell ratio. A single uncovered sell leg of any ratio is
-    rejected — there is no config override (Core Principle 3).
+    rejected -- there is no config override (Core Principle 3).
 
     Assumption agreed in WP-4.3 briefing: Option A (per-right net ratio).
     """
@@ -178,7 +409,7 @@ def _check_naked_short(legs: list[Leg]) -> RejectionReason | None:
                 severity=Severity.ERROR,
                 human_message=(
                     f"naked short {right}: sell ratio {sell_ratio} exceeds"
-                    f" buy ratio {buy_ratio} — add a covering long {right} leg"
+                    f" buy ratio {buy_ratio} -- add a covering long {right} leg"
                 ),
                 field_affected=(
                     f"legs[right={right!r}, side='sell', strike={offending.strike}]"

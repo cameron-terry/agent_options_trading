@@ -46,6 +46,7 @@ from options_agent.risk.limits import Limits
 from options_agent.risk.validator import (
     validate_from_dict,
     validate_market_access,
+    validate_risk_caps,
     validate_structural,
 )
 
@@ -812,3 +813,495 @@ def test_no_positions_on_same_underlying_passes() -> None:
 def test_all_market_access_checks_pass_for_valid_proposal() -> None:
     reasons = _run()
     assert reasons == []
+
+
+# WP-4.4: validate_risk_caps — max-loss cap, portfolio Greek bands, concentration
+# ===========================================================================
+# Defined-risk completeness note:
+# WP-4.3 (validate_structural) rejects any naked-short leg per-right-net-ratio.
+# WP-4.4 (validate_risk_caps) rejects trades whose post-trade Greek bands or
+# concentration breach configured thresholds. Together they satisfy the WP-4 DoD
+# requirement "naked short legs rejected unconditionally" and "risk caps enforced":
+#   - WP-4.3: structural naked-short check ensures no uncovered sell leg exists
+#   - WP-4.4: Greek bands verify the trade's directional/vol exposure stays bounded
+# These two layers are complementary, not overlapping.
+
+
+_EQUITY = 100_000.0
+_SPY_PRICE = 500.0
+
+
+def _make_portfolio_state(
+    *,
+    net_dollar_delta: float = 0.0,
+    net_dollar_vega: float = 0.0,
+    net_dollar_theta: float = 0.0,
+    positions: list | None = None,
+) -> PortfolioState:
+    return PortfolioState(
+        positions=positions or [],
+        account_equity=_EQUITY,
+        buying_power=90_000.0,
+        options_buying_power=80_000.0,
+        unrealized_pnl=0.0,
+        realized_pnl_today=0.0,
+        approval_level=3,
+        net_dollar_delta=net_dollar_delta,
+        net_dollar_gamma=0.0,
+        net_dollar_theta=net_dollar_theta,
+        net_dollar_vega=net_dollar_vega,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Baseline: valid proposal passes all three risk-cap checks
+# ---------------------------------------------------------------------------
+
+
+def test_baseline_valid_passes_all_risk_caps() -> None:
+    """
+    Default limits, neutral portfolio, default proposal: all checks pass.
+    Serves as the baseline that each individual failure test departs from.
+    """
+    result = validate_risk_caps(
+        _make_proposal(),
+        _make_portfolio_state(),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert result.passed
+    assert result.reasons == []
+
+
+# ---------------------------------------------------------------------------
+# NO_ACTION passes unconditionally
+# ---------------------------------------------------------------------------
+
+
+def test_no_action_passes_unconditionally() -> None:
+    result = validate_risk_caps(
+        _make_proposal(action="NO_ACTION", legs=[]),
+        _make_portfolio_state(),
+        _default_limits(),
+        contracts=0,
+        underlying_price=_SPY_PRICE,
+    )
+    assert result.passed
+
+
+# ---------------------------------------------------------------------------
+# MAX_LOSS_NOT_FINITE — checked before any cap comparison
+# ---------------------------------------------------------------------------
+
+
+def test_max_loss_nan_rejected_as_not_finite() -> None:
+    import math
+
+    proposal = _make_proposal(est_max_loss=float("nan"))
+    result = validate_risk_caps(
+        proposal,
+        _make_portfolio_state(),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not result.passed
+    assert len(result.reasons) == 1
+    r = result.reasons[0]
+    assert r.rule_id == ValidationRuleId.MAX_LOSS_NOT_FINITE
+    assert r.severity == Severity.ERROR
+    assert r.observed is None  # NaN is not representable as float
+    assert math.isnan(float(proposal.est_max_loss))
+
+
+def test_max_loss_inf_rejected_as_not_finite() -> None:
+    result = validate_risk_caps(
+        _make_proposal(est_max_loss=float("inf")),
+        _make_portfolio_state(),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not result.passed
+    assert result.reasons[0].rule_id == ValidationRuleId.MAX_LOSS_NOT_FINITE
+
+
+def test_max_loss_zero_rejected_as_not_finite() -> None:
+    result = validate_risk_caps(
+        _make_proposal(est_max_loss=0.0),
+        _make_portfolio_state(),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not result.passed
+    assert result.reasons[0].rule_id == ValidationRuleId.MAX_LOSS_NOT_FINITE
+
+
+def test_max_loss_negative_rejected_as_not_finite() -> None:
+    result = validate_risk_caps(
+        _make_proposal(est_max_loss=-100.0),
+        _make_portfolio_state(),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not result.passed
+    assert result.reasons[0].rule_id == ValidationRuleId.MAX_LOSS_NOT_FINITE
+
+
+# ---------------------------------------------------------------------------
+# MAX_LOSS_CAP — per-contract est_max_loss vs equity-relative budget
+# ---------------------------------------------------------------------------
+
+
+def test_max_loss_cap_exceeded() -> None:
+    # Default cap: 1% of $100K = $1,000. Proposal est_max_loss=$1,200 exceeds cap.
+    result = validate_risk_caps(
+        _make_proposal(est_max_loss=1_200.0),
+        _make_portfolio_state(),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not result.passed
+    r = next(r for r in result.reasons if r.rule_id == ValidationRuleId.MAX_LOSS_CAP)
+    assert r.severity == Severity.ERROR
+    assert r.field_affected == "est_max_loss"
+    assert r.observed == 1_200.0
+    assert r.limit == 1_000.0  # 1% of $100K
+    assert "1000.00" in r.human_message
+
+
+def test_max_loss_cap_at_boundary_passes() -> None:
+    # Exactly at cap (1% of 100K = $1,000) should pass (> not >=)
+    result = validate_risk_caps(
+        _make_proposal(est_max_loss=1_000.0),
+        _make_portfolio_state(),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not any(r.rule_id == ValidationRuleId.MAX_LOSS_CAP for r in result.reasons)
+
+
+def test_max_loss_cap_not_finite_fires_before_cap() -> None:
+    # NaN should produce MAX_LOSS_NOT_FINITE, not MAX_LOSS_CAP
+    result = validate_risk_caps(
+        _make_proposal(est_max_loss=float("nan")),
+        _make_portfolio_state(),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert result.reasons[0].rule_id == ValidationRuleId.MAX_LOSS_NOT_FINITE
+    assert not any(r.rule_id == ValidationRuleId.MAX_LOSS_CAP for r in result.reasons)
+
+
+# ---------------------------------------------------------------------------
+# PORTFOLIO_DELTA_BAND — post-trade delta vs equity-relative cap
+# ---------------------------------------------------------------------------
+# dollar_delta = net_delta × underlying_price × 100 × contracts
+# Default cap: 20% of $100K = $20,000
+
+
+def test_delta_band_positive_breach() -> None:
+    # Portfolio already at $18,000 delta; proposal adds 0.12 × 500 × 100 × 1 = $6,000
+    # Post-trade: $24,000 > $20,000 → breach
+    result = validate_risk_caps(
+        _make_proposal(net_delta=0.12),
+        _make_portfolio_state(net_dollar_delta=18_000.0),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not result.passed
+    r = next(
+        r for r in result.reasons if r.rule_id == ValidationRuleId.PORTFOLIO_DELTA_BAND
+    )
+    assert r.severity == Severity.ERROR
+    assert r.field_affected == "net_delta"
+    assert r.observed == 24_000.0
+    assert r.limit == 20_000.0
+
+
+def test_delta_band_negative_breach() -> None:
+    # Portfolio at -$18,000; proposal adds -$6,000 → -$24,000 → breach
+    result = validate_risk_caps(
+        _make_proposal(net_delta=-0.12),
+        _make_portfolio_state(net_dollar_delta=-18_000.0),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not result.passed
+    assert any(
+        r.rule_id == ValidationRuleId.PORTFOLIO_DELTA_BAND for r in result.reasons
+    )
+
+
+def test_delta_band_passes_neutral_portfolio() -> None:
+    # Neutral portfolio + small proposal delta: $6,000 < $20,000
+    result = validate_risk_caps(
+        _make_proposal(net_delta=0.12),
+        _make_portfolio_state(net_dollar_delta=0.0),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not any(
+        r.rule_id == ValidationRuleId.PORTFOLIO_DELTA_BAND for r in result.reasons
+    )
+
+
+def test_delta_band_scales_with_contracts() -> None:
+    # 5 contracts × $6,000 per contract = $30,000 > $20,000 cap
+    result = validate_risk_caps(
+        _make_proposal(net_delta=0.12),
+        _make_portfolio_state(net_dollar_delta=0.0),
+        _default_limits(),
+        contracts=5,
+        underlying_price=_SPY_PRICE,
+    )
+    assert any(
+        r.rule_id == ValidationRuleId.PORTFOLIO_DELTA_BAND for r in result.reasons
+    )
+
+
+# ---------------------------------------------------------------------------
+# PORTFOLIO_VEGA_BAND — post-trade vega vs equity-relative cap
+# ---------------------------------------------------------------------------
+# dollar_vega = net_vega × 100 × contracts
+# Default cap: 2.5% of $100K = $2,500
+
+
+def test_vega_band_exceeded() -> None:
+    # net_vega = -30.0 → dollar_vega = -30 × 100 × 1 = -$3,000 > $2,500 cap
+    result = validate_risk_caps(
+        _make_proposal(net_vega=-30.0),
+        _make_portfolio_state(),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not result.passed
+    r = next(
+        r for r in result.reasons if r.rule_id == ValidationRuleId.PORTFOLIO_VEGA_BAND
+    )
+    assert r.severity == Severity.ERROR
+    assert r.field_affected == "net_vega"
+    assert r.observed == -3_000.0
+    assert r.limit == 2_500.0
+
+
+def test_vega_band_passes_small_vega() -> None:
+    # Default net_vega=-0.30 → dollar_vega = -$30 << $2,500
+    result = validate_risk_caps(
+        _make_proposal(net_vega=-0.30),
+        _make_portfolio_state(),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not any(
+        r.rule_id == ValidationRuleId.PORTFOLIO_VEGA_BAND for r in result.reasons
+    )
+
+
+# ---------------------------------------------------------------------------
+# PORTFOLIO_THETA_FLOOR — opt-in (None by default)
+# ---------------------------------------------------------------------------
+
+
+def test_theta_floor_skipped_when_none() -> None:
+    # Default limits.min_total_theta is None → no theta check regardless of value
+    result = validate_risk_caps(
+        _make_proposal(net_theta=-100.0),  # would fail if checked
+        _make_portfolio_state(net_dollar_theta=-50_000.0),  # very negative
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not any(
+        r.rule_id == ValidationRuleId.PORTFOLIO_THETA_FLOOR for r in result.reasons
+    )
+
+
+def test_theta_floor_breach_when_set() -> None:
+    # min_total_theta=500; portfolio at -400, proposal adds 8.50 × 100 × 1 = $850
+    # post_theta = -400 + 850 = $450 < floor $500 → breach
+    limits = Limits(min_total_theta=500.0)
+    result = validate_risk_caps(
+        _make_proposal(net_theta=8.50),
+        _make_portfolio_state(net_dollar_theta=-400.0),
+        limits,
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not result.passed
+    r = next(
+        r for r in result.reasons if r.rule_id == ValidationRuleId.PORTFOLIO_THETA_FLOOR
+    )
+    assert r.severity == Severity.ERROR
+    assert r.field_affected == "net_theta"
+    assert r.observed == 450.0
+    assert r.limit == 500.0
+
+
+def test_theta_floor_passes_when_set() -> None:
+    # min_total_theta=500; portfolio at 0 + 8.50 × 100 × 1 = $850 > floor $500 → passes
+    limits = Limits(min_total_theta=500.0)
+    result = validate_risk_caps(
+        _make_proposal(net_theta=8.50),
+        _make_portfolio_state(net_dollar_theta=0.0),
+        limits,
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not any(
+        r.rule_id == ValidationRuleId.PORTFOLIO_THETA_FLOOR for r in result.reasons
+    )
+
+
+# ---------------------------------------------------------------------------
+# CONCENTRATION_UNDERLYING — post-trade risk-weight per underlying
+# ---------------------------------------------------------------------------
+
+
+def test_concentration_exceeded_with_existing_position() -> None:
+    # Use tight cap: 0.5% of $100K = $500
+    # Existing: 1 position × est_max_loss=$300 = $300
+    # Proposal: est_max_loss=$350 × 1 contract = $350
+    # Post-trade: ($300 + $350) / $100K = 0.65% > 0.5% → breach
+    limits = Limits(max_underlying_concentration_pct=0.005)
+    portfolio = _make_portfolio_state(
+        positions=[
+            _make_open_position(underlying="SPY", est_max_loss=300.0, quantity=1)
+        ]
+    )
+    result = validate_risk_caps(
+        _make_proposal(underlying="SPY", est_max_loss=350.0),
+        portfolio,
+        limits,
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not result.passed
+    r = next(
+        r
+        for r in result.reasons
+        if r.rule_id == ValidationRuleId.CONCENTRATION_UNDERLYING
+    )
+    assert r.severity == Severity.ERROR
+    assert r.field_affected == "underlying"
+    assert "SPY" in r.human_message
+
+
+def test_concentration_passes_within_cap() -> None:
+    # Default cap: 20% of $100K = $20,000. Proposal $350 = 0.35% → well within
+    result = validate_risk_caps(
+        _make_proposal(est_max_loss=350.0),
+        _make_portfolio_state(),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not any(
+        r.rule_id == ValidationRuleId.CONCENTRATION_UNDERLYING for r in result.reasons
+    )
+
+
+def test_concentration_only_counts_same_underlying() -> None:
+    # Large position in AAPL should not affect SPY concentration
+    limits = Limits(max_underlying_concentration_pct=0.005)
+    portfolio = _make_portfolio_state(
+        positions=[
+            _make_open_position(underlying="AAPL", est_max_loss=10_000.0, quantity=5)
+        ]
+    )
+    result = validate_risk_caps(
+        _make_proposal(underlying="SPY", est_max_loss=350.0),
+        portfolio,
+        limits,
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not any(
+        r.rule_id == ValidationRuleId.CONCENTRATION_UNDERLYING for r in result.reasons
+    )
+
+
+def test_concentration_scales_with_contracts() -> None:
+    # 10 contracts × $350 = $3,500 / $100K = 3.5% > 0.5%
+    # → breach even with no existing pos
+    limits = Limits(max_underlying_concentration_pct=0.005)
+    result = validate_risk_caps(
+        _make_proposal(est_max_loss=350.0),
+        _make_portfolio_state(),
+        limits,
+        contracts=10,
+        underlying_price=_SPY_PRICE,
+    )
+    assert any(
+        r.rule_id == ValidationRuleId.CONCENTRATION_UNDERLYING for r in result.reasons
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multiple failures: all checks are independent (no fast-fail)
+# ---------------------------------------------------------------------------
+
+
+def test_multiple_failures_all_collected() -> None:
+    # Tight limits to trigger max-loss + delta + concentration simultaneously
+    limits = Limits(
+        max_loss_per_trade_pct=0.002,  # cap = $200; proposal=$350 → MAX_LOSS_CAP
+        max_dollar_delta_pct=0.01,  # cap = $1,000; $6,000 added → PORTFOLIO_DELTA_BAND
+        # cap=$200; $350 → CONCENTRATION_UNDERLYING
+        max_underlying_concentration_pct=0.002,
+    )
+    result = validate_risk_caps(
+        _make_proposal(net_delta=0.12, est_max_loss=350.0),
+        _make_portfolio_state(),
+        limits,
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not result.passed
+    rule_ids = {r.rule_id for r in result.reasons}
+    assert ValidationRuleId.MAX_LOSS_CAP in rule_ids
+    assert ValidationRuleId.PORTFOLIO_DELTA_BAND in rule_ids
+    assert ValidationRuleId.CONCENTRATION_UNDERLYING in rule_ids
+
+
+# ---------------------------------------------------------------------------
+# Passing portfolio state vs failing portfolio state — same proposal
+# ---------------------------------------------------------------------------
+
+
+def test_same_proposal_passes_neutral_fails_loaded_portfolio() -> None:
+    proposal = _make_proposal(net_delta=0.12)
+
+    # Neutral portfolio: passes
+    result_pass = validate_risk_caps(
+        proposal,
+        _make_portfolio_state(net_dollar_delta=0.0),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert result_pass.passed
+
+    # Loaded portfolio at the edge: fails
+    result_fail = validate_risk_caps(
+        proposal,
+        _make_portfolio_state(net_dollar_delta=19_000.0),
+        _default_limits(),
+        contracts=1,
+        underlying_price=_SPY_PRICE,
+    )
+    assert not result_fail.passed
+    assert any(
+        r.rule_id == ValidationRuleId.PORTFOLIO_DELTA_BAND for r in result_fail.reasons
+    )

@@ -86,8 +86,9 @@ class PortfolioState(BaseModel):
       net_dollar_theta — $ time decay per calendar day
       net_dollar_vega  — $ change per 1 vol-point (1%) move in IV
 
-    IMPORTANT: Confirm these units with the WP-4 owner before freeze. They must
-    match the Limits bands in risk/limits.py to avoid silent mis-comparisons.
+    Unit convention confirmed (WP-4.4): dollar_delta = net_delta × price × 100 × qty
+    (notional); dollar_vega = net_vega × 100 × qty (per vol-point); dollar_theta =
+    net_theta × 100 × qty (per calendar day). See limits.py docstring for details.
 
     options_buying_power is Alpaca-specific; may differ from buying_power on
     margin accounts. approval_level is broker-reported (not from Config) so it
