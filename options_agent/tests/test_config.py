@@ -122,7 +122,9 @@ def test_config_defaults() -> None:
     assert config.universe_file == Path("universe.txt")
     assert config.entry_times == [time(10, 30), time(13, 0), time(15, 0)]
     assert config.timezone == "America/New_York"
-    assert config.blackout_minutes == 30
+    assert config.session_open_blackout_minutes == 30
+    assert config.session_close_blackout_minutes == 30
+    assert config.exchange_calendar == "XNYS"
     assert config.db_url == "sqlite:///options_agent.db"
     assert config.alpaca_paper is True
     assert isinstance(config.limits, Limits)
@@ -138,7 +140,9 @@ def test_config_from_toml(tmp_path: Path) -> None:
 universe_file = "universe.txt"
 timezone = "America/New_York"
 entry_times = ["10:30", "13:00", "15:00"]
-blackout_minutes = 30
+session_open_blackout_minutes = 30
+session_close_blackout_minutes = 30
+exchange_calendar = "XNYS"
 db_url = "sqlite:///test.db"
 alpaca_paper = true
 
