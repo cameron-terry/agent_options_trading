@@ -196,6 +196,23 @@ def test_within_blackout_window_exactly_at_boundary_passes() -> None:
     assert passed is True
 
 
+def test_within_blackout_window_exactly_at_close_boundary_passes() -> None:
+    """Exactly 30 min before close clears the close blackout (symmetric with open)."""
+    # 3:30 PM ET = 19:30 UTC, exactly 30 min before 4:00 PM ET close (20:00 UTC)
+    exactly_at_close_boundary = datetime(2024, 3, 15, 19, 30, tzinfo=UTC)
+    passed, _ = within_blackout_window(exactly_at_close_boundary, XNYS, 30, 30)
+    assert passed is True
+
+
+def test_within_blackout_window_one_minute_inside_close_blackout() -> None:
+    """29 min before close is inside the 30-min close blackout."""
+    # 3:31 PM ET = 19:31 UTC, 29 min before close
+    one_inside = datetime(2024, 3, 15, 19, 31, tzinfo=UTC)
+    passed, reason = within_blackout_window(one_inside, XNYS, 30, 30)
+    assert passed is False
+    assert "close blackout" in reason
+
+
 def test_within_blackout_window_zero_blackout_passes_during_session() -> None:
     """With blackout=0, any in-session minute should pass."""
     passed, _ = within_blackout_window(REGULAR_DAY_JUST_OPENED, XNYS, 0, 0)

@@ -130,6 +130,11 @@ def test_config_defaults() -> None:
     assert isinstance(config.limits, Limits)
 
 
+def test_config_invalid_exchange_calendar_rejected() -> None:
+    with pytest.raises(ValueError, match="Unknown exchange calendar name"):
+        Config(exchange_calendar="TYPO_XNYS")
+
+
 def test_config_round_trip() -> None:
     config = Config()
     assert Config.model_validate(config.model_dump()) == config

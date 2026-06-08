@@ -17,9 +17,22 @@ buying power" — the latter is irrelevant when the exchange is shut.
 All gate functions accept *now* as an explicit parameter so callers (and
 tests) can inject any moment without touching system time.  *now* must be
 timezone-aware; passing a naive datetime raises ValueError immediately.
+
+Orchestrator injection contract (WP-8):
+  The orchestrator is responsible for constructing the ExchangeCalendar once
+  at startup and passing it into the temporal gates each cycle:
+
+    import exchange_calendars as xcals
+    calendar = xcals.get_calendar(config.exchange_calendar)  # once at startup
+    market_is_open(now, calendar)
+    within_blackout_window(now, calendar,
+                           config.session_open_blackout_minutes,
+                           config.session_close_blackout_minutes)
+    has_buying_power(portfolio_state, config.limits)
+    under_position_cap(portfolio_state, config.limits)
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import cast
 
 import exchange_calendars as xcals
@@ -43,7 +56,7 @@ def _to_utc(now: datetime) -> pd.Timestamp:
         )
     # cast: pd.Timestamp stubs widen the return to Timestamp | NaTType, but
     # constructing from a valid datetime never returns NaT.
-    return cast(pd.Timestamp, pd.Timestamp(now.astimezone(timezone.utc)))
+    return cast(pd.Timestamp, pd.Timestamp(now.astimezone(UTC)))
 
 
 def market_is_open(
@@ -73,6 +86,13 @@ def within_blackout_window(
     Rejects runs within *open_blackout_minutes* of session open or
     *close_blackout_minutes* of session close (wide spreads, auction risk).
 
+    Boundary semantics: both boundaries are inclusive on the allowed side.
+    A run exactly N minutes after open is permitted; a run exactly N minutes
+    before close is also permitted. Only runs *strictly inside* the first or
+    last N minutes are blocked.
+
+      Allowed window: [session_open + N, session_close - N]  (both endpoints inclusive)
+
     Designed to be called after market_is_open() has already returned True.
     If called when the market is closed, returns (True, "") — the
     market_is_open gate owns that case.
@@ -96,7 +116,7 @@ def within_blackout_window(
             f"within open blackout window ({minutes_since_open:.0f}m since open,"
             f" blackout is {open_blackout_minutes}m)",
         )
-    if minutes_to_close <= close_blackout_minutes:
+    if minutes_to_close < close_blackout_minutes:
         return (
             False,
             f"within close blackout window ({minutes_to_close:.0f}m to close,"

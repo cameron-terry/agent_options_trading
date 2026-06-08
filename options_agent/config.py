@@ -2,7 +2,8 @@ import tomllib
 from datetime import time
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+import exchange_calendars as xcals
+from pydantic import BaseModel, Field, field_validator
 
 from options_agent.risk.limits import Limits
 
@@ -46,6 +47,17 @@ class Config(BaseModel):
 
     # Risk limits (nested)
     limits: Limits = Field(default_factory=Limits)
+
+    @field_validator("exchange_calendar")
+    @classmethod
+    def _validate_exchange_calendar(cls, v: str) -> str:
+        valid = xcals.get_calendar_names()
+        if v not in valid:
+            raise ValueError(
+                f"Unknown exchange calendar name: {v!r}. "
+                f"See exchange_calendars.get_calendar_names() for valid names."
+            )
+        return v
 
     @classmethod
     def from_toml(cls, path: Path) -> "Config":
