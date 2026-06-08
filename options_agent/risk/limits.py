@@ -147,6 +147,13 @@ class Limits(BaseModel):
     starvation from other gate failures. Percentage form keeps this consistent
     with all other equity-relative limits.
 
+    conviction_floor is the gate threshold for the gate-and-flat sizing model:
+    conviction ≤ floor → 0 contracts (CONVICTION_FLOOR). At or above the floor
+    the full risk budget is used regardless of the conviction value.  This
+    prevents the agent's uncalibrated confidence from directly scaling position
+    size.  Once WP-7 shows conviction is predictive, the floor can be tuned or
+    a conviction_scaled mode can replace it without changing the field set.
+
     limits_version must be stamped into every ContextSnapshot and
     JournalRecord so WP-7 analytics can correlate trade outcomes with the
     exact limits active at the time. Bump it whenever any threshold changes.
@@ -157,6 +164,7 @@ class Limits(BaseModel):
     # Risk / sizing
     max_loss_per_trade_pct: float = Field(default=0.01, gt=0, le=1.0)
     max_open_positions: int = Field(default=5, ge=1)
+    conviction_floor: float = Field(default=0.35, ge=0, le=1.0)
 
     # Greek bands (equity-normalised dollar-Greeks)
     max_dollar_delta_pct: float = Field(default=0.20, gt=0, le=1.0)

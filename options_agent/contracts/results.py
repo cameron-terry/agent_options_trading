@@ -3,6 +3,27 @@ from enum import StrEnum
 from pydantic import BaseModel, model_validator
 
 
+class SizingConstraint(StrEnum):
+    """Which limit governed the final contract count in a SizingResult.
+
+    Used by WP-7 to distinguish different zero-contract and capped outcomes —
+    "always CONVICTION_FLOOR" tells you something different from "always
+    RISK_BUDGET." Never pass a free string; use these members.
+
+    RISK_BUDGET      — risk budget (max_loss_per_trade_pct × equity) set the count.
+                       All normal non-zero results use this value.
+    CONVICTION_FLOOR — conviction ≤ limits.conviction_floor; no position taken.
+    BELOW_MIN_SIZE   — conviction passed the floor but even 1 contract's est_max_loss
+                       exceeds the budget; no position taken.
+    BUYING_POWER     — reserved for WP-1/WP-5 use when buying power prevents sizing.
+    """
+
+    RISK_BUDGET = "RISK_BUDGET"
+    CONVICTION_FLOOR = "CONVICTION_FLOOR"
+    BELOW_MIN_SIZE = "BELOW_MIN_SIZE"
+    BUYING_POWER = "BUYING_POWER"
+
+
 class Severity(StrEnum):
     ERROR = "error"
     WARNING = "warning"
@@ -100,5 +121,5 @@ class SizingResult(BaseModel):
     sized_max_loss: float
     sized_max_profit: float
     risk_budget_used: float
-    binding_constraint: str | None = None
+    binding_constraint: SizingConstraint | None = None
     capped_to_zero: bool = False

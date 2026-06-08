@@ -4,6 +4,7 @@ from pydantic import ValidationError
 from options_agent.contracts import (
     RejectionReason,
     Severity,
+    SizingConstraint,
     SizingResult,
     ValidationResult,
     ValidationRuleId,
@@ -236,13 +237,13 @@ def test_sizing_result_normal() -> None:
         sized_max_loss=750.0,
         sized_max_profit=375.0,
         risk_budget_used=0.015,
-        binding_constraint="RISK_BUDGET",
+        binding_constraint=SizingConstraint.RISK_BUDGET,
     )
     assert sr.contracts == 3
     assert sr.sized_max_loss == 750.0
     assert sr.sized_max_profit == 375.0
     assert sr.risk_budget_used == 0.015
-    assert sr.binding_constraint == "RISK_BUDGET"
+    assert sr.binding_constraint == SizingConstraint.RISK_BUDGET
     assert sr.capped_to_zero is False
 
 
@@ -252,12 +253,12 @@ def test_sizing_result_zero_contracts_conviction_floor() -> None:
         sized_max_loss=0.0,
         sized_max_profit=0.0,
         risk_budget_used=0.0,
-        binding_constraint="CONVICTION_FLOOR",
+        binding_constraint=SizingConstraint.CONVICTION_FLOOR,
         capped_to_zero=True,
     )
     assert sr.contracts == 0
     assert sr.capped_to_zero is True
-    assert sr.binding_constraint == "CONVICTION_FLOOR"
+    assert sr.binding_constraint == SizingConstraint.CONVICTION_FLOOR
 
 
 def test_sizing_result_zero_contracts_risk_budget() -> None:
@@ -266,7 +267,7 @@ def test_sizing_result_zero_contracts_risk_budget() -> None:
         sized_max_loss=0.0,
         sized_max_profit=0.0,
         risk_budget_used=0.0,
-        binding_constraint="RISK_BUDGET",
+        binding_constraint=SizingConstraint.RISK_BUDGET,
         capped_to_zero=True,
     )
     assert sr.capped_to_zero is True
@@ -278,7 +279,7 @@ def test_sizing_result_zero_contracts_buying_power() -> None:
         sized_max_loss=0.0,
         sized_max_profit=0.0,
         risk_budget_used=0.0,
-        binding_constraint="BUYING_POWER",
+        binding_constraint=SizingConstraint.BUYING_POWER,
         capped_to_zero=True,
     )
     assert sr.capped_to_zero is True
@@ -305,7 +306,7 @@ def test_sizing_result_round_trip_dict() -> None:
         sized_max_loss=1250.0,
         sized_max_profit=625.0,
         risk_budget_used=0.025,
-        binding_constraint="RISK_BUDGET",
+        binding_constraint=SizingConstraint.RISK_BUDGET,
     )
     assert SizingResult.model_validate(sr.model_dump()) == sr
 
@@ -316,7 +317,7 @@ def test_sizing_result_round_trip_json() -> None:
         sized_max_loss=0.0,
         sized_max_profit=0.0,
         risk_budget_used=0.0,
-        binding_constraint="CONVICTION_FLOOR",
+        binding_constraint=SizingConstraint.CONVICTION_FLOOR,
         capped_to_zero=True,
     )
     assert SizingResult.model_validate_json(sr.model_dump_json()) == sr

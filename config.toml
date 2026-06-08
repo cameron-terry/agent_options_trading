@@ -30,6 +30,7 @@ allowed_strategies = [
 # Risk / sizing
 max_loss_per_trade_pct = 0.01        # 1% of equity hard ceiling per trade
 max_open_positions = 5
+conviction_floor = 0.35              # gate-and-flat: below this → 0 contracts (CONVICTION_FLOOR)
 
 # Greek bands expressed as fractions of account equity.
 # max_dollar_delta_pct: |net dollar-delta| ≤ pct × equity

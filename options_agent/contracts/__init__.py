@@ -27,6 +27,7 @@ from options_agent.contracts.proposal import ExitPlan, Leg, TradeProposal
 from options_agent.contracts.results import (
     RejectionReason,
     Severity,
+    SizingConstraint,
     SizingResult,
     ValidationResult,
     ValidationRuleId,
@@ -67,6 +68,7 @@ __all__ = [
     # result types
     "RejectionReason",
     "Severity",
+    "SizingConstraint",
     "SizingResult",
     "ValidationResult",
     "ValidationRuleId",
