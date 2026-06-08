@@ -1,6 +1,7 @@
 """Tests for risk/validator.py.
 
 WP-4.3: structural validity checks (validate_from_dict, validate_structural)
+WP-4.4: risk cap checks (validate_risk_caps)
 WP-4.5: market-access checks (validate_market_access)
 
 Coverage targets:
@@ -13,6 +14,13 @@ Coverage targets:
   - _check_naked_short: 1x2 call ratio spread (sell 2, buy 1) is rejected
   - _check_naked_short: single naked short call is rejected
   - _check_naked_short: single naked short put is rejected
+  - validate_risk_caps: baseline valid passes all checks
+  - validate_risk_caps: MAX_LOSS_NOT_FINITE (nan/inf/zero/negative) short-circuits
+  - validate_risk_caps: MAX_LOSS_CAP fires and collects with other failures
+  - validate_risk_caps: PORTFOLIO_DELTA_BAND (positive and negative breach)
+  - validate_risk_caps: PORTFOLIO_VEGA_BAND breach
+  - validate_risk_caps: PORTFOLIO_THETA_FLOOR skipped when None, fires when set
+  - validate_risk_caps: CONCENTRATION_UNDERLYING (existing pos, contracts scaling)
   - validate_market_access: kill-switch HALT/FLATTEN short-circuits
   - validate_market_access: liquidity — no chain fails closed; bad spread/OI rejected
   - validate_market_access: exit plan bounds check per field
