@@ -337,6 +337,23 @@ def test_contracts_non_negative() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Precondition assertion — est_max_loss must be positive
+# ---------------------------------------------------------------------------
+
+
+def test_zero_est_max_loss_raises_assertion() -> None:
+    # Precondition: size() must only be called after validate() passes.
+    # est_max_loss=0 is blocked by MAX_LOSS_NOT_FINITE; if it reaches size()
+    # the assert fires rather than producing a silent ZeroDivisionError.
+    with pytest.raises(AssertionError, match="est_max_loss"):
+        size(
+            _make_proposal(conviction=0.80, est_max_loss=0.0),
+            _make_portfolio(),
+            _default_limits(),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Serialization — JournalRecord storage requirement
 # ---------------------------------------------------------------------------
 

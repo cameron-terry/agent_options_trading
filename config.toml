@@ -12,7 +12,7 @@ alpaca_paper = true
 [limits]
 # Bump limits_version whenever any threshold changes so WP-7 analytics can
 # correlate trade outcomes with the exact limits active at the time.
-limits_version = "0.1.0"
+limits_version = "0.2.0"
 
 # Allowed strategy names. agent/prompts.py (WP-6.3) must use these same
 # names so the agent can never propose a strategy the validator will reject.

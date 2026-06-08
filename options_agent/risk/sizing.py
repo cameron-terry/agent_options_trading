@@ -36,6 +36,12 @@ def size(
         )
 
     # Step 2: how many contracts fit in the per-trade risk budget?
+    # Precondition: validate() must have passed before size() is called.
+    # MAX_LOSS_NOT_FINITE ensures est_max_loss is finite and positive.
+    assert proposal.est_max_loss > 0, (
+        f"size() called with est_max_loss={proposal.est_max_loss!r}; "
+        "validator must pass MAX_LOSS_NOT_FINITE check before sizing"
+    )
     risk_budget = portfolio_state.account_equity * limits.max_loss_per_trade_pct
     contracts = math.floor(risk_budget / proposal.est_max_loss)
 

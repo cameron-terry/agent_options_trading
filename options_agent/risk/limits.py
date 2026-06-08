@@ -159,7 +159,7 @@ class Limits(BaseModel):
     exact limits active at the time. Bump it whenever any threshold changes.
     """
 
-    limits_version: str = "0.1.0"
+    limits_version: str = "0.2.0"
 
     # Risk / sizing
     max_loss_per_trade_pct: float = Field(default=0.01, gt=0, le=1.0)
