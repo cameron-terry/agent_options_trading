@@ -107,6 +107,7 @@ Once all CI gates are green, commit the work and open a pull request:
 
 - Never start implementation without user confirmation in Phase 3.
 - Never open a PR (Phase 6) until all four CI gates pass (Phase 5): ruff check, ruff format, pyright, pytest.
+- Never merge a PR without explicit approval.
 - Never exceed the card's stated scope — if you discover necessary work outside the card, flag it rather than doing it silently.
 - If a dependency card is not "Done", implement against a typed stub and document the assumption in a code comment.
 - If the card is in "Needs Reqs" or "Needs Implementation Details", list every open question and wait for answers — do not invent defaults.
