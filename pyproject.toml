@@ -8,6 +8,7 @@ dependencies = [
     "pydantic>=2.13.4",
     "alpaca-py>=0.43.4",
     "anthropic>=0.107.0",
+    "exchange-calendars>=4.0",
 ]
 
 [dependency-groups]

@@ -2,7 +2,8 @@ import tomllib
 from datetime import time
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+import exchange_calendars as xcals
+from pydantic import BaseModel, Field, field_validator
 
 from options_agent.risk.limits import Limits
 
@@ -28,7 +29,17 @@ class Config(BaseModel):
     # Entry cadence
     entry_times: list[time] = Field(default=[time(10, 30), time(13, 0), time(15, 0)])
     timezone: str = Field(default="America/New_York")
-    blackout_minutes: int = Field(default=30, ge=0)
+    # Open/close blackout windows guard against wide spreads at the auction;
+    # they are independently tunable because the risk profile differs.
+    # le=120 is a sanity cap — a blackout longer than 2h is almost certainly
+    # a misconfiguration, not intentional policy.
+    session_open_blackout_minutes: int = Field(default=30, ge=0, le=120)
+    session_close_blackout_minutes: int = Field(default=30, ge=0, le=120)
+    # exchange_calendars calendar name; XNYS = NYSE (US equities).
+    # exchange_calendars calendar data has a finite forward horizon — refresh
+    # the pinned package version periodically so holidays beyond that horizon
+    # are reflected correctly.
+    exchange_calendar: str = Field(default="XNYS")
 
     # Persistence / connectivity
     db_url: str = Field(default="sqlite:///options_agent.db")
@@ -36,6 +47,17 @@ class Config(BaseModel):
 
     # Risk limits (nested)
     limits: Limits = Field(default_factory=Limits)
+
+    @field_validator("exchange_calendar")
+    @classmethod
+    def _validate_exchange_calendar(cls, v: str) -> str:
+        valid = xcals.get_calendar_names()
+        if v not in valid:
+            raise ValueError(
+                f"Unknown exchange calendar name: {v!r}. "
+                f"See exchange_calendars.get_calendar_names() for valid names."
+            )
+        return v
 
     @classmethod
     def from_toml(cls, path: Path) -> "Config":
