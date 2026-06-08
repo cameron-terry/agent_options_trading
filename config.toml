@@ -46,6 +46,16 @@ max_underlying_concentration_pct = 0.20
 # (debit spreads in low-IV regimes) are not silently banned.
 # min_total_theta = 0.0
 
+# Event proximity (entry gate only)
+event_blackout_days = 5
+
+# Buying power floor (reads options_buying_power, not buying_power)
+min_buying_power_pct = 0.10
+
+# Duplicate / conflict detection thresholds
+expiration_overlap_days = 5      # same strategy + expiration within 5 days → duplicate
+opposing_delta_tolerance = 0.05  # |net_delta| above this triggers conflict check
+
 [limits.chain_filter]
 min_open_interest = 500
 max_spread_pct_of_mid = 0.10   # primary rule: spread ≤ 10% of mid
@@ -59,3 +69,14 @@ max_abs_delta = 0.45
 profit_target_pct = 0.50   # close at 50% of max profit
 stop_loss_mult = 2.0       # stop at loss = 2× abs(entry_net_amount)
 time_stop_dte = 21         # close at 21 DTE regardless of P&L
+
+# Policy bounds checked by the validator against a proposal's exit_plan.
+# Distinct from exit_plan_defaults (what's sensible) — these are tunable limits.
+# Bump limits_version whenever any bound changes.
+[limits.exit_plan_bounds]
+profit_target_pct_min = 0.25   # reject targets too tight to be worth the trade
+profit_target_pct_max = 1.00   # structural ceiling (redundant with ExitPlan field)
+stop_loss_mult_min = 1.5       # stop must be at least 1.5× entry_net_amount
+stop_loss_mult_max = 5.0       # stop no looser than 5× (prevents runaway loss)
+time_stop_dte_min = 7          # must have a time-stop; 7 DTE minimum
+time_stop_dte_max = 45         # time-stop must be within the chain filter window
