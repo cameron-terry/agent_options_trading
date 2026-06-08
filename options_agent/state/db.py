@@ -79,6 +79,12 @@ orders_table = Table(
 )
 
 # ---------------------------------------------------------------------------
+# Mutability boundary: positions and orders are mutable-in-place (status
+# transitions, fill updates). journal_records and outcome_records are
+# append-only — application code must never UPDATE those two tables.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # journal_records — append-only; write once at end of each entry cycle.
 #
 # Hybrid layout: nested decision/context stored as JSON blobs (source of
