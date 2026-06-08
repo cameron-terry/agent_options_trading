@@ -112,6 +112,16 @@ class Limits(BaseModel):
       max_dollar_vega_pct: |net dollar-vega per 1 vol pt| ≤ pct × equity
         e.g. 0.025 → vega exposure ≤ 2.5% of account per 1-point IV move
 
+    Greek unit convention (confirmed WP-4.4):
+      dollar_delta = net_delta × underlying_price × 100 × contracts
+        Notional-equivalent $ of underlying. "Directional exposure ≤ N% of equity"
+        means the portfolio behaves like holding N% of equity in the underlying.
+      dollar_vega  = net_vega × 100 × contracts
+        $ per 1 vol-point (1%) move in IV. No underlying_price factor.
+      dollar_theta = net_theta × 100 × contracts
+        $ decay per calendar day.
+    PortfolioState.net_dollar_* must use this same convention (WP-3/6 scope).
+
     min_total_theta is intentionally unconstrained (None) at v0. A positive
     floor would silently ban all long-premium strategies (debit spreads in
     low-IV regimes). Leave it None and let playbook + IV-rank logic govern
