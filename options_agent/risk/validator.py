@@ -14,6 +14,11 @@ from options_agent.risk.limits import Limits
 # Maps strategy name → delta direction sign for conflict detection.
 # Position.net_delta is not available in contracts (WP-0 gap); this heuristic
 # covers all playbook strategies until Position carries live delta.
+#
+# MAINTENANCE: This dict must mirror Limits.allowed_strategies exactly.
+# If a new strategy is added to allowed_strategies (Limits / config.toml)
+# without a corresponding entry here, conflict detection silently fails open
+# for that strategy. There is no runtime enforcement — update both together.
 _STRATEGY_DELTA_SIGN: dict[str, int] = {
     "bull_put_spread": 1,
     "bull_call_spread": 1,

@@ -522,12 +522,23 @@ def test_liquidity_spread_too_wide_rejected() -> None:
     assert any(r.rule_id == ValidationRuleId.LIQUIDITY_SPREAD for r in reasons)
 
 
-def test_liquidity_spread_wide_but_within_abs_floor_passes() -> None:
+def test_liquidity_spread_passes_by_abs_floor_for_cheap_option() -> None:
+    # This test exercises the abs_floor as the *deciding* factor.
+    # Use a cheap option: mid=0.30 → pct_limit=0.03 (10% of 0.30).
+    # spread=0.04 > pct_limit (0.03), so the percentage rule would reject it.
+    # But spread=0.04 ≤ abs_floor=0.05, so the contract passes by the floor.
+    # Without the floor, cheap-but-tight contracts would be falsely excluded.
     legs = _put_spread_legs()
-    # mid=2.50, pct_limit=0.25; abs_floor=0.05
-    # spread=0.04 < abs_floor → passes the OR condition (spread ≤ floor)
     contracts = [
-        _make_option_contract(leg.strike, leg.right, leg.expiration, spread_width=0.04)
+        _make_option_contract(
+            leg.strike,
+            leg.right,
+            leg.expiration,
+            mid=0.30,
+            bid=0.28,
+            ask=0.32,
+            spread_width=0.04,  # > pct_limit(0.03) but ≤ abs_floor(0.05) → passes
+        )
         for leg in legs
     ]
     chain = FilteredChain(
@@ -626,6 +637,26 @@ def test_exit_plan_time_stop_dte_too_high_rejected() -> None:
 def test_exit_plan_valid_passes() -> None:
     # default _EXIT: profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21
     reasons = _run()
+    assert not any(r.rule_id == ValidationRuleId.INVALID_EXIT_PLAN for r in reasons)
+
+
+def test_exit_plan_bounds_at_exact_minimums_pass() -> None:
+    # Boundaries are inclusive; values exactly at the min must pass.
+    # Defaults: profit_target_pct_min=0.25, stop_loss_mult_min=1.5, time_stop_dte_min=7
+    proposal = _make_proposal(
+        exit_plan=ExitPlan(profit_target_pct=0.25, stop_loss_mult=1.5, time_stop_dte=7)
+    )
+    reasons = _run(proposal=proposal)
+    assert not any(r.rule_id == ValidationRuleId.INVALID_EXIT_PLAN for r in reasons)
+
+
+def test_exit_plan_bounds_at_exact_maximums_pass() -> None:
+    # Boundaries are inclusive; values exactly at the max must pass.
+    # Defaults: profit_target_pct_max=1.0, stop_loss_mult_max=5.0, time_stop_dte_max=45
+    proposal = _make_proposal(
+        exit_plan=ExitPlan(profit_target_pct=1.0, stop_loss_mult=5.0, time_stop_dte=45)
+    )
+    reasons = _run(proposal=proposal)
     assert not any(r.rule_id == ValidationRuleId.INVALID_EXIT_PLAN for r in reasons)
 
 
