@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Table,
 )
+from sqlalchemy import event
 from sqlalchemy.engine import Connection, Engine
 
 metadata = MetaData()
@@ -163,10 +164,19 @@ def build_engine(url: str) -> Engine:
     """Create a SQLAlchemy engine from a connection URL.
 
     SQLite connections get check_same_thread=False so the engine can be shared
-    across the main thread and any background reconcile tasks.
+    across the main thread and any background reconcile tasks, and
+    foreign_keys=ON so FK constraints are enforced (matching Postgres behaviour).
     """
     if url.startswith("sqlite"):
-        return sa.create_engine(url, connect_args={"check_same_thread": False})
+        engine = sa.create_engine(url, connect_args={"check_same_thread": False})
+
+        @event.listens_for(engine, "connect")
+        def _set_sqlite_pragma(dbapi_conn, _record):  # type: ignore[misc]
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+        return engine
     return sa.create_engine(url)
 
 

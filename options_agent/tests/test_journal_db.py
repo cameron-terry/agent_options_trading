@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 
 from options_agent.contracts import (
@@ -29,7 +28,7 @@ from options_agent.contracts import (
 )
 from options_agent.contracts.state import LegStatus, PositionLeg
 from options_agent.state.crud import insert_position
-from options_agent.state.db import get_connection, metadata
+from options_agent.state.db import get_connection
 from options_agent.state.journal import (
     _coerce_for_json,
     query_journal,
@@ -52,14 +51,6 @@ _POS_LEG = PositionLeg(
 _POS_LEG_1 = PositionLeg(
     leg=_LEG, filled_qty=1, avg_fill_price=2.0, status=LegStatus.OPEN
 )
-
-
-@pytest.fixture
-def engine():
-    eng = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    metadata.create_all(eng)
-    yield eng
-    eng.dispose()
 
 
 def _make_proposal(underlying: str = "SPY") -> TradeProposal:
