@@ -15,8 +15,8 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
+    event,
 )
-from sqlalchemy import event
 from sqlalchemy.engine import Connection, Engine
 
 metadata = MetaData()
