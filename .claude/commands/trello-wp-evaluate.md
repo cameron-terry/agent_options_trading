@@ -17,9 +17,9 @@ Run in parallel:
 
 ### Phase 2 — Collect all completed and in-review work
 
-1. **Fetch all cards and lists in parallel** with `mcp__trello__trello_get_board_cards` and `mcp__trello__get_board_details` (includeDetails: true).
+1. **Fetch all cards and lists in parallel** with `mcp__trello__trello_get_board_cards` (use `filter: all` to include archived/closed cards) and `mcp__trello__get_board_details` (includeDetails: true). Completed sub-task cards are routinely archived after merge — omitting archived cards will silently miss Done work.
 
-2. **Filter to this WP** — collect every card whose name starts with `[<WP-N>` (epic card + all sub-tasks). Include cards in any list (Done, In Review, In Progress, To-Do).
+2. **Filter to this WP** — collect every card whose name starts with `[<WP-N>` (epic card + all sub-tasks). Include cards in any list (Done, In Review, In Progress, To-Do) and any archived (`closed: true`) cards returned by `filter: all`.
 
 3. **For each card in "Done" or "In Review"**, find its PR:
    - Check card comments via `mcp__trello__trello_get_card_actions` (filter for `commentCard` actions).
