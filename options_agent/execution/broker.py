@@ -7,8 +7,10 @@ from typing import cast
 
 from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import QueryOrderStatus
 from alpaca.trading.models import Order as AlpacaOrder
 from alpaca.trading.models import TradeAccount
+from alpaca.trading.requests import GetOrdersRequest
 
 from options_agent.config import Config
 from options_agent.contracts.proposal import TradeProposal
@@ -23,7 +25,8 @@ _TERMINAL = frozenset(
 )
 
 # Mapping from Alpaca status strings to our canonical OrderStatus enum.
-_STATUS_MAP: dict[str, OrderStatus] = {
+# Public so reconcile.py can reuse without coupling to broker internals.
+STATUS_MAP: dict[str, OrderStatus] = {
     "new": OrderStatus.WORKING,
     "pending_new": OrderStatus.WORKING,
     "accepted": OrderStatus.WORKING,
@@ -234,6 +237,9 @@ class BrokerClient:
         Always performs at least one poll.  Returns the order in its current
         state regardless of whether a terminal status was reached — the caller
         should not assume FILLED; check Order.status.
+
+        Raises APIError only if the deadline-expiry final fetch also fails
+        (transient errors mid-loop are swallowed and retried until deadline).
         """
         deadline = monotonic() + self._config.order_poll_timeout_secs
         while True:
@@ -261,7 +267,8 @@ class BrokerClient:
             else:
                 remaining = deadline - monotonic()
                 if remaining <= 0:
-                    # Re-fetch one final time so we always return a real order.
+                    # Deadline expired while fetch was failing — one last attempt.
+                    # May raise APIError; callers must handle it.
                     return cast(AlpacaOrder, self._client.get_order_by_id(broker_id))
                 sleep(min(self._config.order_poll_interval_secs, remaining))
 
@@ -276,7 +283,7 @@ class BrokerClient:
         """Map an Alpaca order response to our local Order model."""
         leg = proposal.legs[0]
         status_str = str(alpaca_order.status.value)
-        status = _STATUS_MAP.get(status_str, OrderStatus.WORKING)
+        status = STATUS_MAP.get(status_str, OrderStatus.WORKING)
 
         filled_qty = int(alpaca_order.filled_qty or 0)
         fill_price_raw = alpaca_order.filled_avg_price
@@ -304,6 +311,37 @@ class BrokerClient:
             net_fill_price=fill_price if filled_qty > 0 else None,
             filled_qty=filled_qty,
         )
+
+    # ------------------------------------------------------------------
+    # Order queries (WP-1.4 reconcile)
+    # ------------------------------------------------------------------
+
+    def list_open_orders(self) -> list[AlpacaOrder]:
+        """Return all non-terminal orders currently known to Alpaca.
+
+        Used by reconcile to detect orphans (broker orders with no local record)
+        and to avoid a per-order round-trip for orders that are still open.
+        Alpaca caps page size at 500; for larger portfolios a paginated fetch
+        would be needed, but 500 far exceeds any reasonable position count for
+        this system.
+        """
+        results = self._client.get_orders(
+            filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500)
+        )
+        return list(results)  # type: ignore[arg-type]
+
+    def get_broker_order(self, broker_order_id: str) -> AlpacaOrder | None:
+        """Fetch a single order by its broker ID; returns None if not found.
+
+        Used by reconcile to retrieve terminal status for orders that have
+        dropped off the open-orders list since the last pass.
+        """
+        try:
+            return cast(AlpacaOrder, self._client.get_order_by_id(broker_order_id))
+        except APIError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
 
     def _reinit_client(self) -> None:
         """Re-initialise TradingClient from current environment credentials."""

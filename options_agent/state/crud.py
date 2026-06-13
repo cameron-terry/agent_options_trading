@@ -28,13 +28,14 @@ import sqlalchemy as sa
 from sqlalchemy.engine import Connection
 
 from options_agent.contracts.state import (
+    FillEvent,
     LegFill,
     Order,
     OrderStatus,
     Position,
     PositionStatus,
 )
-from options_agent.state.db import orders_table, positions_table
+from options_agent.state.db import fill_events_table, orders_table, positions_table
 
 # ---------------------------------------------------------------------------
 # Serialization helpers — Pydantic → DB row and back
@@ -281,3 +282,56 @@ def list_pending_orders(conn: Connection) -> list[Order]:
         .order_by(orders_table.c.submitted_at)
     ).fetchall()
     return [_row_to_order(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# FillEvent CRUD — append-only; idempotency via broker_exec_id
+# ---------------------------------------------------------------------------
+
+
+def _fill_event_to_row(fe: FillEvent) -> dict[str, Any]:
+    return {
+        "id": fe.id,
+        "order_id": fe.order_id,
+        "broker_exec_id": fe.broker_exec_id,
+        "leg_symbol": fe.leg_symbol,
+        "filled_qty": fe.filled_qty,
+        "fill_price": fe.fill_price,
+        "occurred_at": fe.occurred_at,
+        "observed_at": fe.observed_at,
+    }
+
+
+def _row_to_fill_event(row: Any) -> FillEvent:
+    d = dict(row._mapping)
+    d["occurred_at"] = _ensure_utc(d["occurred_at"])
+    d["observed_at"] = _ensure_utc(d["observed_at"])
+    return FillEvent.model_validate(d)
+
+
+def insert_fill_event_if_new(conn: Connection, fill_event: FillEvent) -> bool:
+    """Insert a FillEvent only if its broker_exec_id has not been seen before.
+
+    Returns True if the row was inserted, False if broker_exec_id already exists.
+    This is the idempotency guard for reconcile: the same fill observed on
+    multiple consecutive passes is recorded exactly once.
+    """
+    existing = conn.execute(
+        sa.select(fill_events_table.c.id).where(
+            fill_events_table.c.broker_exec_id == fill_event.broker_exec_id
+        )
+    ).first()
+    if existing is not None:
+        return False
+    conn.execute(fill_events_table.insert().values(**_fill_event_to_row(fill_event)))
+    return True
+
+
+def list_fill_events_for_order(conn: Connection, order_id: str) -> list[FillEvent]:
+    """Return all FillEvents recorded for a given order, ordered by occurred_at."""
+    rows = conn.execute(
+        sa.select(fill_events_table)
+        .where(fill_events_table.c.order_id == order_id)
+        .order_by(fill_events_table.c.occurred_at)
+    ).fetchall()
+    return [_row_to_fill_event(r) for r in rows]

@@ -80,9 +80,35 @@ orders_table = Table(
 )
 
 # ---------------------------------------------------------------------------
+# fill_events — append-only; one row per broker fill execution.
+#
+# broker_exec_id is a unique idempotency key: "{broker_order_id}@{cumulative_qty}".
+# filled_qty is the INCREMENTAL quantity for this execution (not cumulative).
+# occurred_at is broker-reported fill time; observed_at is reconcile-pass time.
+# ---------------------------------------------------------------------------
+fill_events_table = Table(
+    "fill_events",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column(
+        "order_id",
+        String,
+        sa.ForeignKey("orders.id"),
+        nullable=False,
+        index=True,
+    ),
+    Column("broker_exec_id", String, nullable=False, unique=True),
+    Column("leg_symbol", String, nullable=False),
+    Column("filled_qty", Integer, nullable=False),
+    Column("fill_price", Float, nullable=False),
+    Column("occurred_at", DateTime(timezone=True), nullable=False),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+)
+
+# ---------------------------------------------------------------------------
 # Mutability boundary: positions and orders are mutable-in-place (status
-# transitions, fill updates). journal_records and outcome_records are
-# append-only — application code must never UPDATE those two tables.
+# transitions, fill updates). journal_records, outcome_records, and
+# fill_events are append-only — application code must never UPDATE those tables.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------

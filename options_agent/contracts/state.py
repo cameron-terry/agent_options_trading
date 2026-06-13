@@ -196,3 +196,104 @@ class ContextSnapshot(BaseModel):
     model_id: str
     prompt_version: str
     assembled_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Reconcile types (WP-1.4)
+# ---------------------------------------------------------------------------
+
+
+class FillEvent(BaseModel):
+    """Immutable, append-only record of one broker fill execution.
+
+    Idempotency is enforced via broker_exec_id — insert only if that key is
+    not already present.  For Alpaca REST reconcile, broker_exec_id is
+    "{broker_order_id}@{cumulative_filled_qty}" since the REST API does not
+    surface per-execution IDs; each unique (order, qty-level) pair is one
+    execution observation.
+
+    filled_qty is the INCREMENTAL quantity filled in this execution (derived
+    from current broker cumulative minus previously-recorded cumulative).
+    leg_symbol is the OCC option symbol for the filled leg.
+    occurred_at is the broker-reported fill time; observed_at is when this
+    reconcile pass ran.
+    """
+
+    id: str
+    order_id: str
+    broker_exec_id: str
+    leg_symbol: str
+    filled_qty: int
+    fill_price: float
+    occurred_at: datetime
+    observed_at: datetime
+
+
+class OrderRef(BaseModel):
+    """Minimal broker-side order reference used for orphan reporting.
+
+    Carries only the fields needed to surface an orphan in the StateDiff
+    without importing raw broker objects into the contract layer.
+    raw is an opaque dict for debugging (not queried by application code).
+    """
+
+    broker_order_id: str
+    broker_status_raw: str
+    submitted_at: datetime | None
+    raw: dict[str, Any] = {}
+
+
+class ReconcileAnomaly(BaseModel):
+    """A fill-detection inconsistency that could not be cleanly reconciled.
+
+    Examples: filled_qty went backwards, leg count mismatch between broker
+    and local order, broker_order_id not found after multiple retries.
+    Both order_id and broker_order_id are optional because anomalies can
+    arise from either side of the diff.
+    """
+
+    order_id: str | None
+    broker_order_id: str | None
+    description: str
+    raw: dict[str, Any] = {}
+
+
+class StateDiff(BaseModel):
+    """Result of one reconcile pass — observed broker state vs. local DB.
+
+    The top block (newly_*) contains orders whose status or fill count changed
+    this pass.  new_positions / closed_positions are the position-level
+    consequences of fills.
+
+    Re-entry semantics for newly_partial: an order can appear in newly_partial
+    on multiple consecutive passes as it accumulates fills
+    (e.g. 3/5 on pass 1, 4/5 on pass 2).  WP-8 callers must treat
+    newly_partial as "new incremental fills this pass," not "first time this
+    order went partial."  Each pass's incremental fill qty is recorded in the
+    corresponding FillEvent row.
+
+    The bottom block surfaces unhappy-path cases that could not be
+    auto-reconciled.  Callers (WP-5, WP-8) must act on these — reconcile
+    only detects and reports, never silently drops them.
+
+      orphans         — open at broker, no matching local record.
+      unmatched_local — local PENDING_SUBMIT with empty broker_order_id
+                        (crash between DB write and broker submit).
+      anomalies       — data-integrity problems requiring human review.
+
+    reconciled_at is the UTC time the pass completed.
+    """
+
+    newly_filled: list[Order] = []
+    newly_partial: list[Order] = []
+    newly_cancelled: list[Order] = []
+    newly_rejected: list[Order] = []
+    newly_expired: list[Order] = []
+    new_positions: list[Position] = []
+    closed_positions: list[Position] = []
+
+    orphans: list[OrderRef] = []
+    unmatched_local: list[Order] = []
+    anomalies: list[ReconcileAnomaly] = []
+
+    reconciled_at: datetime
