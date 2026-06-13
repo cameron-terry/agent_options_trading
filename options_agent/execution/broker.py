@@ -15,7 +15,10 @@ from alpaca.trading.requests import GetOrdersRequest
 from options_agent.config import Config
 from options_agent.contracts.proposal import TradeProposal
 from options_agent.contracts.state import LegFill, Order, OrderRole, OrderStatus
-from options_agent.execution.orders import build_single_leg_request
+from options_agent.execution.orders import (
+    build_multi_leg_request,
+    build_single_leg_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -309,6 +312,108 @@ class BrokerClient:
             limit_price=limit_price,
             legs_filled=legs_filled,
             net_fill_price=fill_price if filled_qty > 0 else None,
+            filled_qty=filled_qty,
+        )
+
+    # ------------------------------------------------------------------
+    # Multi-leg order submission (WP-1.3)
+    # ------------------------------------------------------------------
+
+    def submit_multi_leg(
+        self,
+        proposal: TradeProposal,
+        qty: int,
+        limit_price: float,
+        position_id: str,
+        role: OrderRole = OrderRole.OPEN,
+    ) -> Order:
+        """Submit a multi-leg (mleg) limit option order and poll for fill status.
+
+        qty is the base position size; Alpaca multiplies by each leg's ratio_qty
+        to compute the per-leg contract count.  Verify on paper before first use
+        that filled quantities match intent (qty × ratio per leg).
+
+        limit_price is the net combo price (positive = debit, negative = credit),
+        matching Alpaca's mleg convention.  Compute with
+        orders.compute_multi_leg_limit_price(legs, quotes).
+
+        Returns the same status semantics as submit() — FILLED, PARTIALLY_FILLED,
+        WORKING, or REJECTED.  See submit() docstring for the WORKING contract.
+
+        CONTRACT: Entry orders that are WORKING at poll timeout must be cancelled
+        before the next entry cycle.  Cancellation policy is owned by WP-1.4
+        (reconcile) and WP-8 (orchestration).  This method never unilaterally
+        cancels.
+
+        net_fill_price on the returned Order is Alpaca's filled_avg_price for
+        the combo (positive = net debit paid, negative = net credit received),
+        consistent with Position.entry_net_amount.  Per-leg fill prices are not
+        populated here; WP-1.4 reconcile fills them via a nested Alpaca fetch.
+
+        Raises ValueError if the proposal has fewer than 2 legs.
+        """
+        if len(proposal.legs) < 2:
+            raise ValueError(
+                f"submit_multi_leg() requires at least 2 legs; "
+                f"got {len(proposal.legs)}. Use submit() for single-leg proposals."
+            )
+
+        client_order_id = str(uuid.uuid4())
+        request = build_multi_leg_request(proposal, qty, limit_price, client_order_id)
+
+        alpaca_order = self._submit_with_retry(request, client_order_id)
+        broker_id = str(alpaca_order.id)
+
+        alpaca_order = self._poll_order(broker_id)
+        return self._build_order_multi_leg(
+            alpaca_order, position_id, role, limit_price, proposal
+        )
+
+    def _build_order_multi_leg(
+        self,
+        alpaca_order: AlpacaOrder,
+        position_id: str,
+        role: OrderRole,
+        limit_price: float,
+        proposal: TradeProposal,
+    ) -> Order:
+        """Map an Alpaca mleg order response to our local Order model.
+
+        legs_filled is left empty — per-leg fill prices are not available from
+        the parent-order poll response.  WP-1.4 reconcile populates them via
+        a nested Alpaca fetch (get_order_by_id with nested=True) after the
+        order settles.
+
+        filled_qty is the number of combo units filled (not per-leg contracts).
+        net_fill_price is Alpaca's filled_avg_price for the combo: positive =
+        net debit paid, negative = net credit received, consistent with
+        Position.entry_net_amount.
+        """
+        status_str = str(alpaca_order.status.value)
+        status = STATUS_MAP.get(status_str, OrderStatus.WORKING)
+
+        filled_qty = int(alpaca_order.filled_qty or 0)
+        fill_price_raw = alpaca_order.filled_avg_price
+        net_fill_price = (
+            float(fill_price_raw)
+            if fill_price_raw is not None and filled_qty > 0
+            else None
+        )
+
+        submitted_at = alpaca_order.submitted_at or datetime.now(UTC)
+
+        return Order(
+            id=str(uuid.uuid4()),
+            broker_order_id=str(alpaca_order.id),
+            position_id=position_id,
+            role=role,
+            status=status,
+            broker_status_raw=status_str,
+            submitted_at=submitted_at,
+            filled_at=alpaca_order.filled_at,
+            limit_price=limit_price,
+            legs_filled=[],
+            net_fill_price=net_fill_price,
             filled_qty=filled_qty,
         )
 
