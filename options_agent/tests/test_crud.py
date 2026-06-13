@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 
 from options_agent.contracts.state import (
@@ -30,7 +29,7 @@ from options_agent.state.crud import (
     patch_order,
     update_position,
 )
-from options_agent.state.db import get_connection, metadata
+from options_agent.state.db import get_connection
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -39,14 +38,6 @@ from options_agent.state.db import get_connection, metadata
 _LEG = Leg(right="put", side="sell", strike=450.0, expiration=date(2026, 7, 18))
 _EXIT_PLAN = ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21)
 _NOW = datetime(2026, 6, 7, 14, 30, tzinfo=UTC)
-
-
-@pytest.fixture
-def engine():
-    eng = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    metadata.create_all(eng)
-    yield eng
-    eng.dispose()
 
 
 def _pos(**overrides: object) -> Position:

@@ -86,13 +86,26 @@ _OUTCOME_COLS = {
 }
 
 
-def _alembic_cfg(db_path: str) -> Config:
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    ini = os.path.join(project_root, "alembic.ini")
-    cfg = Config(ini)
-    cfg.set_main_option("script_location", os.path.join(project_root, "alembic"))
-    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
-    return cfg
+@pytest.fixture
+def make_alembic_cfg(monkeypatch: pytest.MonkeyPatch):
+    """Return a factory that builds an Alembic Config pointing at a SQLite file.
+
+    Unsets DB_URL for the duration of each migration test so alembic/env.py's
+    unconditional DB_URL override cannot redirect the migration to Postgres.
+    """
+    monkeypatch.delenv("DB_URL", raising=False)
+
+    def _make(db_path: str) -> Config:
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+        ini = os.path.join(project_root, "alembic.ini")
+        cfg = Config(ini)
+        cfg.set_main_option("script_location", os.path.join(project_root, "alembic"))
+        cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+        return cfg
+
+    return _make
 
 
 # ---------------------------------------------------------------------------
@@ -176,11 +189,11 @@ def test_outcome_records_foreign_key_to_positions(mem_engine):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_upgrade_creates_all_tables():
+def test_migration_upgrade_creates_all_tables(make_alembic_cfg):
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
     try:
-        command.upgrade(_alembic_cfg(db_path), "head")
+        command.upgrade(make_alembic_cfg(db_path), "head")
         eng = create_engine(f"sqlite:///{db_path}")
         tables = set(inspect(eng).get_table_names())
         eng.dispose()
@@ -189,11 +202,11 @@ def test_migration_upgrade_creates_all_tables():
         os.unlink(db_path)
 
 
-def test_migration_downgrade_removes_all_tables():
+def test_migration_downgrade_removes_all_tables(make_alembic_cfg):
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
     try:
-        cfg = _alembic_cfg(db_path)
+        cfg = make_alembic_cfg(db_path)
         command.upgrade(cfg, "head")
         command.downgrade(cfg, "base")
         eng = create_engine(f"sqlite:///{db_path}")
@@ -205,7 +218,7 @@ def test_migration_downgrade_removes_all_tables():
         os.unlink(db_path)
 
 
-def test_migration_columns_match_metadata():
+def test_migration_columns_match_metadata(make_alembic_cfg):
     """Migration-created schema must have identical columns to metadata.create_all.
 
     Compares both paths directly so drift between db.py and
@@ -226,7 +239,7 @@ def test_migration_columns_match_metadata():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
     try:
-        command.upgrade(_alembic_cfg(db_path), "head")
+        command.upgrade(make_alembic_cfg(db_path), "head")
         mig_eng = create_engine(f"sqlite:///{db_path}")
         mig_cols = {
             tbl: {c["name"] for c in inspect(mig_eng).get_columns(tbl)}

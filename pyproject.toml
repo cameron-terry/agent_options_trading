@@ -11,6 +11,11 @@ dependencies = [
     "exchange-calendars>=4.0",
     "sqlalchemy>=2.0",
     "alembic>=1.13",
+    # psycopg2-binary is the Postgres driver for synchronous SQLAlchemy Core.
+    # -binary ships its own libpq and is fine for this single-user paper-trading
+    # experiment; a future production-hardening step would switch to non-binary
+    # psycopg2 built against the system libpq, or migrate to psycopg v3.
+    "psycopg2-binary>=2.9",
 ]
 
 [dependency-groups]
