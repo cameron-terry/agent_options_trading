@@ -25,7 +25,8 @@ _TERMINAL = frozenset(
 )
 
 # Mapping from Alpaca status strings to our canonical OrderStatus enum.
-_STATUS_MAP: dict[str, OrderStatus] = {
+# Public so reconcile.py can reuse without coupling to broker internals.
+STATUS_MAP: dict[str, OrderStatus] = {
     "new": OrderStatus.WORKING,
     "pending_new": OrderStatus.WORKING,
     "accepted": OrderStatus.WORKING,
@@ -236,6 +237,9 @@ class BrokerClient:
         Always performs at least one poll.  Returns the order in its current
         state regardless of whether a terminal status was reached — the caller
         should not assume FILLED; check Order.status.
+
+        Raises APIError only if the deadline-expiry final fetch also fails
+        (transient errors mid-loop are swallowed and retried until deadline).
         """
         deadline = monotonic() + self._config.order_poll_timeout_secs
         while True:
@@ -263,7 +267,8 @@ class BrokerClient:
             else:
                 remaining = deadline - monotonic()
                 if remaining <= 0:
-                    # Re-fetch one final time so we always return a real order.
+                    # Deadline expired while fetch was failing — one last attempt.
+                    # May raise APIError; callers must handle it.
                     return cast(AlpacaOrder, self._client.get_order_by_id(broker_id))
                 sleep(min(self._config.order_poll_interval_secs, remaining))
 
@@ -278,7 +283,7 @@ class BrokerClient:
         """Map an Alpaca order response to our local Order model."""
         leg = proposal.legs[0]
         status_str = str(alpaca_order.status.value)
-        status = _STATUS_MAP.get(status_str, OrderStatus.WORKING)
+        status = STATUS_MAP.get(status_str, OrderStatus.WORKING)
 
         filled_qty = int(alpaca_order.filled_qty or 0)
         fill_price_raw = alpaca_order.filled_avg_price

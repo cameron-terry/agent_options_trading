@@ -261,9 +261,16 @@ class ReconcileAnomaly(BaseModel):
 class StateDiff(BaseModel):
     """Result of one reconcile pass — observed broker state vs. local DB.
 
-    The top block (newly_*) contains orders whose status transitioned cleanly
+    The top block (newly_*) contains orders whose status or fill count changed
     this pass.  new_positions / closed_positions are the position-level
     consequences of fills.
+
+    Re-entry semantics for newly_partial: an order can appear in newly_partial
+    on multiple consecutive passes as it accumulates fills
+    (e.g. 3/5 on pass 1, 4/5 on pass 2).  WP-8 callers must treat
+    newly_partial as "new incremental fills this pass," not "first time this
+    order went partial."  Each pass's incremental fill qty is recorded in the
+    corresponding FillEvent row.
 
     The bottom block surfaces unhappy-path cases that could not be
     auto-reconciled.  Callers (WP-5, WP-8) must act on these — reconcile

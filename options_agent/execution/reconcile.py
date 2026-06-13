@@ -47,7 +47,7 @@ from options_agent.contracts.state import (
     ReconcileAnomaly,
     StateDiff,
 )
-from options_agent.execution.broker import _STATUS_MAP, BrokerClient
+from options_agent.execution.broker import STATUS_MAP, BrokerClient
 from options_agent.state.crud import (
     get_order,
     get_position,
@@ -151,7 +151,7 @@ def reconcile(broker: BrokerClient, conn: Connection) -> StateDiff:
                 continue
 
         status_str = str(alpaca_order.status.value)
-        new_status = _STATUS_MAP.get(status_str, OrderStatus.WORKING)
+        new_status = STATUS_MAP.get(status_str, OrderStatus.WORKING)
         broker_filled_qty = int(alpaca_order.filled_qty or 0)
         fill_price_raw = alpaca_order.filled_avg_price
         fill_price = float(fill_price_raw) if fill_price_raw is not None else 0.0
@@ -223,7 +223,9 @@ def reconcile(broker: BrokerClient, conn: Connection) -> StateDiff:
             position = get_position(conn, local_order.position_id)
             if position is not None:
                 if alpaca_order.legs:
-                    # Multi-leg: per-leg fill data from broker
+                    # Multi-leg: pair by positional index.
+                    # WP-1.3 must confirm Alpaca returns combo legs in
+                    # submission order before this path handles real orders.
                     legs_filled: list[LegFill] = []
                     for alp_leg, pos_leg in zip(alpaca_order.legs, position.legs):
                         lf_qty = int(alp_leg.filled_qty or 0)

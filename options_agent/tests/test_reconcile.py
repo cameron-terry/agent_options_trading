@@ -265,6 +265,31 @@ def test_full_fill_close_role_transitions_position_to_closed(
     assert pos_after.closed_at is not None
 
 
+def test_full_fill_roll_role_transitions_position_to_closed(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ROLL-role fills must close the position just like CLOSE-role fills."""
+    broker = _broker(monkeypatch)
+    pos = _pos(status=PositionStatus.PENDING_CLOSE)
+    ord_ = _order(role=OrderRole.ROLL)
+    _seed(engine, pos, ord_)
+
+    filled_alpaca = _alpaca_order(status="filled", filled_qty=5, filled_at=_NOW)
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=filled_alpaca)
+
+    with get_connection(engine) as conn:
+        diff = reconcile(broker, conn)
+
+    assert len(diff.closed_positions) == 1
+    assert diff.closed_positions[0].status == PositionStatus.CLOSED
+
+    with get_connection(engine) as conn:
+        pos_after = get_position(conn, "pos-001")
+    assert pos_after is not None
+    assert pos_after.status == PositionStatus.CLOSED
+
+
 # ---------------------------------------------------------------------------
 # Partial fill: WORKING -> PARTIALLY_FILLED
 # ---------------------------------------------------------------------------
