@@ -23,7 +23,7 @@ def engine():
     Isolation: tables are created before each test and dropped after, so
     tests never share row state regardless of backend.
     """
-    url = os.environ.get("DB_URL", "sqlite:///:memory:")
+    url = os.environ.get("DB_URL") or "sqlite:///:memory:"
 
     if url.startswith("sqlite"):
         # StaticPool keeps a single connection alive for the lifetime of the
