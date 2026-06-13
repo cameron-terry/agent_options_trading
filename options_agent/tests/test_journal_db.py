@@ -448,6 +448,126 @@ def test_write_read_rejected_multiple_rules(engine) -> None:
 
 
 # ---------------------------------------------------------------------------
+# DB round-trips for remaining ActionTaken variants
+# (CLOSED, ROLLED, SIZED_TO_ZERO, EXECUTION_FAILED)
+# ---------------------------------------------------------------------------
+
+
+def test_write_read_closed_cycle(engine) -> None:
+    jr = _make_journal_record(
+        cycle_id="cycle-closed-001",
+        action=ActionTaken.CLOSED,
+        decision=Decision(
+            proposal=_make_proposal(),
+            validation_result=ValidationResult(passed=True),
+            sizing_result=None,
+            action_taken=ActionTaken.CLOSED,
+        ),
+        position_ids=["pos-001"],
+        order_ids=["ord-close-001"],
+    )
+    with get_connection(engine) as conn:
+        write_journal_record(conn, jr)
+        restored = read_journal_record(conn, jr.cycle_id)
+    assert restored == jr
+    assert restored is not None
+    assert restored.action_taken == ActionTaken.CLOSED
+    assert restored.position_ids == ["pos-001"]
+    assert restored.order_ids == ["ord-close-001"]
+
+
+def test_write_read_rolled_cycle(engine) -> None:
+    jr = _make_journal_record(
+        cycle_id="cycle-rolled-001",
+        action=ActionTaken.ROLLED,
+        decision=Decision(
+            proposal=_make_proposal(),
+            validation_result=ValidationResult(passed=True),
+            sizing_result=SizingResult(
+                contracts=2,
+                sized_max_loss=2187.50,
+                sized_max_profit=312.50,
+                risk_budget_used=0.022,
+                binding_constraint=SizingConstraint.RISK_BUDGET,
+            ),
+            action_taken=ActionTaken.ROLLED,
+        ),
+        position_ids=["pos-001"],
+        order_ids=["ord-roll-001"],
+    )
+    with get_connection(engine) as conn:
+        write_journal_record(conn, jr)
+        restored = read_journal_record(conn, jr.cycle_id)
+    assert restored == jr
+    assert restored is not None
+    assert restored.action_taken == ActionTaken.ROLLED
+    assert restored.decision.sizing_result is not None
+    assert restored.decision.sizing_result.contracts == 2
+
+
+def test_write_read_sized_to_zero_cycle(engine) -> None:
+    jr = _make_journal_record(
+        cycle_id="cycle-sized-zero-001",
+        action=ActionTaken.SIZED_TO_ZERO,
+        decision=Decision(
+            proposal=_make_proposal(),
+            validation_result=ValidationResult(passed=True),
+            sizing_result=SizingResult(
+                contracts=0,
+                sized_max_loss=0.0,
+                sized_max_profit=0.0,
+                risk_budget_used=0.0,
+                binding_constraint=SizingConstraint.CONVICTION_FLOOR,
+                capped_to_zero=True,
+            ),
+            action_taken=ActionTaken.SIZED_TO_ZERO,
+        ),
+        position_ids=[],
+        order_ids=[],
+    )
+    with get_connection(engine) as conn:
+        write_journal_record(conn, jr)
+        restored = read_journal_record(conn, jr.cycle_id)
+    assert restored == jr
+    assert restored is not None
+    assert restored.action_taken == ActionTaken.SIZED_TO_ZERO
+    assert restored.decision.sizing_result is not None
+    assert restored.decision.sizing_result.contracts == 0
+    assert restored.decision.sizing_result.capped_to_zero is True
+    assert restored.position_ids == []
+
+
+def test_write_read_execution_failed_cycle(engine) -> None:
+    jr = _make_journal_record(
+        cycle_id="cycle-exec-failed-001",
+        action=ActionTaken.EXECUTION_FAILED,
+        decision=Decision(
+            proposal=_make_proposal(),
+            validation_result=ValidationResult(passed=True),
+            sizing_result=SizingResult(
+                contracts=2,
+                sized_max_loss=2187.50,
+                sized_max_profit=312.50,
+                risk_budget_used=0.022,
+                binding_constraint=SizingConstraint.RISK_BUDGET,
+            ),
+            action_taken=ActionTaken.EXECUTION_FAILED,
+        ),
+        position_ids=[],
+        order_ids=[],
+    )
+    with get_connection(engine) as conn:
+        write_journal_record(conn, jr)
+        restored = read_journal_record(conn, jr.cycle_id)
+    assert restored == jr
+    assert restored is not None
+    assert restored.action_taken == ActionTaken.EXECUTION_FAILED
+    assert restored.decision.validation_result is not None
+    assert restored.decision.validation_result.passed
+    assert restored.position_ids == []
+
+
+# ---------------------------------------------------------------------------
 # write_outcome_record + read_outcome_record
 # ---------------------------------------------------------------------------
 

@@ -152,13 +152,18 @@ def _ensure_utc(dt: datetime | None) -> datetime | None:
 
 
 def _journal_record_to_row(record: JournalRecord) -> dict[str, Any]:
-    # assembled_context is dict[str, Any] — model_dump(mode="json") passes it
-    # through without coercion. Run _coerce_for_json before json.dumps so that
-    # any numpy/Decimal/Timestamp types from WP-3 are handled deterministically.
-    context_snapshot_dict = record.context_snapshot.model_dump(mode="json")
-    context_snapshot_dict["assembled_context"] = _coerce_for_json(
-        record.context_snapshot.assembled_context
+    # Coerce assembled_context on a frozen-copy BEFORE model_dump(mode="json").
+    # Pydantic v2's JSON serializer raises PydanticSerializationError on
+    # numpy/Decimal types in dict[str, Any] — coercion must happen before the
+    # serializer sees the field, not after.
+    coerced_snapshot = record.context_snapshot.model_copy(
+        update={
+            "assembled_context": _coerce_for_json(
+                record.context_snapshot.assembled_context
+            )
+        }
     )
+    context_snapshot_dict = coerced_snapshot.model_dump(mode="json")
 
     return {
         "cycle_id": record.cycle_id,
