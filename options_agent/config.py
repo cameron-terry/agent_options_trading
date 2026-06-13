@@ -45,6 +45,16 @@ class Config(BaseModel):
     db_url: str = Field(default="sqlite:///options_agent.db")
     alpaca_paper: bool = Field(default=True)
 
+    # Order execution
+    # Poll every order_poll_interval_secs for fill status.
+    # After order_poll_timeout_secs submit() returns current status
+    # (which may be WORKING — see BrokerClient.submit docstring).
+    # order_limit_offset_from_mid: non-negative slippage allowance added to
+    # mid for buy orders, subtracted for sell orders.  0.0 = mid exactly.
+    order_poll_interval_secs: float = Field(default=2.0, gt=0)
+    order_poll_timeout_secs: float = Field(default=30.0, gt=0)
+    order_limit_offset_from_mid: float = Field(default=0.0, ge=0)
+
     # Risk limits (nested)
     limits: Limits = Field(default_factory=Limits)
 

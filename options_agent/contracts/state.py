@@ -148,6 +148,9 @@ class Order(BaseModel):
     canonical enum so mapping bugs remain recoverable.
     legs_filled is the per-leg source of truth; net_fill_price and filled_qty
     are derived.
+
+    limit_price is the price submitted to the broker (set by submit(); None
+    for orders sourced from reconcile that pre-date this field).
     """
 
     id: str
@@ -158,6 +161,7 @@ class Order(BaseModel):
     broker_status_raw: str
     submitted_at: datetime
     filled_at: datetime | None
+    limit_price: float | None = None
     legs_filled: list[LegFill]
     net_fill_price: float | None
     filled_qty: int
