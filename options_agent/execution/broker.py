@@ -7,8 +7,10 @@ from typing import cast
 
 from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import QueryOrderStatus
 from alpaca.trading.models import Order as AlpacaOrder
 from alpaca.trading.models import TradeAccount
+from alpaca.trading.requests import GetOrdersRequest
 
 from options_agent.config import Config
 from options_agent.contracts.proposal import TradeProposal
@@ -304,6 +306,37 @@ class BrokerClient:
             net_fill_price=fill_price if filled_qty > 0 else None,
             filled_qty=filled_qty,
         )
+
+    # ------------------------------------------------------------------
+    # Order queries (WP-1.4 reconcile)
+    # ------------------------------------------------------------------
+
+    def list_open_orders(self) -> list[AlpacaOrder]:
+        """Return all non-terminal orders currently known to Alpaca.
+
+        Used by reconcile to detect orphans (broker orders with no local record)
+        and to avoid a per-order round-trip for orders that are still open.
+        Alpaca caps page size at 500; for larger portfolios a paginated fetch
+        would be needed, but 500 far exceeds any reasonable position count for
+        this system.
+        """
+        results = self._client.get_orders(
+            filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500)
+        )
+        return list(results)  # type: ignore[arg-type]
+
+    def get_broker_order(self, broker_order_id: str) -> AlpacaOrder | None:
+        """Fetch a single order by its broker ID; returns None if not found.
+
+        Used by reconcile to retrieve terminal status for orders that have
+        dropped off the open-orders list since the last pass.
+        """
+        try:
+            return cast(AlpacaOrder, self._client.get_order_by_id(broker_order_id))
+        except APIError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
 
     def _reinit_client(self) -> None:
         """Re-initialise TradingClient from current environment credentials."""
