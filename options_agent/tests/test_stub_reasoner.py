@@ -97,6 +97,14 @@ def test_expiry_guard_fires_when_close() -> None:
             stub_reasoner()
 
 
+def test_expiry_guard_fires_at_boundary() -> None:
+    at_boundary = _STUB_EXPIRY - timedelta(days=_STUB_EXPIRY_GUARD_DTE)
+    with patch("options_agent.agent.stub_reasoner.date") as mock_date:
+        mock_date.today.return_value = at_boundary
+        with pytest.raises(RuntimeError, match="bump _STUB_EXPIRY"):
+            stub_reasoner()
+
+
 def test_expiry_guard_silent_when_far() -> None:
     far_from_expiry = _STUB_EXPIRY - timedelta(days=_STUB_EXPIRY_GUARD_DTE + 1)
     with patch("options_agent.agent.stub_reasoner.date") as mock_date:

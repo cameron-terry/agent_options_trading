@@ -16,11 +16,11 @@ def stub_reasoner(context: ContextSnapshot | None = None) -> TradeProposal:
     the real reasoner in agent/reasoner.py. WP-0.5.2 can import either function
     with the same call site; swapping stub→real is a one-line import change.
 
-    Raises RuntimeError if the hardcoded expiry drifts within _STUB_EXPIRY_GUARD_DTE
-    days of today — bump _STUB_EXPIRY when that fires.
+    Raises RuntimeError if the hardcoded expiry is within _STUB_EXPIRY_GUARD_DTE days
+    of today (inclusive) — bump _STUB_EXPIRY when that fires.
     """
     days_to_expiry = (_STUB_EXPIRY - date.today()).days
-    if days_to_expiry < _STUB_EXPIRY_GUARD_DTE:
+    if days_to_expiry <= _STUB_EXPIRY_GUARD_DTE:
         raise RuntimeError(
             f"stub_reasoner: hardcoded expiry {_STUB_EXPIRY} is within"
             f" {_STUB_EXPIRY_GUARD_DTE} days — bump _STUB_EXPIRY in"
