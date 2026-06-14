@@ -229,8 +229,16 @@ class EventInfo(BaseModel):
     to prevent drift. Do not recompute days_to_earnings independently.
 
     Macro events (FOMC/CPI/NFP) are market-wide and live on UniverseSnapshot.
+
+    data_available=False means the event provider failed to retrieve data for
+    this symbol. None earnings/ex_dividend with data_available=False must be
+    treated as "unknown" by callers, not as "no upcoming events." WP-4 must
+    fail-closed on data_available=False: do not open earnings-sensitive positions
+    when event data cannot be confirmed. None + data_available=True means the
+    provider succeeded and found no events in the lookahead window.
     """
 
     symbol: str
     earnings: EarningsEvent | None
     ex_dividend: ExDividendEvent | None
+    data_available: bool = True
