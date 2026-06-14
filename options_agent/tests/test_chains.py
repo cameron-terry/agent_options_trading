@@ -321,6 +321,31 @@ def test_oi_none_not_excluded_when_unavailable() -> None:
     assert len(chain.contracts) == 1  # not excluded by OI filter
 
 
+def test_oi_none_excluded_when_some_oi_available() -> None:
+    # Mixed chain: one contract has OI, one has None OI.
+    # oi_available=True (at least one non-None) → None-OI contract is treated as
+    # failing the min_oi threshold (excluded), not bypassed. This upholds the
+    # RawOptionContract invariant: "must not be silently passed through a min_oi
+    # filter."
+    raws = [
+        _raw(strike=450.0, open_interest=200),  # passes OI check
+        _raw(strike=451.0, open_interest=None),  # None OI → excluded when oi_available
+    ]
+    chain = _run(raws)
+    assert chain.oi_available is True
+    assert len(chain.contracts) == 1
+    assert chain.contracts[0].strike == 450.0
+
+
+def test_spread_abs_floor_path_near_zero_mid() -> None:
+    # Contracts with mid ≤ _MID_EPSILON (0.01) skip the pct rule and fall through
+    # to the abs-floor-only path. bid=0.00, ask=0.01 → spread=0.01 ≤ abs_floor=0.05.
+    # delta=-0.16 is within the default range [0.15, 0.45].
+    raws = [_raw(bid=0.00, ask=0.01, delta=-0.16)]
+    chain = _run(raws)
+    assert len(chain.contracts) == 1
+
+
 # ---------------------------------------------------------------------------
 # Strategy hint / right filter
 # ---------------------------------------------------------------------------

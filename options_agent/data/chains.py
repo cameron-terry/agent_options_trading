@@ -158,9 +158,14 @@ def get_filtered_chain(
             continue
 
         # OI filter — only when the provider returned OI data.
-        if oi_available and raw.open_interest is not None:
-            if raw.open_interest < limits.min_open_interest:
-                continue
+        # When oi_available=True, a contract with None OI is treated as failing
+        # the threshold (excluded), not bypassing it. This upholds the invariant
+        # from RawOptionContract: "a contract with None OI must not be silently
+        # passed through a min_oi filter."
+        if oi_available and (
+            raw.open_interest is None or raw.open_interest < limits.min_open_interest
+        ):
+            continue
 
         by_right[right].append(
             OptionContract(
