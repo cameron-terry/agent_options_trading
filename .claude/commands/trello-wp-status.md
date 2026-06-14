@@ -7,9 +7,9 @@ If no argument is given, default to WP-0.
 
 ## What this skill does
 
-1. **Finds the board** named "Agentic Trading System" using `mcp__trello__list_boards`.
-
-2. **Fetches all open cards** with `mcp__trello__trello_get_board_cards` and the board's lists with `mcp__trello__get_board_details` (includeDetails: true). Run these in parallel.
+1. **Fetch in parallel** using the hardcoded board ID `6a24e3323bff555727f457b2` ("Agentic Trading System"). Do not call `list_boards` or `get_board_details`.
+   - `mcp__trello__trello_get_board_cards` — all open cards
+   - `mcp__trello__get_lists` — list IDs and names (lightweight; used to map each card's `listId` to its list name)
 
 3. **Filters** to cards whose names start with `[<WP-N>` (e.g. `[WP-0` for WP-0), including the epic card (`[WP-0]`) and all sub-tasks (`[WP-0.1]`, `[WP-0.2]`, etc.).
 

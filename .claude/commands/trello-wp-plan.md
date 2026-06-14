@@ -7,7 +7,7 @@ Create Trello tickets for a work package (WP) defined in `docs/WORKSTREAMS.md`.
 
 1. **Reads** `docs/WORKSTREAMS.md` (the work breakdown) and `docs/options-agent-plan.md` (the design doc) to understand the WP's scope, consumes/produces, suggested issue breakdown, and definition of done.
 
-2. **Finds the Trello board** named "Agentic Trading System" using `mcp__trello__list_boards`, then fetches its lists and labels with `mcp__trello__get_lists` and `mcp__trello__trello_get_board_labels`.
+2. **Fetches lists and labels** with `mcp__trello__get_lists` and `mcp__trello__trello_get_board_labels` using the hardcoded board ID `6a24e3323bff555727f457b2` ("Agentic Trading System"). Do not call `list_boards`.
 
 3. **Creates one epic card** for the WP in the To-Do list summarising: goal, scope in/out, DoD checklist, and an index of all sub-task cards with their destination lists.
 
