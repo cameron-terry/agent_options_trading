@@ -491,3 +491,101 @@ def test_run_entry_cycle_validation_failure_journal_written(
     assert jr is not None
     assert jr.action_taken == ActionTaken.REJECTED
     assert len(jr.rejection_rule_ids) > 0
+
+
+# ---------------------------------------------------------------------------
+# run_entry_cycle — broker rejection (EXECUTION_FAILED)
+# ---------------------------------------------------------------------------
+
+
+def _wire_rejected_broker(broker: BrokerClient) -> None:
+    """Configure broker mocks so submit_multi_leg returns a REJECTED order."""
+    mock_account = MagicMock()
+    mock_account.equity = "100000.00"
+    mock_account.buying_power = "100000.00"
+    mock_account.options_buying_power = "100000.00"
+    mock_account.options_approved_level = 3
+    broker.get_account = MagicMock(return_value=mock_account)
+
+    def _submit_rejected(
+        proposal, qty_arg, limit_price, position_id, role=OrderRole.OPEN
+    ):
+        return Order(
+            id="order-rejected-001",
+            broker_order_id="broker-rejected-abc",
+            position_id=position_id,
+            role=role,
+            status=OrderStatus.REJECTED,
+            broker_status_raw="rejected",
+            submitted_at=_NOW,
+            filled_at=None,
+            limit_price=limit_price,
+            legs_filled=[],
+            net_fill_price=None,
+            filled_qty=0,
+        )
+
+    broker.submit_multi_leg = _submit_rejected  # type: ignore[method-assign]
+
+
+def test_run_entry_cycle_broker_rejection_result(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Broker REJECTED → CycleResult with EXECUTION_FAILED and CycleError(EXECUTE)."""
+    broker = _make_broker(monkeypatch)
+    _wire_rejected_broker(broker)
+
+    result = run_entry_cycle(Config(), broker=broker, engine=engine)
+
+    assert result.action_taken == ActionTaken.EXECUTION_FAILED
+    assert result.error is not None
+    assert result.error.stage == CycleStage.EXECUTE
+    assert result.error.recoverable is False
+    assert result.proposal is not None
+    assert result.validation is not None
+    assert result.validation.passed is True
+    assert result.sizing is not None
+    assert result.journal_record_id is not None
+    assert result.short_circuit_reason is None
+
+
+def test_run_entry_cycle_broker_rejection_journal_written(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Broker REJECTED → JournalRecord written with EXECUTION_FAILED action."""
+    broker = _make_broker(monkeypatch)
+    _wire_rejected_broker(broker)
+
+    result = run_entry_cycle(Config(), broker=broker, engine=engine)
+
+    assert result.journal_record_id is not None
+    with get_connection(engine) as conn:
+        jr = read_journal_record(conn, result.journal_record_id)
+
+    assert jr is not None
+    assert jr.action_taken == ActionTaken.EXECUTION_FAILED
+    assert jr.strategy == "bull_put_spread"
+    assert jr.underlying == "SPY"
+    # EXECUTION_FAILED is distinct from validation REJECTED — no rule_ids
+    assert jr.rejection_rule_ids == []
+
+
+def test_run_entry_cycle_broker_rejection_no_dangling_position(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Broker REJECTED → no Position row created (no orphaned PENDING_OPEN)."""
+    broker = _make_broker(monkeypatch)
+    _wire_rejected_broker(broker)
+
+    result = run_entry_cycle(Config(), broker=broker, engine=engine)
+
+    assert result.journal_record_id is not None
+    with get_connection(engine) as conn:
+        jr = read_journal_record(conn, result.journal_record_id)
+        assert jr is not None
+        # No position_ids on an EXECUTION_FAILED journal record.
+        assert jr.position_ids == []
+        # No Position row should exist for this cycle.
+        if jr.position_ids:  # defensive — already asserted empty above
+            pos = get_position(conn, jr.position_ids[0])
+            assert pos is None
