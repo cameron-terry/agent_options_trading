@@ -43,6 +43,7 @@ select = ["E", "F", "I", "UP"]
 testpaths = ["options_agent/tests"]
 markers = [
     "integration: live-network tests; skipped when ALPACA_API_KEY is absent",
+    "smoke: end-to-end smoke tests requiring market open and live paper credentials; run on-demand",
 ]
 
 [tool.pyright]

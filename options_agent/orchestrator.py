@@ -11,7 +11,9 @@ from options_agent.config import Config
 from options_agent.contracts.data import PortfolioState
 from options_agent.contracts.journal import JournalRecord
 from options_agent.contracts.orchestrator import (
+    CycleError,
     CycleResult,
+    CycleStage,
     MonitorResult,
     ShortCircuitReason,
 )
@@ -21,6 +23,7 @@ from options_agent.contracts.state import (
     ContextSnapshot,
     Decision,
     LegStatus,
+    OrderStatus,
     Position,
     PositionLeg,
     PositionStatus,
@@ -35,13 +38,14 @@ from options_agent.state.journal import write_journal_record
 
 logger = logging.getLogger(__name__)
 
-# WP-0.5.2 slice constants ---------------------------------------------------
+# WP-0.5 slice constants -----------------------------------------------------
+# _SLICE_LIMIT_PRICE removed: limit price is now config.slice_limit_price so
+# the smoke test (WP-0.5.3) can pass -0.01 to guarantee a paper fill without
+# adding a test-only parameter to the production signature.
 # Sign convention: negative = net credit received. Matches:
 #   - Alpaca mleg limit_price (build_multi_leg_request: sell legs contribute −mid)
 #   - WP-0.3 Position.entry_net_amount (negative = credit received)
 #   - compute_multi_leg_limit_price sign semantics
-# A bull put spread (sell high-strike put, buy low-strike put) is a net credit.
-_SLICE_LIMIT_PRICE: float = -1.50
 _SLICE_PROMPT_VERSION: str = "stub-0.5.2"
 _SLICE_MODEL_ID: str = "stub"
 
@@ -252,9 +256,10 @@ def run_entry_cycle(
         )
 
     # ── Step 4: EXECUTE ─────────────────────────────────────────────────────
+    limit_price = config.slice_limit_price
     position_id = str(uuid.uuid4())
     order = broker.submit_multi_leg(
-        proposal, sizing.contracts, _SLICE_LIMIT_PRICE, position_id
+        proposal, sizing.contracts, limit_price, position_id
     )
     logger.info(
         "cycle %s: order submitted broker_id=%s status=%s",
@@ -262,6 +267,54 @@ def run_entry_cycle(
         order.broker_order_id,
         order.status,
     )
+
+    if order.status == OrderStatus.REJECTED:
+        # Broker rejected the order synchronously — no Position is persisted.
+        # action_taken = EXECUTION_FAILED distinguishes broker rejection (post-sizing)
+        # from validation rejection (pre-sizing), per the WP-0.4 ActionTaken contract.
+        cycle_error = CycleError(
+            stage=CycleStage.EXECUTE,
+            message=(
+                f"Broker rejected order broker_id={order.broker_order_id!r} "
+                f"status_raw={order.broker_status_raw!r}"
+            ),
+            recoverable=False,
+        )
+        decision = Decision(
+            proposal=proposal,
+            validation_result=validation,
+            sizing_result=sizing,
+            action_taken=ActionTaken.EXECUTION_FAILED,
+        )
+        journal_record = JournalRecord(
+            cycle_id=cycle_id,
+            timestamp=now,
+            action_taken=ActionTaken.EXECUTION_FAILED,
+            decision=decision,
+            context_snapshot=_stub_context_snapshot(now),
+            limits_version=config.limits.limits_version,
+            prompt_version=_SLICE_PROMPT_VERSION,
+            model_id=_SLICE_MODEL_ID,
+            strategy=proposal.strategy,
+            underlying=proposal.underlying,
+            conviction=proposal.conviction,
+        )
+        with get_connection(engine) as conn:
+            write_journal_record(conn, journal_record)
+        logger.warning(
+            "cycle %s: EXECUTION_FAILED broker_id=%s; journal written",
+            cycle_id,
+            order.broker_order_id,
+        )
+        return CycleResult(
+            cycle_id=cycle_id,
+            action_taken=ActionTaken.EXECUTION_FAILED,
+            proposal=proposal,
+            validation=validation,
+            sizing=sizing,
+            error=cycle_error,
+            journal_record_id=cycle_id,
+        )
 
     # ── Steps 5–7: PERSIST, RECONCILE, JOURNAL ──────────────────────────────
     # Insert Position first (PENDING_OPEN), then Order, to satisfy the FK
@@ -279,8 +332,8 @@ def run_entry_cycle(
         ],
         quantity=sizing.contracts,
         # entry_net_amount = intended limit price; negative = credit received (WP-0.3).
-        entry_net_amount=_SLICE_LIMIT_PRICE,
-        current_mark=_SLICE_LIMIT_PRICE,
+        entry_net_amount=limit_price,
+        current_mark=limit_price,
         marked_at=now,
         unrealized_pnl=0.0,
         realized_pnl=None,
@@ -376,7 +429,9 @@ def run_monitor_cycle(positions: list[Position], config: Config) -> MonitorResul
 
 __all__ = [
     "ActionTaken",
+    "CycleError",
     "CycleResult",
+    "CycleStage",
     "MonitorResult",
     "ShortCircuitReason",
     "run_entry_cycle",
