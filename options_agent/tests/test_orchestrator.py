@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from options_agent.config import Config
 from options_agent.contracts import (
@@ -215,7 +216,7 @@ def test_cycle_result_round_trip() -> None:
 
 
 def test_cycle_result_invariant_enforced() -> None:
-    with pytest.raises(Exception, match="NO_ACTION_GATED"):
+    with pytest.raises(ValidationError, match="NO_ACTION_GATED"):
         CycleResult(
             cycle_id="bad-001",
             action_taken=ActionTaken.OPENED,
