@@ -344,6 +344,31 @@ def test_all_absent_no_inconsistency_warning(
     assert "inconsistency" not in caplog.text
 
 
+def test_iv_coerced_by_plausibility_with_valid_greeks_no_inconsistency_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Provider sent both IV and Greeks (self-consistent). Our plausibility rule
+    # coerces IV=0.0 to None. The inconsistency warning must not fire because
+    # the provider was consistent; local rules created the asymmetry.
+    raw = _raw(implied_volatility=0.0)  # IV fails plausibility; Greeks valid
+    with caplog.at_level(logging.WARNING):
+        enrich_greeks_iv([raw])
+    assert "inconsistency" not in caplog.text
+
+
+def test_all_four_greeks_implausible_coerced_no_inconsistency_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Provider sent all four Greeks and a valid IV (self-consistent). Every Greek
+    # fails its plausibility rule and is coerced to None. The inconsistency warning
+    # must not fire — it was our coercion that created the asymmetry, not the
+    # provider's response.
+    raw = _raw(delta=1.5, gamma=-0.01, theta=0.01, vega=-0.01, implied_volatility=0.24)
+    with caplog.at_level(logging.WARNING):
+        enrich_greeks_iv([raw])
+    assert "inconsistency" not in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # Batch: one bad contract in a list leaves the rest intact
 # ---------------------------------------------------------------------------

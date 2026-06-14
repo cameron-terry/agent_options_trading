@@ -69,14 +69,19 @@ def _validate_contract(raw: RawOptionContract) -> RawOptionContract:
     )
 
     # Alpaca derives IV and core Greeks together from the same pricing model;
-    # one present without the other signals a provider inconsistency.
-    has_greeks = any(g is not None for g in (delta, gamma, theta, vega))
-    if (iv is not None) != has_greeks:
+    # one present without the other signals a provider inconsistency. Check
+    # raw (pre-coercion) values so local plausibility failures don't create
+    # spurious inconsistency warnings for a self-consistent provider response.
+    raw_has_greeks = any(
+        g is not None for g in (raw.delta, raw.gamma, raw.theta, raw.vega)
+    )
+    raw_has_iv = raw.implied_volatility is not None
+    if raw_has_iv != raw_has_greeks:
         logger.warning(
             "greeks_iv: %s — IV %s but core Greeks %s; provider inconsistency.",
             sym,
-            "present" if iv is not None else "absent",
-            "present" if has_greeks else "absent",
+            "present" if raw_has_iv else "absent",
+            "present" if raw_has_greeks else "absent",
         )
 
     return raw.model_copy(
