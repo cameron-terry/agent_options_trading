@@ -506,7 +506,12 @@ def _detect_expiry_and_assignments(
                 )
 
             elif act_type == "OPASN":
-                assigned_qty = abs(int(float(act.get("qty") or 0)))
+                assigned_qty = int(float(act.get("qty") or 0))
+                if assigned_qty == 0:
+                    logger.warning(
+                        "reconcile: OPASN — zero qty for %s, skipping", occ_symbol
+                    )
+                    continue
                 assignment_price = float(act.get("price") or 0)
 
                 equity_pos = _build_equity_position_from_assignment(
@@ -654,11 +659,19 @@ def _build_equity_position_from_assignment(
 
 
 def _parse_activity_datetime(raw: Any, fallback: datetime) -> datetime:
-    """Parse an Alpaca activity date string; return fallback on any failure."""
+    """Parse an Alpaca activity date string; return fallback on any failure.
+
+    Handles ISO 8601 datetime strings with and without timezone info, and
+    date-only strings ("2026-06-10") which Alpaca may return for some events.
+    All returned datetimes are UTC-aware.
+    """
     if not raw:
         return fallback
     try:
         s = str(raw).replace("Z", "+00:00")
-        return datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt
     except (ValueError, TypeError):
         return fallback

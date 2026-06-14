@@ -680,3 +680,121 @@ def test_statediff_new_fields_serialise_cleanly(
     event = serialised["assigned_positions"][0]
     assert event["assignment_price"] == 450.0
     assert event["created_equity_position"] is not None
+
+
+# ---------------------------------------------------------------------------
+# OPASN edge cases (sign, zero qty, date-only strings)
+# ---------------------------------------------------------------------------
+
+
+def test_opasn_negative_qty_short_call_assignment(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Short call assignment delivers shares (negative qty) — sign must be preserved."""
+    broker = _broker(monkeypatch)
+    pos = _pos_expired_candidate()
+    ord_ = _order(
+        order_id="ord-exp",
+        status=OrderStatus.FILLED,
+        filled_qty=5,
+        position_id="pos-exp",
+    )
+    _seed_with_fill(engine, pos, ord_)
+
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_account_activities = MagicMock(
+        return_value=[
+            {
+                "activity_type": "OPASN",
+                "symbol": _OCC,
+                "date": "2026-06-10T21:00:00+00:00",
+                "qty": "-5",
+                "price": "450",
+            },
+        ]
+    )
+    broker.get_all_positions = MagicMock(return_value=[])
+
+    with get_connection(engine) as conn:
+        diff = reconcile(broker, conn)
+
+    assert len(diff.assigned_positions) == 1
+    event = diff.assigned_positions[0]
+    assert event.assigned_qty == -5
+    eq = event.created_equity_position
+    assert eq is not None
+    assert eq.equity_legs[0].qty == -500  # -5 contracts × 100 = short 500 shares
+    assert eq.entry_net_amount == -500 * 450.0
+
+
+def test_opasn_zero_qty_is_skipped(engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A malformed OPASN activity with qty=0 must not create a degenerate position."""
+    broker = _broker(monkeypatch)
+    pos = _pos_expired_candidate()
+    ord_ = _order(
+        order_id="ord-exp",
+        status=OrderStatus.FILLED,
+        filled_qty=5,
+        position_id="pos-exp",
+    )
+    _seed_with_fill(engine, pos, ord_)
+
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_account_activities = MagicMock(
+        return_value=[
+            {
+                "activity_type": "OPASN",
+                "symbol": _OCC,
+                "date": "2026-06-10T21:00:00+00:00",
+                "qty": "0",
+                "price": "450",
+            },
+        ]
+    )
+    broker.get_all_positions = MagicMock(return_value=[_alpaca_position(_OCC)])
+
+    with get_connection(engine) as conn:
+        diff = reconcile(broker, conn)
+
+    assert len(diff.assigned_positions) == 0
+
+    with get_connection(engine) as conn:
+        pos_after = get_position(conn, "pos-exp")
+    assert pos_after is not None
+    assert pos_after.status == PositionStatus.OPEN  # not mutated
+
+
+def test_parse_activity_datetime_date_only_string(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A date-only string ('2026-06-10') must be parsed as UTC midnight, not naive."""
+    broker = _broker(monkeypatch)
+    pos = _pos_expired_candidate()
+    ord_ = _order(
+        order_id="ord-exp",
+        status=OrderStatus.FILLED,
+        filled_qty=5,
+        position_id="pos-exp",
+    )
+    _seed_with_fill(engine, pos, ord_)
+
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_account_activities = MagicMock(
+        return_value=[
+            {
+                "activity_type": "OPEXP",
+                "symbol": _OCC,
+                "date": "2026-06-10",  # date-only — no time component
+            },
+        ]
+    )
+    broker.get_all_positions = MagicMock(return_value=[])
+
+    with get_connection(engine) as conn:
+        diff = reconcile(broker, conn)
+
+    assert len(diff.expired_option_positions) == 1
+    closed_at = diff.expired_option_positions[0].closed_at
+    assert closed_at is not None
+    assert closed_at.tzinfo is not None  # must be tz-aware (UTC)
+    assert closed_at == datetime(2026, 6, 10, 0, 0, 0, tzinfo=UTC)
