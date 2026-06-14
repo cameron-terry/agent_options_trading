@@ -492,6 +492,168 @@ class BrokerClient:
             return []
         return list(result) if isinstance(result, list) else [result]
 
+    # ------------------------------------------------------------------
+    # Order cancellation (WP-1.6)
+    # ------------------------------------------------------------------
+
+    def cancel(self, order: Order) -> Order:
+        """Cancel an open order at Alpaca and return the updated Order.
+
+        Takes the caller's local Order (which supplies position_id, role, id,
+        submitted_at, limit_price — fields the broker never knows) and returns
+        an updated Order with broker-authoritative fields overlaid: status,
+        broker_status_raw, filled_at, legs_filled, net_fill_price, filled_qty.
+
+        Cancel is idempotent: retrying after a transport timeout carries no
+        duplicate-order risk, unlike submit.
+
+        IMPORTANT — the returned status is the order's TRUE current state, not
+        a guaranteed CANCELLED:
+
+          CANCELLED / EXPIRED  — cancel succeeded or order was already terminal.
+          FILLED               — fill raced the cancel; a real position now exists.
+                                 Callers must treat this as a live position, not a
+                                 closed loop.  This is the broker-as-source-of-truth
+                                 invariant applied to cancellation.
+
+        If Alpaca returns 422 (order already in a terminal state), we re-fetch
+        the current state and return it — no exception is raised.
+
+        For multi-leg orders that end up FILLED, legs_filled is empty here; WP-1.4
+        reconcile populates per-leg fills via a nested fetch, consistent with
+        submit_multi_leg().
+
+        Transport errors (after retries) are raised as exceptions.
+        """
+        try:
+            self._cancel_with_retry(order.broker_order_id)
+        except APIError as exc:
+            if exc.status_code == 422:
+                # Order is already in a terminal state — return whatever the
+                # broker actually holds rather than raising.
+                alpaca_order = self.get_broker_order(order.broker_order_id)
+                if alpaca_order is None:
+                    # 422 then 404 is unexpected; re-raise the original error.
+                    raise
+                return self._overlay_broker_state(order, alpaca_order)
+            raise
+
+        # cancel_order_by_id returns None (204 No Content); fetch to get state.
+        alpaca_order = self.get_broker_order(order.broker_order_id)
+        if alpaca_order is None:
+            raise RuntimeError(
+                f"Order {order.broker_order_id!r} not found immediately after cancel; "
+                "broker may have cleaned it up before the fetch."
+            )
+        return self._overlay_broker_state(order, alpaca_order)
+
+    def _cancel_with_retry(self, broker_order_id: str) -> None:
+        """Call cancel_order_by_id with retry for rate-limits and session expiry.
+
+        Cancel is idempotent — transport retries carry no duplicate-order risk.
+        Retry semantics mirror _submit_with_retry: 429 uses exponential back-off
+        (honouring Retry-After when present); 401 triggers one re-auth then retries.
+        422 (already terminal) is NOT retried here; cancel() handles it.
+        """
+        reauthed = False
+        rate_attempt = 0
+        while rate_attempt <= len(_RATE_LIMIT_DELAYS):
+            try:
+                self._client.cancel_order_by_id(broker_order_id)
+                return
+            except APIError as exc:
+                code = exc.status_code
+                if code == 429:
+                    if rate_attempt >= len(_RATE_LIMIT_DELAYS):
+                        logger.error(
+                            "Rate-limit (429) persists after %d retries; "
+                            "broker_order_id=%s",
+                            len(_RATE_LIMIT_DELAYS),
+                            broker_order_id,
+                        )
+                        raise
+                    retry_after: float | None = None
+                    if exc.response is not None:
+                        raw = exc.response.headers.get("Retry-After")
+                        if raw:
+                            try:
+                                retry_after = float(raw)
+                            except ValueError:
+                                pass
+                    delay = (
+                        retry_after
+                        if retry_after is not None
+                        else _RATE_LIMIT_DELAYS[rate_attempt]
+                    )
+                    logger.warning(
+                        "Rate-limit (429) on cancel attempt %d; sleeping %.1fs "
+                        "(broker_order_id=%s)",
+                        rate_attempt + 1,
+                        delay,
+                        broker_order_id,
+                    )
+                    sleep(delay)
+                    rate_attempt += 1
+                elif code == 401:
+                    if reauthed:
+                        logger.error(
+                            "Session expired (401) after re-auth on cancel; "
+                            "broker_order_id=%s",
+                            broker_order_id,
+                        )
+                        raise
+                    logger.warning(
+                        "Session expired (401); re-initialising TradingClient "
+                        "(broker_order_id=%s)",
+                        broker_order_id,
+                    )
+                    self._reinit_client()
+                    reauthed = True
+                else:
+                    raise
+        raise RuntimeError(  # pragma: no cover
+            "_cancel_with_retry: unexpected loop exit"
+        )
+
+    def _overlay_broker_state(
+        self, local_order: Order, alpaca_order: AlpacaOrder
+    ) -> Order:
+        """Return a new Order with broker fields overlaid on the local Order.
+
+        Broker-authoritative (from alpaca_order): status, broker_status_raw,
+        filled_at, net_fill_price, filled_qty.
+        Local (from local_order): id, broker_order_id, position_id, role,
+        submitted_at, limit_price.
+
+        legs_filled is always empty here — callers that need per-leg fill prices
+        for multi-leg orders must use WP-1.4 reconcile (nested get_order_by_id).
+        """
+        status_str = str(alpaca_order.status.value)
+        status = STATUS_MAP.get(status_str, OrderStatus.WORKING)
+
+        filled_qty = int(alpaca_order.filled_qty or 0)
+        fill_price_raw = alpaca_order.filled_avg_price
+        net_fill_price = (
+            float(fill_price_raw)
+            if fill_price_raw is not None and filled_qty > 0
+            else None
+        )
+
+        return Order(
+            id=local_order.id,
+            broker_order_id=local_order.broker_order_id,
+            position_id=local_order.position_id,
+            role=local_order.role,
+            status=status,
+            broker_status_raw=status_str,
+            submitted_at=local_order.submitted_at,
+            filled_at=alpaca_order.filled_at,
+            limit_price=local_order.limit_price,
+            legs_filled=[],
+            net_fill_price=net_fill_price,
+            filled_qty=filled_qty,
+        )
+
     def _reinit_client(self) -> None:
         """Re-initialise TradingClient from current environment credentials."""
         api_key = os.environ.get("ALPACA_API_KEY", "")
