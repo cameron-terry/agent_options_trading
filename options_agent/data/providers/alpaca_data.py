@@ -73,8 +73,10 @@ def _snapshot_to_raw(snap: OptionsSnapshot, underlying: str) -> RawOptionContrac
     exp, right, strike = _parse_occ_symbol(snap.symbol, underlying)
 
     quote = snap.latest_quote
-    bid = float(quote.bid_price) if quote is not None else None
-    ask = float(quote.ask_price) if quote is not None else None
+    bid_raw = quote.bid_price if quote is not None else None
+    ask_raw = quote.ask_price if quote is not None else None
+    bid = float(bid_raw) if bid_raw is not None else None
+    ask = float(ask_raw) if ask_raw is not None else None
 
     greeks = snap.greeks
 

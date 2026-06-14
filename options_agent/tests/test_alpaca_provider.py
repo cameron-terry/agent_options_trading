@@ -179,6 +179,28 @@ def test_snapshot_to_raw_volume_oi_always_none() -> None:
     assert raw.open_interest is None
 
 
+def test_snapshot_to_raw_partial_quote_bid_none() -> None:
+    # quote object exists but bid_price is None (no bids on illiquid contract)
+    snap = _make_snapshot()
+    snap.latest_quote = MagicMock()
+    snap.latest_quote.bid_price = None
+    snap.latest_quote.ask_price = 2.50
+    raw = _snapshot_to_raw(snap, _UNDERLYING)
+    assert raw.bid is None
+    assert raw.ask == 2.50
+
+
+def test_snapshot_to_raw_partial_quote_ask_none() -> None:
+    # quote object exists but ask_price is None (no offers on illiquid contract)
+    snap = _make_snapshot()
+    snap.latest_quote = MagicMock()
+    snap.latest_quote.bid_price = 0.05
+    snap.latest_quote.ask_price = None
+    raw = _snapshot_to_raw(snap, _UNDERLYING)
+    assert raw.bid == 0.05
+    assert raw.ask is None
+
+
 # ---------------------------------------------------------------------------
 # AlpacaDataClient construction
 # ---------------------------------------------------------------------------
@@ -253,6 +275,21 @@ def test_fetch_option_chain_multiple_contracts(
     assert len(result) == 2
     rights = {c.right for c in result}
     assert rights == {"put", "call"}
+
+
+def test_fetch_option_chain_empty_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Alpaca returns {} when no contracts are listed (e.g. symbol has no options).
+    # WP-3.2 must handle an empty list without passing it through a min_oi filter.
+    opt_mock = MagicMock()
+    opt_mock.get_option_chain.return_value = {}
+
+    client, _, _ = _client_with_mocks(monkeypatch, option_mock=opt_mock)
+    client.begin_cycle()
+    result = client.fetch_option_chain("SPY")
+
+    assert result == []
 
 
 # ---------------------------------------------------------------------------
