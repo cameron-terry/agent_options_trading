@@ -233,6 +233,25 @@ def test_earnings_failure_dividends_ok_marks_unavailable() -> None:
     assert info.ex_dividend is not None
 
 
+def test_dividends_failure_earnings_ok_marks_unavailable() -> None:
+    """data_available=False when dividends fail even if earnings succeed (symmetric)."""
+    provider = _StubProvider(
+        earnings={"AAPL": _earnings_result(20)},
+        dividends={"AAPL": RawDividendResult(event=None, available=False)},
+    )
+    info = get_events(["AAPL"], _LOOKAHEAD, provider, as_of=_TODAY)["AAPL"]
+
+    assert info.data_available is False
+    # earnings still flow through even though overall availability is False
+    assert info.earnings is not None
+
+
+def test_empty_symbols_returns_empty_dict() -> None:
+    """Empty symbols list returns an empty dict without error."""
+    result = get_events([], _LOOKAHEAD, _StubProvider(), as_of=_TODAY)
+    assert result == {}
+
+
 # ---------------------------------------------------------------------------
 # ex_dividend population
 # ---------------------------------------------------------------------------
@@ -467,7 +486,6 @@ def test_yfinance_multiple_symbols_independent(mock_ticker_cls: MagicMock) -> No
         if symbol == "AAPL":
             mock.earnings_dates = _make_earnings_df(aapl_date)
         elif symbol == "FAIL":
-            mock_ticker_cls.side_effect = None
             raise RuntimeError("boom")
         else:
             mock.earnings_dates = None

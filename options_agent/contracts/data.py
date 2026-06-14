@@ -164,6 +164,12 @@ class SymbolSnapshot(BaseModel):
     blackout gate needs the exact count, not near/not-near. None = no known
     upcoming earnings within the lookahead window.
 
+    Population owner (WP-6 assembler): compute as
+        (EventInfo.earnings.event_date - today).days
+    when EventInfo.data_available is True and earnings is not None, else None.
+    The derivation must come from the same EventInfo fetch that populates the
+    EventInfo dict — do not recompute from a separate source.
+
     regime and historical_vol are Optional (derived / history-dependent; tolerate
     data gaps without excluding the symbol).
     """
@@ -191,7 +197,8 @@ class UniverseSnapshot(BaseModel):
 
     Derive SymbolSnapshot.days_to_earnings from the same EventInfo fetch that
     populates the EventInfo dict — do not recompute from a separate source to
-    prevent drift between the two representations.
+    prevent drift between the two representations. WP-6 assembler owns this
+    derivation; see SymbolSnapshot.days_to_earnings docstring for the formula.
     """
 
     symbol_snapshots: dict[str, SymbolSnapshot]
@@ -217,6 +224,12 @@ class ExDividendEvent(BaseModel):
 
 class EventInfo(BaseModel):
     """Upcoming events for one symbol.
+
+    WP-0 amendment (WP-3.5): the agent-tool signature is batch —
+        get_events(symbols: list[str], lookahead_days: int, provider, as_of)
+            -> dict[str, EventInfo]
+    This supersedes the per-symbol form get_events(symbol) -> EventInfo in the
+    original card spec. WP-6's tool wrapper must use the batch signature.
 
     Returned as values in the dict[str, EventInfo] from get_events(). The tool
     accepts a list of symbols and returns one entry per symbol; the lookahead
