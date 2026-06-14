@@ -14,8 +14,8 @@ Fetch a specific Trello ticket from the "Agentic Trading System" board and begin
 Do not call `list_boards` or `get_board_details`.
 
 1. **Run in parallel** using the hardcoded board ID:
-   - `mcp__trello__trello_search` — search for `[<WP-N.M>]` (e.g. `[WP-0.8]`) scoped to the board to find the target card
-   - `mcp__trello__trello_search` — search for the parent epic card `[WP-N]` (e.g. `[WP-0]`)
+   - `mcp__trello__trello_search` — search for `<WP-N.M>` (e.g. `WP-0.8`) scoped to the board to find the target card. Do **not** include brackets in the query — the search API does not require them and the card names will contain the tag.
+   - `mcp__trello__trello_search` — search for the parent epic `<WP-N>` (e.g. `WP-0`) scoped to the board
    - `mcp__trello__get_lists` — get list IDs and names (needed to display which list the card is in and to move it)
 
    **Fallback:** if `trello_search` does not return the full card description, call `mcp__trello__get_card` for the specific card ID to retrieve it.
