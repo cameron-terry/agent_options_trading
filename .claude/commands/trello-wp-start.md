@@ -7,11 +7,20 @@ Fetch a specific Trello ticket from the "Agentic Trading System" board and begin
 
 ### Phase 1 — Fetch and understand the ticket
 
-1. **Find the board** named "Agentic Trading System" using `mcp__trello__list_boards`.
+**Known IDs (hardcoded — stable unless deleted and recreated):**
+- Board: `6a24e3323bff555727f457b2` ("Agentic Trading System")
+- "In Review" list: `6a24e35b9270834ff13b6cff`
 
-2. **Fetch all cards and lists in parallel** with `mcp__trello__trello_get_board_cards` and `mcp__trello__get_board_details` (includeDetails: true).
+Do not call `list_boards` or `get_board_details`.
 
-3. **Find the target card** whose name starts with `[<WP-N.M>]` (e.g. `[WP-0.8]`). Also find the parent epic card whose name starts with `[WP-N]` (e.g. `[WP-0]`).
+1. **Run in parallel** using the hardcoded board ID:
+   - `mcp__trello__trello_search` — search for `[<WP-N.M>]` (e.g. `[WP-0.8]`) scoped to the board to find the target card
+   - `mcp__trello__trello_search` — search for the parent epic card `[WP-N]` (e.g. `[WP-0]`)
+   - `mcp__trello__get_lists` — get list IDs and names (needed to display which list the card is in and to move it)
+
+   **Fallback:** if `trello_search` does not return the full card description, call `mcp__trello__get_card` for the specific card ID to retrieve it.
+
+2. **Find the target card** from the search results — the card whose name starts with `[<WP-N.M>]`. Also identify the parent epic card `[WP-N]`.
 
 4. **Read the project docs** — `docs/WORKSTREAMS.md` and `docs/options-agent-plan.md` — to understand the WP's scope, contracts, and design intent. Focus on the section relevant to the parent WP (e.g. "WP-0" section for WP-0.8).
 

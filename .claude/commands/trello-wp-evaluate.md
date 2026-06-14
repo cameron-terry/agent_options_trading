@@ -13,11 +13,13 @@ Run in parallel:
 
 2. **Read `docs/options-agent-plan.md`** — find any additional design intent, data-flow diagrams, or invariants that apply to this WP.
 
-3. **Find the board** named "Agentic Trading System" using `mcp__trello__list_boards`.
+3. Use hardcoded board ID `6a24e3323bff555727f457b2` ("Agentic Trading System"). Do not call `list_boards`.
 
 ### Phase 2 — Collect all completed and in-review work
 
-1. **Fetch all cards and lists in parallel** with `mcp__trello__trello_get_board_cards` (use `filter: all` to include archived/closed cards) and `mcp__trello__get_board_details` (includeDetails: true). Completed sub-task cards are routinely archived after merge — omitting archived cards will silently miss Done work.
+1. **Fetch in parallel** using the hardcoded board ID. Do not call `get_board_details`.
+   - `mcp__trello__trello_get_board_cards` with `filter: all` — includes archived/closed cards; completed sub-task cards are routinely archived after merge and will be silently missed without this filter
+   - `mcp__trello__get_lists` — list IDs and names (lightweight; used to map each card's `listId` to its list name)
 
 2. **Filter to this WP** — collect every card whose name starts with `[<WP-N>` (epic card + all sub-tasks). Include cards in any list (Done, In Review, In Progress, To-Do) and any archived (`closed: true`) cards returned by `filter: all`.
 
