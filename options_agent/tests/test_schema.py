@@ -38,6 +38,9 @@ _POSITIONS_COLS = {
     "est_max_loss",
     "est_max_profit",
     "opening_order_id",
+    "asset_class",
+    "equity_legs",
+    "assigned_from_position_id",
 }
 
 _ORDERS_COLS = {

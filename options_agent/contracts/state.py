@@ -7,6 +7,24 @@ from pydantic import BaseModel
 from options_agent.contracts.proposal import ExitPlan, Leg, TradeProposal
 from options_agent.contracts.results import SizingResult, ValidationResult
 
+# Sentinel used for equity positions produced by assignment: equity doesn't expire.
+# WP-5 must check asset_class == AssetClass.EQUITY and skip DTE/time-stop logic.
+EQUITY_NEVER_EXPIRES: date = date(9999, 12, 31)
+
+
+class AssetClass(StrEnum):
+    """Discriminator for Position records.
+
+    OPTION_STRATEGY — one or more option legs forming a defined-risk strategy.
+    EQUITY          — shares held as the result of an options assignment event.
+                      WP-5 must skip DTE/exit-plan logic for EQUITY positions.
+                      WP-7 uses assigned_from_position_id to attribute P&L.
+                      WP-8 owns the disposition policy (auto-liquidate vs. halt).
+    """
+
+    OPTION_STRATEGY = "option_strategy"
+    EQUITY = "equity"
+
 
 class KillSwitchState(StrEnum):
     """System-wide kill-switch flag written by WP-7 and read at the top of every cycle.
@@ -99,6 +117,20 @@ class LegFill(BaseModel):
     fill_price: float
 
 
+class EquityLeg(BaseModel):
+    """Shares held as the direct result of an options assignment.
+
+    qty is signed: positive = long (received shares, e.g., short put assigned);
+    negative = short (delivered shares, e.g., short call assigned).
+    avg_price is the strike at which the assignment occurred.
+    symbol is the underlying equity ticker (e.g., 'SPY'), not the OCC string.
+    """
+
+    symbol: str
+    qty: int
+    avg_price: float
+
+
 class Position(BaseModel):
     """
     One strategy-level position record (one iron condor = one Position).
@@ -125,7 +157,9 @@ class Position(BaseModel):
     marked_at: datetime
     unrealized_pnl: float
     realized_pnl: float | None
-    exit_plan: ExitPlan
+    # None for EQUITY positions (no predefined exit plan); always set for
+    # OPTION_STRATEGY. WP-5 must guard: if pos.exit_plan is None: skip.
+    exit_plan: ExitPlan | None
     status: PositionStatus
     opened_at: datetime
     closed_at: datetime | None
@@ -133,6 +167,13 @@ class Position(BaseModel):
     est_max_loss: float
     est_max_profit: float
     opening_order_id: str
+    # WP-1.5 contract additions — WP-0 change approved 2026-06-13
+    asset_class: AssetClass = AssetClass.OPTION_STRATEGY
+    # Populated for EQUITY positions only; empty for OPTION_STRATEGY.
+    equity_legs: list[EquityLeg] = []
+    # Set on equity positions to the option Position.id that caused the assignment.
+    # WP-7 uses this to attribute end-to-end P&L across the full cycle.
+    assigned_from_position_id: str | None = None
 
 
 class Order(BaseModel):
@@ -258,6 +299,25 @@ class ReconcileAnomaly(BaseModel):
     raw: dict[str, Any] = {}
 
 
+class AssignmentEvent(BaseModel):
+    """One options assignment detected by the WP-1.5 reconcile pass.
+
+    Keeps expiration-driven closes (expired_option_positions) and assignment
+    events (assigned_positions) as separate first-class entities in StateDiff
+    so consumers never have to re-infer causality from closed+new pairs.
+
+    created_equity_position is the EQUITY Position row inserted by reconcile.
+    WP-8 must act on this: an options bot should not silently hold assigned
+    equity — implement an auto-liquidate or halt policy.
+    """
+
+    closed_option_position_id: str
+    created_equity_position: Position | None
+    assigned_qty: int
+    assignment_price: float
+    occurred_at: datetime
+
+
 class StateDiff(BaseModel):
     """Result of one reconcile pass — observed broker state vs. local DB.
 
@@ -276,10 +336,15 @@ class StateDiff(BaseModel):
     auto-reconciled.  Callers (WP-5, WP-8) must act on these — reconcile
     only detects and reports, never silently drops them.
 
-      orphans         — open at broker, no matching local record.
-      unmatched_local — local PENDING_SUBMIT with empty broker_order_id
-                        (crash between DB write and broker submit).
-      anomalies       — data-integrity problems requiring human review.
+      orphans                  — open at broker, no matching local record.
+      unmatched_local          — local PENDING_SUBMIT with empty broker_order_id
+                                 (crash between DB write and broker submit).
+      anomalies                — data-integrity problems requiring human review.
+      expired_option_positions — option positions closed by expiry this pass
+                                 (WP-1.5: externally-initiated, no fill event).
+      assigned_positions       — assignment events this pass; each carries the
+                                 closed option position id and the new equity
+                                 position record (WP-1.5).
 
     reconciled_at is the UTC time the pass completed.
     """
@@ -295,5 +360,9 @@ class StateDiff(BaseModel):
     orphans: list[OrderRef] = []
     unmatched_local: list[Order] = []
     anomalies: list[ReconcileAnomaly] = []
+
+    # WP-1.5 additions
+    expired_option_positions: list[Position] = []
+    assigned_positions: list[AssignmentEvent] = []
 
     reconciled_at: datetime

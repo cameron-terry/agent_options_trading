@@ -41,7 +41,7 @@ positions_table = Table(
     Column("marked_at", DateTime(timezone=True), nullable=False),
     Column("unrealized_pnl", Float, nullable=False),
     Column("realized_pnl", Float, nullable=True),
-    Column("exit_plan", JSON, nullable=False),  # ExitPlan
+    Column("exit_plan", JSON, nullable=True),  # ExitPlan; None for EQUITY positions
     Column("status", String, nullable=False),
     Column("opened_at", DateTime(timezone=True), nullable=False, index=True),
     Column("closed_at", DateTime(timezone=True), nullable=True),
@@ -49,6 +49,10 @@ positions_table = Table(
     Column("est_max_loss", Float, nullable=False),
     Column("est_max_profit", Float, nullable=False),
     Column("opening_order_id", String, nullable=False),
+    # WP-1.5: assignment/expiry support
+    Column("asset_class", String, nullable=True),
+    Column("equity_legs", JSON, nullable=True),
+    Column("assigned_from_position_id", String, nullable=True),
 )
 
 # ---------------------------------------------------------------------------
