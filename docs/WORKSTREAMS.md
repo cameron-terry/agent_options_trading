@@ -1,7 +1,7 @@
 # WORKSTREAMS — AI Options Trading Agent
 
 > Companion to `options-agent-plan.md`. That doc is the design; this doc is the **work breakdown**.
-> **Last updated:** 2026-06-06
+> **Last updated:** 2026-06-14
 
 ---
 
@@ -54,7 +54,7 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 
 ## WP-0 — Contracts & scaffolding `contract` `blocker`
 
-**Owner:** lead · **Status:** _not started_ · **Can start:** immediately · **Blocks:** all
+**Owner:** lead · **Status:** _complete_ · **Can start:** immediately · **Blocks:** all
 
 **Goal.** Define every shared type and empty interface so all other WPs can build against stubs in parallel. **No business logic** — types and signatures only.
 
@@ -84,17 +84,17 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 - One issue for the contract-change policy doc + CODEOWNERS on the contracts module.
 
 **Definition of done**
-- [ ] All models compile and are importable.
-- [ ] Every data tool has a typed signature and return model.
-- [ ] `TradeProposal` round-trips (serialize → deserialize) in a test.
-- [ ] CI green on the skeleton.
-- [ ] Contracts module is sign-off-frozen; change policy documented; CODEOWNERS set.
+- [x] All models compile and are importable.
+- [x] Every data tool has a typed signature and return model.
+- [x] `TradeProposal` round-trips (serialize → deserialize) in a test.
+- [x] CI green on the skeleton.
+- [x] Contracts module is sign-off-frozen; change policy documented; CODEOWNERS set.
 
 ---
 
 ## WP-0.5 — Vertical slice (thin end-to-end) `blocker`
 
-**Owner:** integrator · **Status:** _not started_ · **Can start:** after WP-0 + minimal WP-1/WP-2/WP-4 · **Target:** week 1
+**Owner:** integrator · **Status:** _complete_ · **Can start:** after WP-0 + minimal WP-1/WP-2/WP-4 · **Target:** week 1
 
 **Goal.** Prove the seams connect with trivial logic, before anyone builds deep. A hardcoded proposal must round-trip to a paper fill and a journal entry.
 
@@ -113,15 +113,15 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 - A working end-to-end skeleton + a documented "first paper fill" runbook.
 
 **Definition of done**
-- [ ] Running `run_entry_cycle()` against Alpaca **paper** places the hardcoded order.
-- [ ] Reconcile detects the fill; a `JournalRecord` is written with the broker order ID.
-- [ ] The slice is documented so each WP owner knows the integration target is real.
+- [x] Running `run_entry_cycle()` against Alpaca **paper** places the hardcoded order.
+- [x] Reconcile detects the fill; a `JournalRecord` is written with the broker order ID.
+- [x] The slice is documented so each WP owner knows the integration target is real.
 
 ---
 
 ## WP-1 — Broker & Execution `area:broker`
 
-**Owner:** _TBD_ · **Status:** _not started_ · **Can start:** immediately (needs Alpaca paper creds)
+**Owner:** _TBD_ · **Status:** _complete_ · **Can start:** immediately (needs Alpaca paper creds)
 
 **Goal.** Reliable order placement and broker↔local reconciliation against Alpaca paper.
 
@@ -150,16 +150,16 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 - Reconcile: expirations & assignments (the tricky cases).
 
 **Definition of done**
-- [ ] Places single- and multi-leg limit orders on paper.
-- [ ] Reconcile correctly classifies fill / partial / expiry / assignment in tests.
-- [ ] Broker is treated as source of truth for fills; DB for intent (documented).
-- [ ] Handles broker outage / rate-limit / expired-session gracefully.
+- [x] Places single- and multi-leg limit orders on paper.
+- [x] Reconcile correctly classifies fill / partial / expiry / assignment in tests.
+- [x] Broker is treated as source of truth for fills; DB for intent (documented).
+- [x] Handles broker outage / rate-limit / expired-session gracefully.
 
 ---
 
 ## WP-2 — State & Persistence `area:state`
 
-**Owner:** _TBD_ · **Status:** _not started_ · **Can start:** immediately
+**Owner:** _TBD_ · **Status:** _complete_ · **Can start:** immediately
 
 **Goal.** Durable store for positions, orders, decisions, and the journal.
 
@@ -187,15 +187,15 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 - SQLite→Postgres switch behind one config flag.
 
 **Definition of done**
-- [ ] All state models persist and reload losslessly.
-- [ ] A full `JournalRecord` (context snapshot, proposal, validation, sizing, orders, outcome) writes and reads back.
-- [ ] Backend swap (SQLite↔Postgres) needs no call-site changes.
+- [x] All state models persist and reload losslessly.
+- [x] A full `JournalRecord` (context snapshot, proposal, validation, sizing, orders, outcome) writes and reads back.
+- [x] Backend swap (SQLite↔Postgres) needs no call-site changes.
 
 ---
 
 ## WP-3 — Data & Signals `area:data`
 
-**Owner:** _TBD_ (internally parallel — can be 2–3 people) · **Status:** _not started_ · **Can start:** immediately (needs data creds)
+**Owner:** _TBD_ (internally parallel — can be 2–3 people) · **Status:** _in progress_ · **Can start:** immediately (needs data creds)
 
 **Goal.** Turn raw market data into the compact, decision-ready inputs the agent consumes.
 
@@ -229,16 +229,16 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 - (Phase 2) news/sentiment.
 
 **Definition of done**
-- [ ] `get_filtered_chain` returns a compact, liquidity-filtered table within token budget.
-- [ ] IV-rank values **sanity-checked against an external source**.
+- [x] `get_filtered_chain` returns a compact, liquidity-filtered table within token budget.
+- [x] IV-rank values **sanity-checked against an external source**.
 - [ ] Earnings-proximity flag correct for a set of known tickers.
-- [ ] Graceful behavior on missing/stale data.
+- [x] Graceful behavior on missing/stale data.
 
 ---
 
 ## WP-4 — Risk & Guardrails `area:risk`
 
-**Owner:** _TBD_ · **Status:** _not started_ · **Can start:** immediately · **Recommended: staff first after WP-0**
+**Owner:** _TBD_ · **Status:** _complete_ · **Can start:** immediately · **Recommended: staff first after WP-0**
 
 **Goal.** The deterministic hard layer that no proposal bypasses. Touches neither LLM nor live data → cleanest isolated track.
 
@@ -267,10 +267,10 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 - Limits config schema + defaults.
 
 **Definition of done**
-- [ ] Fixture suite of **hand-written `TradeProposal` objects**: several valid + one tripping **each** rejection reason, all behaving correctly.
-- [ ] Every rejection emits a structured, loggable reason.
-- [ ] Naked short legs rejected unconditionally.
-- [ ] 100% of validator branches covered by tests, **no LLM or live data involved**.
+- [x] Fixture suite of **hand-written `TradeProposal` objects**: several valid + one tripping **each** rejection reason, all behaving correctly.
+- [x] Every rejection emits a structured, loggable reason.
+- [x] Naked short legs rejected unconditionally.
+- [x] 100% of validator branches covered by tests, **no LLM or live data involved**.
 
 ---
 
