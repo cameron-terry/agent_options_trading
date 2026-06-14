@@ -35,7 +35,8 @@ _FILTER_PARAMS = ChainFilterParams(
     delta_min=0.15,
     delta_max=0.45,
     min_open_interest=100,
-    max_spread_width=0.20,
+    max_spread_pct_of_mid=0.10,
+    max_spread_abs_floor=0.05,
 )
 
 _CONTRACT = OptionContract(
@@ -160,7 +161,8 @@ def test_chain_filter_params_construction() -> None:
     assert p.delta_min == 0.15
     assert p.delta_max == 0.45
     assert p.min_open_interest == 100
-    assert p.max_spread_width == 0.20
+    assert p.max_spread_pct_of_mid == 0.10
+    assert p.max_spread_abs_floor == 0.05
 
 
 def test_chain_filter_params_round_trip() -> None:
@@ -273,6 +275,63 @@ def test_filtered_chain_round_trip() -> None:
         contracts=[_CONTRACT],
     )
     assert FilteredChain.model_validate(chain.model_dump()) == chain
+
+
+def test_filtered_chain_metadata_defaults() -> None:
+    chain = FilteredChain(
+        underlying="SPY",
+        underlying_price=456.32,
+        as_of=_NOW,
+        filter_params=_FILTER_PARAMS,
+        contracts=[_CONTRACT],
+    )
+    assert chain.strategy_hint is None
+    assert chain.oi_available is True
+    assert chain.excluded_for_missing_greeks == 0
+    assert chain.truncated is False
+    assert chain.total_before_cap == 0
+
+
+def test_filtered_chain_metadata_explicit() -> None:
+    chain = FilteredChain(
+        underlying="SPY",
+        underlying_price=456.32,
+        as_of=_NOW,
+        filter_params=_FILTER_PARAMS,
+        contracts=[_CONTRACT],
+        strategy_hint="iron_condor",
+        oi_available=False,
+        excluded_for_missing_greeks=3,
+        truncated=True,
+        total_before_cap=150,
+    )
+    assert chain.strategy_hint == "iron_condor"
+    assert chain.oi_available is False
+    assert chain.excluded_for_missing_greeks == 3
+    assert chain.truncated is True
+    assert chain.total_before_cap == 150
+
+
+def test_option_contract_none_volume_oi() -> None:
+    c = OptionContract(
+        symbol="SPY260718P00450000",
+        strike=450.0,
+        expiration=_EXPIRY,
+        right="put",
+        bid=1.20,
+        ask=1.30,
+        mid=1.25,
+        volume=None,
+        open_interest=None,
+        delta=-0.28,
+        theta=-0.08,
+        vega=0.22,
+        iv=0.24,
+        spread_width=0.10,
+        dte=41,
+    )
+    assert c.volume is None
+    assert c.open_interest is None
 
 
 # ---------------------------------------------------------------------------

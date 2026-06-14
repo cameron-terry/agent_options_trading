@@ -499,7 +499,10 @@ def _check_liquidity(
                 )
             )
 
-        if contract.open_interest < chain_limits.min_open_interest:
+        if (
+            contract.open_interest is not None
+            and contract.open_interest < chain_limits.min_open_interest
+        ):
             reasons.append(
                 RejectionReason(
                     rule_id=ValidationRuleId.LIQUIDITY_OPEN_INTEREST,

@@ -379,7 +379,8 @@ def _make_chain(legs: list[Leg] | None = None) -> FilteredChain:
             delta_min=0.15,
             delta_max=0.45,
             min_open_interest=500,
-            max_spread_width=0.10,
+            max_spread_pct_of_mid=0.10,
+            max_spread_abs_floor=0.05,
         ),
         contracts=[
             _make_option_contract(leg.strike, leg.right, leg.expiration) for leg in legs
@@ -576,6 +577,29 @@ def test_liquidity_low_open_interest_rejected() -> None:
     )
     reasons = _run(chain=chain)
     assert any(r.rule_id == ValidationRuleId.LIQUIDITY_OPEN_INTEREST for r in reasons)
+
+
+def test_liquidity_none_open_interest_passes_validator() -> None:
+    # When the provider doesn't return OI (Alpaca snapshot endpoint), open_interest
+    # is None. The validator must not raise on None — the oi_available=False flag
+    # on FilteredChain already documents that OI screening was skipped.
+    legs = _put_spread_legs()
+    contracts = [
+        _make_option_contract(leg.strike, leg.right, leg.expiration, open_interest=None)
+        for leg in legs
+    ]
+    chain = FilteredChain(
+        underlying="SPY",
+        underlying_price=455.0,
+        as_of=_NOW,
+        filter_params=_make_chain().filter_params,
+        contracts=contracts,
+        oi_available=False,
+    )
+    reasons = _run(chain=chain)
+    assert not any(
+        r.rule_id == ValidationRuleId.LIQUIDITY_OPEN_INTEREST for r in reasons
+    )
 
 
 def test_liquidity_valid_chain_passes() -> None:

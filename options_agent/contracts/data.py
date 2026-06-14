@@ -10,8 +10,12 @@ class ChainFilterParams(BaseModel):
     """Thresholds applied when building a FilteredChain.
 
     Carried on the chain so the journal can answer 'why did the agent only see
-    these strikes?' without re-fetching. Confirm field values match Limits defaults
-    in risk/limits.py before freeze.
+    these strikes?' without re-fetching. Field names mirror ChainFilterLimits in
+    risk/limits.py — the two must stay in sync.
+
+    Spread pass rule: spread ≤ max_spread_pct_of_mid * mid  OR  spread ≤
+    max_spread_abs_floor. The absolute floor prevents cheap-but-tight contracts
+    from being falsely excluded by the percentage rule.
     """
 
     dte_min: int
@@ -19,7 +23,8 @@ class ChainFilterParams(BaseModel):
     delta_min: float
     delta_max: float
     min_open_interest: int
-    max_spread_width: float
+    max_spread_pct_of_mid: float
+    max_spread_abs_floor: float
 
 
 class OptionContract(BaseModel):
@@ -43,8 +48,8 @@ class OptionContract(BaseModel):
     bid: float
     ask: float
     mid: float
-    volume: int
-    open_interest: int
+    volume: int | None
+    open_interest: int | None
     delta: float
     theta: float
     vega: float
@@ -63,6 +68,18 @@ class FilteredChain(BaseModel):
     the assembler (WP-6) renders contracts to a compact tabular string for the
     prompt while this typed object flows through code (WP-1 mapping, validation,
     journal).
+
+    Metadata fields document the filter's exclusions so they are journalable:
+    - strategy_hint: the hint passed to get_filtered_chain() (determines
+      right-side filter).
+    - oi_available: False when the provider returned None OI for all contracts
+      (currently always False for Alpaca's snapshot endpoint). When False, the
+      min_open_interest threshold was not enforced; the agent context should make
+      this visible so OI screening is not falsely assumed to have occurred.
+    - excluded_for_missing_greeks: count of contracts dropped because delta, theta,
+      vega, or IV was None. A high count signals a provider data-quality issue.
+    - truncated: True when the per-right cap was applied to control token budget.
+    - total_before_cap: count of contracts after all other filters, before cap.
     """
 
     underlying: str
@@ -70,6 +87,11 @@ class FilteredChain(BaseModel):
     as_of: datetime
     filter_params: ChainFilterParams
     contracts: list[OptionContract]
+    strategy_hint: str | None = None
+    oi_available: bool = True
+    excluded_for_missing_greeks: int = 0
+    truncated: bool = False
+    total_before_cap: int = 0
 
 
 class PortfolioState(BaseModel):

@@ -18,6 +18,10 @@ class ChainFilterLimits(BaseModel):
     # Absolute value of delta; covers both calls (positive) and puts (negative).
     min_abs_delta: float = Field(default=0.15, ge=0, le=1.0)
     max_abs_delta: float = Field(default=0.45, ge=0, le=1.0)
+    # Per-right cap applied after all filters to control FilteredChain token budget.
+    # For two-sided strategies (iron_condor, iron_butterfly) the cap is applied
+    # independently to calls and puts so neither wing is starved.
+    max_contracts_per_chain: int = Field(default=100, ge=1)
 
     @model_validator(mode="after")
     def _dte_range_valid(self) -> "ChainFilterLimits":
