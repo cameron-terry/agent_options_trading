@@ -1,3 +1,19 @@
+"""Tests for WP-0.5.2: orchestrator.py::run_entry_cycle().
+
+Happy-path test exercises the full pipeline:
+  stub_reasoner → validate_structural → size → submit_multi_leg
+  → reconcile → write_journal_record
+and asserts the PENDING_OPEN → OPEN position transition driven by reconcile.
+
+All Alpaca network calls are mocked at the BrokerClient method level.
+The DB layer uses the shared in-memory SQLite engine fixture from conftest.py.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from unittest.mock import MagicMock, patch
+
 import pytest
 from pydantic import ValidationError
 
@@ -12,7 +28,18 @@ from options_agent.contracts import (
     SizingResult,
     ValidationResult,
 )
+from options_agent.contracts.state import (
+    Order,
+    OrderRole,
+    OrderStatus,
+    PositionStatus,
+)
+from options_agent.execution.broker import BrokerClient
 from options_agent.orchestrator import run_entry_cycle, run_monitor_cycle
+from options_agent.risk.limits import Limits
+from options_agent.state.crud import get_order, get_position
+from options_agent.state.db import get_connection
+from options_agent.state.journal import read_journal_record
 
 # ---------------------------------------------------------------------------
 # Importability
@@ -253,15 +280,214 @@ def test_monitor_result_round_trip() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Stub functions raise NotImplementedError
+# run_monitor_cycle still raises NotImplementedError (WP-8)
 # ---------------------------------------------------------------------------
-
-
-def test_run_entry_cycle_raises_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        run_entry_cycle(config=Config())
 
 
 def test_run_monitor_cycle_raises_not_implemented() -> None:
     with pytest.raises(NotImplementedError):
         run_monitor_cycle(positions=[], config=Config())
+
+
+# ---------------------------------------------------------------------------
+# Helpers for run_entry_cycle tests
+# ---------------------------------------------------------------------------
+
+_NOW = datetime(2026, 6, 14, 14, 30, tzinfo=UTC)
+_BROKER_ORDER_ID = "broker-test-abc-123"
+
+
+def _make_broker(monkeypatch: pytest.MonkeyPatch) -> BrokerClient:
+    """Return a BrokerClient backed by a MagicMock TradingClient."""
+    monkeypatch.setenv("ALPACA_API_KEY", "key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
+    with patch(
+        "options_agent.execution.broker.TradingClient",
+        return_value=MagicMock(),
+    ):
+        return BrokerClient(Config())
+
+
+def _wire_happy_broker(broker: BrokerClient, qty: int = 2) -> None:
+    """Configure broker mocks for the standard happy-path scenario.
+
+    get_account()     → mock account with $100,000 equity
+    submit_multi_leg  → returns WORKING Order (position_id captured from args)
+    list_open_orders  → [] (order already dropped off open list)
+    get_broker_order  → FILLED AlpacaOrder
+    get_all_positions → [] (no open equity positions for expiry backstop)
+    get_account_activities → [] (no assignment/expiry events)
+    """
+    mock_account = MagicMock()
+    mock_account.equity = "100000.00"
+    mock_account.buying_power = "100000.00"
+    mock_account.options_buying_power = "100000.00"
+    mock_account.options_approved_level = 3
+    broker.get_account = MagicMock(return_value=mock_account)
+
+    def _submit(proposal, qty_arg, limit_price, position_id, role=OrderRole.OPEN):
+        return Order(
+            id="order-slice-001",
+            broker_order_id=_BROKER_ORDER_ID,
+            position_id=position_id,
+            role=role,
+            status=OrderStatus.WORKING,
+            broker_status_raw="new",
+            submitted_at=_NOW,
+            filled_at=None,
+            limit_price=limit_price,
+            legs_filled=[],
+            net_fill_price=None,
+            filled_qty=0,
+        )
+
+    broker.submit_multi_leg = _submit  # type: ignore[method-assign]
+
+    # reconcile: order is not in open list → fetched individually as filled
+    broker.list_open_orders = MagicMock(return_value=[])
+
+    filled_alpaca = MagicMock()
+    filled_alpaca.id = _BROKER_ORDER_ID
+    filled_alpaca.status.value = "filled"
+    filled_alpaca.filled_qty = qty
+    filled_alpaca.filled_avg_price = -1.50
+    filled_alpaca.symbol = None
+    filled_alpaca.legs = None
+    filled_alpaca.submitted_at = _NOW
+    filled_alpaca.filled_at = _NOW
+    broker.get_broker_order = MagicMock(return_value=filled_alpaca)
+
+    broker.get_all_positions = MagicMock(return_value=[])
+    broker.get_account_activities = MagicMock(return_value=[])
+
+
+# ---------------------------------------------------------------------------
+# run_entry_cycle — happy path (OPENED)
+# ---------------------------------------------------------------------------
+
+
+def test_run_entry_cycle_happy_path_result(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CycleResult fields are fully populated on the happy path."""
+    broker = _make_broker(monkeypatch)
+    _wire_happy_broker(broker)
+
+    result = run_entry_cycle(Config(), broker=broker, engine=engine)
+
+    assert result.action_taken == ActionTaken.OPENED
+    assert result.proposal is not None
+    assert result.validation is not None
+    assert result.validation.passed is True
+    assert result.sizing is not None
+    assert result.sizing.contracts > 0
+    assert result.journal_record_id is not None
+    assert result.short_circuit_reason is None
+    assert result.error is None
+
+
+def test_run_entry_cycle_journal_written(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """JournalRecord is written and contains position_ids and order_ids."""
+    broker = _make_broker(monkeypatch)
+    _wire_happy_broker(broker)
+
+    result = run_entry_cycle(Config(), broker=broker, engine=engine)
+
+    assert result.journal_record_id is not None
+    with get_connection(engine) as conn:
+        jr = read_journal_record(conn, result.journal_record_id)
+
+    assert jr is not None
+    assert jr.action_taken == ActionTaken.OPENED
+    assert len(jr.position_ids) == 1
+    assert len(jr.order_ids) == 1
+    assert jr.strategy == "bull_put_spread"
+    assert jr.underlying == "SPY"
+
+
+def test_run_entry_cycle_broker_order_id_traceable(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """JournalRecord.order_ids → Order.broker_order_id is resolvable (criterion 3)."""
+    broker = _make_broker(monkeypatch)
+    _wire_happy_broker(broker)
+
+    result = run_entry_cycle(Config(), broker=broker, engine=engine)
+
+    assert result.journal_record_id is not None
+    with get_connection(engine) as conn:
+        jr = read_journal_record(conn, result.journal_record_id)
+        assert jr is not None
+        order = get_order(conn, jr.order_ids[0])
+
+    assert order is not None
+    assert order.broker_order_id == _BROKER_ORDER_ID
+
+
+def test_run_entry_cycle_pending_open_to_open_transition(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """reconcile() transitions the Position from PENDING_OPEN to OPEN.
+
+    This is the primary integration assertion for the slice: the FK chain
+    JournalRecord → Order → Position must exist and the status must have
+    advanced through the real lifecycle, not been written as OPEN directly.
+    """
+    broker = _make_broker(monkeypatch)
+    _wire_happy_broker(broker)
+
+    result = run_entry_cycle(Config(), broker=broker, engine=engine)
+
+    assert result.journal_record_id is not None
+    with get_connection(engine) as conn:
+        jr = read_journal_record(conn, result.journal_record_id)
+        assert jr is not None
+        order = get_order(conn, jr.order_ids[0])
+        assert order is not None
+        pos = get_position(conn, order.position_id)
+
+    assert pos is not None
+    # reconcile() must have detected the fill and applied the PENDING_OPEN → OPEN
+    # transition. Writing OPEN directly would defeat the purpose of the slice.
+    assert pos.status == PositionStatus.OPEN
+    assert pos.id == jr.position_ids[0]
+
+
+# ---------------------------------------------------------------------------
+# run_entry_cycle — validation failure (REJECTED)
+# ---------------------------------------------------------------------------
+
+
+def test_run_entry_cycle_validation_failure_result(
+    engine,
+) -> None:
+    """REJECTED CycleResult returned when strategy is not in allowed_strategies."""
+    # Empty playbook forces UNKNOWN_STRATEGY rejection on any proposal.
+    config = Config(limits=Limits(allowed_strategies=frozenset()))
+
+    result = run_entry_cycle(config, engine=engine)
+
+    assert result.action_taken == ActionTaken.REJECTED
+    assert result.validation is not None
+    assert result.validation.passed is False
+    assert result.journal_record_id is not None
+    assert result.sizing is None
+
+
+def test_run_entry_cycle_validation_failure_journal_written(
+    engine,
+) -> None:
+    """REJECTED cycles write a JournalRecord with rejection_rule_ids populated."""
+    config = Config(limits=Limits(allowed_strategies=frozenset()))
+
+    result = run_entry_cycle(config, engine=engine)
+
+    assert result.journal_record_id is not None
+    with get_connection(engine) as conn:
+        jr = read_journal_record(conn, result.journal_record_id)
+
+    assert jr is not None
+    assert jr.action_taken == ActionTaken.REJECTED
+    assert len(jr.rejection_rule_ids) > 0
