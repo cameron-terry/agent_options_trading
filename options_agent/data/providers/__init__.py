@@ -85,6 +85,9 @@ class RawOptionContract(BaseModel):
     theta: float | None
     vega: float | None
     rho: float | None
+    # "alpaca" for Alpaca-provided Greeks; "computed/<model>" for future local
+    # fallback. None means provenance not yet determined.
+    greek_source: str | None = None
 
 
 @runtime_checkable
