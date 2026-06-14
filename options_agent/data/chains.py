@@ -35,6 +35,7 @@ from options_agent.contracts.data import (
     FilteredChain,
     OptionContract,
 )
+from options_agent.data.greeks_iv import enrich_greeks_iv
 from options_agent.data.providers import DataProvider
 from options_agent.risk.limits import ChainFilterLimits
 
@@ -83,7 +84,7 @@ def get_filtered_chain(
     if as_of is None:
         as_of = datetime.now(UTC)
 
-    raw_contracts = provider.fetch_option_chain(symbol)
+    raw_contracts = enrich_greeks_iv(provider.fetch_option_chain(symbol))
     underlying_price = provider.fetch_latest_price(symbol)
 
     # Determine which rights to include.
@@ -184,6 +185,7 @@ def get_filtered_chain(
                 iv=raw.implied_volatility,
                 spread_width=spread_width,
                 dte=dte,
+                greek_source=raw.greek_source,
             )
         )
 

@@ -56,6 +56,10 @@ class OptionContract(BaseModel):
     iv: float
     spread_width: float
     dte: int
+    # "alpaca" for Alpaca-provided Greeks; "computed/<model>" for future local
+    # fallback. Distinguishing source is necessary when mixing provided and
+    # computed Greeks would otherwise silently corrupt portfolio aggregation.
+    greek_source: str | None = None
 
 
 class FilteredChain(BaseModel):
