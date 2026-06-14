@@ -2,10 +2,23 @@
 
 Public API:
     enrich_greeks_iv(contracts) -> list[RawOptionContract]
+    get_atm_iv(contracts, spot_price, target_dte=30) -> float | None
 
-Validates Greek and IV fields from the provider, coercing implausible or
-non-finite values to None with warnings. Designed to run on the output of
-DataProvider.fetch_option_chain() before chains.py applies filter/compaction.
+enrich_greeks_iv validates Greek and IV fields from the provider, coercing
+implausible or non-finite values to None with warnings. Designed to run on the
+output of DataProvider.fetch_option_chain() before chains.py applies
+filter/compaction.
+
+get_atm_iv extracts a single daily ATM IV scalar from an enriched chain (the
+output of enrich_greeks_iv). Used by data/iv_rank.py to build the rolling
+iv_history needed for IV-rank and IV-percentile computation (WP-3.4).
+
+"ATM IV" definition (must be applied consistently to every stored observation
+and to the live current_iv passed to compute_iv_rank / compute_iv_percentile):
+  - Expiration: nearest to target_dte (default 30) calendar days from today,
+    among expirations still in the future.
+  - Contract: call with delta closest to 0.5. Fallback (no delta): call with
+    strike closest to spot_price.
 
 Sign conventions (Alpaca uses long-option perspective for all contracts):
   - delta:  calls ∈ (0, 1], puts ∈ [-1, 0)
@@ -36,6 +49,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable
+from datetime import date
 
 from options_agent.data.providers import RawOptionContract
 
@@ -123,3 +137,51 @@ def _check(
         )
         return None
     return value
+
+
+def get_atm_iv(
+    contracts: list[RawOptionContract],
+    spot_price: float,
+    target_dte: int = 30,
+) -> float | None:
+    """Extract the ATM IV scalar from an enriched option chain.
+
+    Selects the nearest-to-target_dte expiration (future expirations only),
+    then picks the call whose delta is closest to 0.5. Falls back to the call
+    with strike closest to spot_price when no delta is available.
+
+    Call enrich_greeks_iv() on the raw chain before passing it here so that
+    implausible or non-finite IV values are already coerced to None.
+
+    Returns None if no call contracts with valid IV exist on any future
+    expiration.
+    """
+    today = date.today()
+
+    # Calls with valid IV on a future expiration.
+    candidates = [
+        c
+        for c in contracts
+        if c.right == "call"
+        and c.implied_volatility is not None
+        and (c.expiration - today).days > 0
+    ]
+    if not candidates:
+        logger.debug("get_atm_iv: no valid call contracts with future expiry.")
+        return None
+
+    # Nearest-to-target_dte expiration.
+    target_exp = min(
+        {c.expiration for c in candidates},
+        key=lambda exp: abs((exp - today).days - target_dte),
+    )
+    at_exp = [c for c in candidates if c.expiration == target_exp]
+
+    # ATM selection: prefer delta closest to 0.5; fallback to strike proximity.
+    with_delta = [c for c in at_exp if c.delta is not None]
+    if with_delta:
+        atm = min(with_delta, key=lambda c: abs((c.delta or 0.0) - 0.5))
+    else:
+        atm = min(at_exp, key=lambda c: abs(c.strike - spot_price))
+
+    return atm.implied_volatility
