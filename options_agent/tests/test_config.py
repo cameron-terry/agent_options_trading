@@ -20,6 +20,7 @@ def test_chain_filter_defaults() -> None:
     assert cf.max_dte == 45
     assert cf.min_abs_delta == 0.15
     assert cf.max_abs_delta == 0.45
+    assert cf.max_contracts_per_chain == 100
 
 
 def test_chain_filter_dte_range_invalid() -> None:
