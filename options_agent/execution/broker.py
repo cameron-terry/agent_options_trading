@@ -3,12 +3,13 @@ import os
 import uuid
 from datetime import UTC, datetime
 from time import monotonic, sleep
-from typing import cast
+from typing import Any, cast
 
 from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import QueryOrderStatus
 from alpaca.trading.models import Order as AlpacaOrder
+from alpaca.trading.models import Position as AlpacaPosition
 from alpaca.trading.models import TradeAccount
 from alpaca.trading.requests import GetOrdersRequest
 
@@ -447,6 +448,49 @@ class BrokerClient:
             if exc.status_code == 404:
                 return None
             raise
+
+    # ------------------------------------------------------------------
+    # Position and activity queries (WP-1.5 expiry/assignment detection)
+    # ------------------------------------------------------------------
+
+    def get_all_positions(self) -> list[AlpacaPosition]:
+        """Return all open positions currently held at the broker.
+
+        Used by the WP-1.5 absence backstop: a DB position whose option legs
+        are absent from this list and whose nearest_expiration is in the past
+        is a candidate for expiry marking.
+        """
+        results = self._client.get_all_positions()
+        return list(results)  # type: ignore[arg-type]
+
+    def get_account_activities(
+        self,
+        activity_types: list[str],
+        after: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return account activity records filtered by type.
+
+        Uses TradingClient.get() directly because the alpaca-py SDK does not
+        yet expose a typed get_activities() method on TradingClient.
+        Migrate to the SDK method if/when it is added (watch alpaca-py releases).
+
+        activity_types — e.g. ["OPEXP", "OPASN"]
+        after          — only return activities after this UTC datetime (ISO 8601)
+
+        Returns a list of raw dicts from the Alpaca /v2/account/activities
+        endpoint.  Relevant keys: activity_type, symbol, date, qty, price,
+        description, net_amount.
+        """
+        params: dict[str, Any] = {
+            "activity_types": ",".join(activity_types),
+        }
+        if after is not None:
+            params["after"] = after.isoformat()
+
+        result = self._client.get("/account/activities", params)  # type: ignore[attr-defined]
+        if result is None:
+            return []
+        return list(result) if isinstance(result, list) else [result]
 
     def _reinit_client(self) -> None:
         """Re-initialise TradingClient from current environment credentials."""

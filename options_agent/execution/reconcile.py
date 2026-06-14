@@ -1,8 +1,10 @@
-"""Fill-detection reconcile pass (WP-1.4).
+"""Fill-detection and expiry/assignment reconcile (WP-1.4 + WP-1.5).
 
 reconcile() is the system's safety net: it pulls live order state from Alpaca,
 diffs against the local DB, records immutable FillEvents, and transitions Order
-and Position records to match broker reality.
+and Position records to match broker reality.  WP-1.5 extends it to detect two
+externally-initiated state transitions that have no corresponding fill event:
+option expiry and option assignment.
 
 Design invariants
 -----------------
@@ -16,26 +18,49 @@ either commit together or roll back as a unit.  Use state.db.get_connection():
     with get_connection(engine) as conn:
         diff = reconcile(broker, conn)
 
-Idempotency is enforced at the FillEvent level via broker_exec_id.  Running
-reconcile() twice in the same state produces a StateDiff with all newly_*
-lists empty on the second pass (the fill events already exist).
+Idempotency (fill path): enforced at the FillEvent level via broker_exec_id.
+Idempotency (expiry/assignment path): enforced by status checks — only OPEN
+positions are candidates; a position already marked EXPIRED or ASSIGNED is
+never re-processed.
 
-Scope
------
-WP-1.4 covers the fill-detection path only.  Expirations and assignments are
-WP-1.5.  Orphan and unmatched_local detection is implemented here but their
-resolution (cancel the orphan? alert?) belongs to WP-5 / WP-8.
+Expiry/assignment detection strategy (WP-1.5)
+----------------------------------------------
+Primary: activity feed — query /v2/account/activities for OPEXP and OPASN
+events in the last 48 h.  Event-driven; gives precise occurrence timestamps.
+
+Backstop: absence check — any OPEN position whose nearest_expiration is
+_EXPIRY_GRACE_DAYS or more in the past and whose option legs are absent from
+get_all_positions() is marked EXPIRED.  Fires regardless of whether the
+activity feed succeeded, catching events the feed missed (paper-env gaps,
+API failures, weekend settlement lag).
+
+NOTE on paper trading: Alpaca paper may not emit OPEXP/OPASN activities with
+the same reliability as live.  If the activity feed consistently returns empty
+for known expirations, the absence backstop is the operative path.  Verify
+this empirically before the first real-money run.
+
+WP-5 / WP-8 contracts
+-----------------------
+- WP-5 MUST skip exit-rule evaluation for asset_class == EQUITY positions.
+- WP-8 owns the assigned-equity disposition policy (auto-liquidate vs. halt).
+  An equity position in the DB is an unhandled state for an options bot; WP-8
+  must decide and implement that policy.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy.engine import Connection
 
 from options_agent.contracts.state import (
+    EQUITY_NEVER_EXPIRES,
+    AssetClass,
+    AssignmentEvent,
+    EquityLeg,
     FillEvent,
     LegFill,
     Order,
@@ -52,6 +77,10 @@ from options_agent.state.crud import (
     get_order,
     get_position,
     insert_fill_event_if_new,
+    insert_position,
+    list_fill_events_for_order,
+    list_open_option_positions_expiring_on_or_before,
+    list_open_positions,
     list_pending_orders,
     patch_order,
     update_position,
@@ -59,15 +88,32 @@ from options_agent.state.crud import (
 
 logger = logging.getLogger(__name__)
 
+# Absence backstop: only treat a position as expired if its nearest_expiration
+# is at least this many days in the past.  A grace period avoids false positives
+# from broker settlement lag on expiration afternoon.
+_EXPIRY_GRACE_DAYS: int = 1
 
-def reconcile(broker: BrokerClient, conn: Connection) -> StateDiff:
+# Activity feed lookback window.  48 h catches weekend expirations that reconcile
+# runs on Monday, and any same-day processing lag.
+_ACTIVITY_LOOKBACK_HOURS: int = 48
+
+
+def reconcile(
+    broker: BrokerClient,
+    conn: Connection,
+    *,
+    _clock: datetime | None = None,
+) -> StateDiff:
     """Diff broker state against local DB and sync fill updates.
 
     Returns a StateDiff describing every status transition observed this pass.
     All DB writes are executed on the supplied connection; the caller owns the
     transaction boundary.
+
+    _clock is a test-only override for the current time. Production callers
+    must not pass it.
     """
-    now = datetime.now(UTC)
+    now = _clock if _clock is not None else datetime.now(UTC)
 
     # ------------------------------------------------------------------
     # Fetch broker open orders — one call to minimise round-trips.
@@ -307,6 +353,14 @@ def reconcile(broker: BrokerClient, conn: Connection) -> StateDiff:
                 alpaca_order.status.value,
             )
 
+    # ------------------------------------------------------------------
+    # WP-1.5: detect expiry and assignment events.
+    # ------------------------------------------------------------------
+    expired_positions, assignment_events, ext_anomalies = (
+        _detect_expiry_and_assignments(broker, conn, now)
+    )
+    anomalies.extend(ext_anomalies)
+
     return StateDiff(
         newly_filled=newly_filled,
         newly_partial=newly_partial,
@@ -318,6 +372,8 @@ def reconcile(broker: BrokerClient, conn: Connection) -> StateDiff:
         orphans=orphans,
         unmatched_local=local_without_id,
         anomalies=anomalies,
+        expired_option_positions=expired_positions,
+        assigned_positions=assignment_events,
         reconciled_at=now,
     )
 
@@ -354,3 +410,255 @@ def _apply_fill_to_position(
         )
         update_position(conn, updated)
         closed_positions.append(updated)
+
+
+# ---------------------------------------------------------------------------
+# WP-1.5: expiry and assignment detection
+# ---------------------------------------------------------------------------
+
+
+def _detect_expiry_and_assignments(
+    broker: BrokerClient,
+    conn: Connection,
+    now: datetime,
+) -> tuple[list[Position], list[AssignmentEvent], list[ReconcileAnomaly]]:
+    """Detect option expiry and assignment events for all open positions.
+
+    Strategy
+    --------
+    Primary path: query /v2/account/activities for OPEXP and OPASN events in
+    the last _ACTIVITY_LOOKBACK_HOURS.  Each matched event closes the option
+    position (EXPIRED or ASSIGNED) and, for assignments, creates an EQUITY
+    Position row.
+
+    Backstop path: compare get_all_positions() against DB positions past their
+    nearest_expiration + _EXPIRY_GRACE_DAYS.  Catches any expirations the
+    activity feed missed (paper-env gaps, API failures, etc.).
+
+    Idempotency: only OPEN positions are candidates; a position already marked
+    EXPIRED or ASSIGNED is skipped on every subsequent pass.
+    """
+    expired: list[Position] = []
+    assignments: list[AssignmentEvent] = []
+    anomalies: list[ReconcileAnomaly] = []
+    today = now.date()
+
+    # Build OCC-symbol → Position index for all open option positions.
+    # Each open option position has FillEvents whose leg_symbol is the OCC string.
+    open_positions = list_open_positions(conn)
+    occ_to_pos: dict[str, Position] = {}
+    for pos in open_positions:
+        if pos.asset_class != AssetClass.OPTION_STRATEGY:
+            continue
+        try:
+            fill_events = list_fill_events_for_order(conn, pos.opening_order_id)
+        except Exception:
+            continue
+        for fe in fill_events:
+            if fe.leg_symbol:
+                occ_to_pos[fe.leg_symbol] = pos
+
+    # Track which positions were handled by the activity feed so the backstop
+    # does not double-process them.
+    activity_handled: set[str] = set()
+
+    # ------------------------------------------------------------------
+    # Primary: activity feed
+    # ------------------------------------------------------------------
+    try:
+        after = now - timedelta(hours=_ACTIVITY_LOOKBACK_HOURS)
+        activities: list[dict[str, Any]] = broker.get_account_activities(
+            ["OPEXP", "OPASN"], after=after
+        )
+        for act in activities:
+            act_type = str(act.get("activity_type", ""))
+            occ_symbol = str(act.get("symbol", ""))
+            if not occ_symbol:
+                continue
+
+            pos = occ_to_pos.get(occ_symbol)
+            if pos is None:
+                # Activity for an OCC symbol not in our open positions — already
+                # processed in a prior pass or belongs to a position we don't own.
+                logger.debug(
+                    "reconcile: activity %s for unknown/closed OCC %s — skipping",
+                    act_type,
+                    occ_symbol,
+                )
+                continue
+
+            if pos.id in activity_handled:
+                continue
+
+            occurred_at = _parse_activity_datetime(act.get("date"), now)
+
+            if act_type == "OPEXP":
+                updated = pos.model_copy(
+                    update={"status": PositionStatus.EXPIRED, "closed_at": occurred_at}
+                )
+                update_position(conn, updated)
+                expired.append(updated)
+                activity_handled.add(pos.id)
+                logger.info(
+                    "reconcile: OPEXP — position %s (%s) marked EXPIRED",
+                    pos.id,
+                    occ_symbol,
+                )
+
+            elif act_type == "OPASN":
+                assigned_qty = abs(int(float(act.get("qty") or 0)))
+                assignment_price = float(act.get("price") or 0)
+
+                equity_pos = _build_equity_position_from_assignment(
+                    option_pos=pos,
+                    assigned_qty=assigned_qty,
+                    assignment_price=assignment_price,
+                    occurred_at=occurred_at,
+                )
+                insert_position(conn, equity_pos)
+
+                updated_option = pos.model_copy(
+                    update={"status": PositionStatus.ASSIGNED, "closed_at": occurred_at}
+                )
+                update_position(conn, updated_option)
+
+                assignments.append(
+                    AssignmentEvent(
+                        closed_option_position_id=pos.id,
+                        created_equity_position=equity_pos,
+                        assigned_qty=assigned_qty,
+                        assignment_price=assignment_price,
+                        occurred_at=occurred_at,
+                    )
+                )
+                activity_handled.add(pos.id)
+                logger.info(
+                    "reconcile: OPASN — %s (%s) assigned; equity %s created",
+                    pos.id,
+                    occ_symbol,
+                    equity_pos.id,
+                )
+
+    except Exception as exc:
+        logger.warning(
+            "reconcile: activity feed unavailable (%s); absence backstop will run", exc
+        )
+        anomalies.append(
+            ReconcileAnomaly(
+                order_id=None,
+                broker_order_id=None,
+                description=f"Activity feed unavailable: {exc}",
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # Backstop: absence check for positions past expiration
+    # ------------------------------------------------------------------
+    try:
+        live_symbols: set[str] = {
+            ap.symbol for ap in broker.get_all_positions() if ap.symbol
+        }
+        cutoff = today - timedelta(days=_EXPIRY_GRACE_DAYS)
+        candidates = list_open_option_positions_expiring_on_or_before(conn, cutoff)
+
+        for cand in candidates:
+            if cand.id in activity_handled:
+                continue  # already handled above
+
+            # Check if any leg is still present at the broker.
+            try:
+                fill_events = list_fill_events_for_order(conn, cand.opening_order_id)
+            except Exception:
+                fill_events = []
+            leg_symbols = {fe.leg_symbol for fe in fill_events if fe.leg_symbol}
+
+            if leg_symbols & live_symbols:
+                # At least one leg still open — not expired yet.
+                continue
+
+            updated = cand.model_copy(
+                update={"status": PositionStatus.EXPIRED, "closed_at": now}
+            )
+            update_position(conn, updated)
+            expired.append(updated)
+            logger.info(
+                "reconcile: absence backstop — position %s marked EXPIRED "
+                "(nearest_expiration=%s, all legs absent from broker)",
+                cand.id,
+                cand.nearest_expiration,
+            )
+
+    except Exception as exc:
+        logger.error("reconcile: absence backstop failed: %s", exc)
+        anomalies.append(
+            ReconcileAnomaly(
+                order_id=None,
+                broker_order_id=None,
+                description=f"Absence backstop failed: {exc}",
+            )
+        )
+
+    return expired, assignments, anomalies
+
+
+def _build_equity_position_from_assignment(
+    option_pos: Position,
+    assigned_qty: int,
+    assignment_price: float,
+    occurred_at: datetime,
+) -> Position:
+    """Build an EQUITY Position record for shares received/delivered via assignment.
+
+    qty in EquityLeg is the number of shares implied by the assignment
+    (assigned_qty contracts × 100 shares/contract).  The sign follows Alpaca's
+    activity qty field (positive = long shares received; negative = short shares
+    delivered).  Using the raw Alpaca qty preserves the directional information
+    without us having to re-derive it from the original leg side.
+
+    nearest_expiration is set to EQUITY_NEVER_EXPIRES (9999-12-31) — equity
+    has no expiration.  WP-5 must guard on asset_class == EQUITY before
+    computing DTE or evaluating exit rules.
+
+    WP-8 owns the disposition policy for this position: auto-liquidate vs. halt.
+    """
+    shares = assigned_qty * 100
+    return Position(
+        id=str(uuid.uuid4()),
+        underlying=option_pos.underlying,
+        strategy="assigned_equity",
+        legs=[],
+        equity_legs=[
+            EquityLeg(
+                symbol=option_pos.underlying,
+                qty=shares,
+                avg_price=assignment_price,
+            )
+        ],
+        asset_class=AssetClass.EQUITY,
+        assigned_from_position_id=option_pos.id,
+        quantity=assigned_qty,
+        entry_net_amount=shares * assignment_price,
+        current_mark=shares * assignment_price,
+        marked_at=occurred_at,
+        unrealized_pnl=0.0,
+        realized_pnl=None,
+        exit_plan=None,
+        status=PositionStatus.OPEN,
+        opened_at=occurred_at,
+        closed_at=None,
+        nearest_expiration=EQUITY_NEVER_EXPIRES,
+        est_max_loss=0.0,
+        est_max_profit=0.0,
+        opening_order_id=f"asn:{option_pos.id}",
+    )
+
+
+def _parse_activity_datetime(raw: Any, fallback: datetime) -> datetime:
+    """Parse an Alpaca activity date string; return fallback on any failure."""
+    if not raw:
+        return fallback
+    try:
+        s = str(raw).replace("Z", "+00:00")
+        return datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return fallback

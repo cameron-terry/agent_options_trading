@@ -21,13 +21,14 @@ Two-phase Order flow (crash-safety invariant):
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.engine import Connection
 
 from options_agent.contracts.state import (
+    AssetClass,
     FillEvent,
     LegFill,
     Order,
@@ -79,7 +80,11 @@ def _pos_to_row(pos: Position) -> dict[str, Any]:
         "marked_at": pos.marked_at,
         "unrealized_pnl": pos.unrealized_pnl,
         "realized_pnl": pos.realized_pnl,
-        "exit_plan": json.dumps(pos.exit_plan.model_dump(mode="json")),
+        "exit_plan": (
+            json.dumps(pos.exit_plan.model_dump(mode="json"))
+            if pos.exit_plan is not None
+            else None
+        ),
         "status": pos.status.value,
         "opened_at": pos.opened_at,
         "closed_at": pos.closed_at,
@@ -87,17 +92,31 @@ def _pos_to_row(pos: Position) -> dict[str, Any]:
         "est_max_loss": pos.est_max_loss,
         "est_max_profit": pos.est_max_profit,
         "opening_order_id": pos.opening_order_id,
+        "asset_class": pos.asset_class.value,
+        "equity_legs": (
+            json.dumps([el.model_dump(mode="json") for el in pos.equity_legs])
+            if pos.equity_legs
+            else None
+        ),
+        "assigned_from_position_id": pos.assigned_from_position_id,
     }
 
 
 def _row_to_pos(row: Any) -> Position:
     d = dict(row._mapping)
     d["legs"] = json.loads(d["legs"]) if isinstance(d["legs"], str) else d["legs"]
-    raw = d["exit_plan"]
-    d["exit_plan"] = json.loads(raw) if isinstance(raw, str) else raw
+    raw_ep = d.get("exit_plan")
+    d["exit_plan"] = json.loads(raw_ep) if isinstance(raw_ep, str) else raw_ep
     d["marked_at"] = _ensure_utc(d["marked_at"])
     d["opened_at"] = _ensure_utc(d["opened_at"])
     d["closed_at"] = _ensure_utc(d["closed_at"])
+    # WP-1.5 fields: default to option_strategy / empty for pre-migration rows
+    if not d.get("asset_class"):
+        d["asset_class"] = AssetClass.OPTION_STRATEGY.value
+    raw_el = d.get("equity_legs")
+    d["equity_legs"] = json.loads(raw_el) if isinstance(raw_el, str) else (raw_el or [])
+    # assigned_from_position_id may be absent from older rows → None
+    d.setdefault("assigned_from_position_id", None)
     return Position.model_validate(d)
 
 
@@ -180,6 +199,33 @@ def list_open_positions(conn: Connection) -> list[Position]:
         sa.select(positions_table)
         .where(positions_table.c.status.notin_(terminal_values))
         .order_by(positions_table.c.opened_at)
+    ).fetchall()
+    return [_row_to_pos(r) for r in rows]
+
+
+def list_open_option_positions_expiring_on_or_before(
+    conn: Connection,
+    cutoff: date,
+) -> list[Position]:
+    """Return OPEN option-strategy positions whose nearest_expiration <= cutoff.
+
+    Used by the WP-1.5 absence backstop to identify candidates for expiry
+    detection: positions that are still OPEN in our DB but are past (or on)
+    their expiration date, indicating the broker may have expired them.
+    Only OPTION_STRATEGY positions are returned — equity positions have the
+    EQUITY_NEVER_EXPIRES sentinel date and are never candidates.
+    """
+    rows = conn.execute(
+        sa.select(positions_table)
+        .where(
+            positions_table.c.status == PositionStatus.OPEN.value,
+            sa.or_(
+                positions_table.c.asset_class == AssetClass.OPTION_STRATEGY.value,
+                positions_table.c.asset_class.is_(None),  # pre-migration rows
+            ),
+            positions_table.c.nearest_expiration <= cutoff,
+        )
+        .order_by(positions_table.c.nearest_expiration)
     ).fetchall()
     return [_row_to_pos(r) for r in rows]
 
