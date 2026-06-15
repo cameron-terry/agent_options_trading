@@ -3,9 +3,128 @@ from datetime import time
 from pathlib import Path
 
 import exchange_calendars as xcals
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from options_agent.risk.limits import Limits
+
+
+class PlaybookConfig(BaseModel):
+    """Strategy playbook — single source of truth for prompt rendering and enforcement.
+
+    Both agent/prompts.py (rendered into the system prompt) and risk/validator.py
+    (UNKNOWN_STRATEGY check via Limits.allowed_strategies) derive their strategy sets
+    from this object. Never maintain a parallel strategy list elsewhere.
+
+    Bump playbook_version whenever thresholds or strategy sets change so WP-7 analytics
+    can correlate trade outcomes with the exact playbook active at the time.
+
+    IV-rank bands (0.0–1.0 percentile rank of the symbol's trailing-year IV):
+      high   ≥ iv_rank_high_threshold  → sell premium (credit structures)
+      medium  between thresholds       → agent's discretion (both postures allowed)
+      low    < iv_rank_low_threshold   → buy premium (debit structures)
+      None                             → iv_rank unknown; agent must propose NO_ACTION
+
+    VIX regime tiers are advisory context for the agent's thesis, not enforced rules.
+    Named for volatility level, not market direction (low-vol ≠ bullish).
+    """
+
+    playbook_version: str = "1.0.0"
+
+    # IV-rank band thresholds (percentile, 0.0–1.0)
+    iv_rank_high_threshold: float = Field(default=0.50, ge=0.0, le=1.0)
+    iv_rank_low_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
+
+    # VIX regime thresholds (index points)
+    vix_high_vol_threshold: float = Field(default=25.0, gt=0.0)
+    vix_low_vol_threshold: float = Field(default=15.0, gt=0.0)
+
+    # Strategy sets per IV band — high/low are hard-enforced; medium is permissive.
+    # covered_call and cash_secured_put appear in high/medium only (selling premium
+    # in low-IV environments has little premium to capture); the prompt additionally
+    # gates them on holding/cash conditions.
+    high_iv_strategies: frozenset[str] = Field(
+        default=frozenset(
+            {
+                "bear_call_spread",
+                "bull_put_spread",
+                "cash_secured_put",
+                "covered_call",
+                "iron_butterfly",
+                "iron_condor",
+            }
+        )
+    )
+    medium_iv_strategies: frozenset[str] = Field(
+        default=frozenset(
+            {
+                "bear_call_spread",
+                "bear_put_spread",
+                "bull_call_spread",
+                "bull_put_spread",
+                "cash_secured_put",
+                "covered_call",
+                "iron_butterfly",
+                "iron_condor",
+            }
+        )
+    )
+    low_iv_strategies: frozenset[str] = Field(
+        default=frozenset({"bear_put_spread", "bull_call_spread"})
+    )
+
+    @model_validator(mode="after")
+    def _threshold_ordering_valid(self) -> "PlaybookConfig":
+        if self.iv_rank_low_threshold >= self.iv_rank_high_threshold:
+            raise ValueError(
+                f"iv_rank_low_threshold ({self.iv_rank_low_threshold}) must be"
+                f" < iv_rank_high_threshold ({self.iv_rank_high_threshold})"
+            )
+        if self.vix_low_vol_threshold >= self.vix_high_vol_threshold:
+            raise ValueError(
+                f"vix_low_vol_threshold ({self.vix_low_vol_threshold}) must be"
+                f" < vix_high_vol_threshold ({self.vix_high_vol_threshold})"
+            )
+        return self
+
+    @property
+    def all_allowed_strategies(self) -> frozenset[str]:
+        """Union of all IV-band sets — used to populate Limits.allowed_strategies."""
+        return (
+            self.high_iv_strategies | self.medium_iv_strategies | self.low_iv_strategies
+        )
+
+    def allowed_for_iv_band(self, iv_rank: float | None) -> frozenset[str] | None:
+        """Strategy set for the given IV rank, or None if iv_rank is unknown.
+
+        None signals that no playbook cell applies — the agent must propose NO_ACTION.
+        """
+        if iv_rank is None:
+            return None
+        if iv_rank >= self.iv_rank_high_threshold:
+            return self.high_iv_strategies
+        if iv_rank < self.iv_rank_low_threshold:
+            return self.low_iv_strategies
+        return self.medium_iv_strategies
+
+    def iv_band_label(self, iv_rank: float | None) -> str:
+        """Human-readable band name for logging and prompt rendering."""
+        if iv_rank is None:
+            return "unknown"
+        if iv_rank >= self.iv_rank_high_threshold:
+            return "high"
+        if iv_rank < self.iv_rank_low_threshold:
+            return "low"
+        return "medium"
+
+    def regime_label(self, vix: float | None) -> str:
+        """Advisory VIX regime name for prompt context."""
+        if vix is None:
+            return "unknown"
+        if vix > self.vix_high_vol_threshold:
+            return "high-vol"
+        if vix < self.vix_low_vol_threshold:
+            return "low-vol"
+        return "normal"
 
 
 class Config(BaseModel):
@@ -57,6 +176,19 @@ class Config(BaseModel):
 
     # Risk limits (nested)
     limits: Limits = Field(default_factory=Limits)
+
+    # Strategy playbook — single source of truth for prompts.py and validator.py.
+    # Limits.allowed_strategies is derived from this; never set it independently.
+    playbook: PlaybookConfig = Field(default_factory=PlaybookConfig)
+
+    @model_validator(mode="after")
+    def _sync_allowed_strategies(self) -> "Config":
+        # PlaybookConfig is authoritative when allowed_strategies was not explicitly
+        # provided. Checking model_fields_set preserves intentional overrides (e.g.
+        # tests that force an empty set to exercise UNKNOWN_STRATEGY rejection).
+        if "allowed_strategies" not in self.limits.model_fields_set:
+            self.limits.allowed_strategies = self.playbook.all_allowed_strategies
+        return self
 
     @field_validator("exchange_calendar")
     @classmethod
