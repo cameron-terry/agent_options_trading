@@ -36,6 +36,11 @@ TOOL_GET_EVENTS = "get_events"
 TOOL_GET_JOURNAL_BY_SYMBOL = "get_journal_by_symbol"
 TOOL_GET_POSITION_HISTORY = "get_position_history"
 
+# Maximum number of JournalRecords returned by get_journal_by_symbol.
+# WP-2 (state/journal.py query_journal) must enforce the same limit so the
+# two sides stay in sync without relying on prose-only documentation.
+JOURNAL_MAX_RECORDS = 20
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Agent-facing return type for get_position_history.
@@ -182,7 +187,13 @@ _DESC_GET_EVENTS = (
     "\n"
     "Note: FOMC, CPI, NFP, and other market-wide macro events are on"
     " UniverseSnapshot.macro_events (get_universe_snapshot), not here."
-    " This tool covers per-symbol corporate events only."
+    " This tool covers per-symbol corporate events only.\n"
+    "\n"
+    "WP-3.5 alignment note: this tool accepts a batch of symbols and"
+    " returns dict[str, EventInfo]. WP-3.5 must expose a batch"
+    " implementation matching this signature. If WP-3.5 only implements"
+    " a single-symbol get_events(symbol), the dispatch layer in"
+    " reasoner.py must fan out and reassemble into the expected dict."
 )
 
 _DESC_GET_JOURNAL_BY_SYMBOL = (

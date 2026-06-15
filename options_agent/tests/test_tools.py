@@ -160,6 +160,23 @@ def test_mock_portfolio_state_net_greeks_populated() -> None:
     )
 
 
+def test_mock_portfolio_state_pnl_arithmetic_consistent() -> None:
+    """Mock Position P&L must be internally consistent.
+
+    entry_net_amount and current_mark are in option-price×contracts units
+    (pre-×100). unrealized_pnl = (|entry| - |current|) × 100.
+    """
+    state = _get_portfolio_state({})
+    for pos in state.positions:
+        if pos.entry_net_amount is not None and pos.current_mark is not None:
+            expected = (abs(pos.entry_net_amount) - abs(pos.current_mark)) * 100
+            assert abs(pos.unrealized_pnl - expected) < 0.01, (
+                f"Position {pos.id!r} P&L inconsistent: "
+                f"entry={pos.entry_net_amount}, mark={pos.current_mark},"
+                f" unrealized_pnl={pos.unrealized_pnl} (expected ~{expected})"
+            )
+
+
 def test_mock_universe_snapshot_type() -> None:
     result = _get_universe_snapshot({})
     assert isinstance(result, UniverseSnapshot)

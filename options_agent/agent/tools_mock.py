@@ -36,6 +36,7 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from options_agent.agent.tools import (
+    JOURNAL_MAX_RECORDS,
     TOOL_GET_EVENTS,
     TOOL_GET_FILTERED_CHAIN,
     TOOL_GET_JOURNAL_BY_SYMBOL,
@@ -104,11 +105,17 @@ _MOCK_POSITION = Position(
         ),
     ],
     quantity=2,
-    # credit received: (2.45 - 1.10) * 2 contracts * $100 notional
+    # P&L arithmetic (all in "option price × contracts" units, pre-×100):
+    #   entry_net_amount = -(2.45 - 1.10) × 2 contracts = -2.70 (credit)
+    #   current_mark     = -1.35 for 2 contracts (halfway to worthless)
+    #   unrealized_pnl   = (|entry| - |current|) × 100
+    #                    = (2.70 - 1.35) × 100 = $135.0
+    # This places the position exactly at the 50% profit target
+    # (135 / 270 = 50%), which is a useful WP-6.4 test state.
     entry_net_amount=-2.70,
     current_mark=-1.35,
     marked_at=_AS_OF,
-    unrealized_pnl=270.0,
+    unrealized_pnl=135.0,
     realized_pnl=None,
     exit_plan=ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21),
     status=PositionStatus.OPEN,
@@ -455,7 +462,8 @@ _MOCK_JOURNAL: dict[str, list[JournalRecord]] = {
 
 def _get_journal_by_symbol(tool_input: dict[str, Any]) -> list[JournalRecord]:
     symbol: str = tool_input["symbol"]
-    return _MOCK_JOURNAL.get(symbol, [])
+    records = _MOCK_JOURNAL.get(symbol, [])
+    return records[-JOURNAL_MAX_RECORDS:]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
