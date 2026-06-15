@@ -8,17 +8,60 @@ AI-driven options trading agent. Paper trading only until validated.
 uv sync --dev
 ```
 
-## Run
+## Environment variables
+
+| Variable | Required for | Notes |
+|---|---|---|
+| `ALPACA_API_KEY` | broker + data | Paper or live key from Alpaca dashboard |
+| `ALPACA_SECRET_KEY` | broker + data | Paired secret |
+| `DB_URL` | Postgres backend | e.g. `postgresql://postgres:postgres@localhost/options_agent`; omit to use SQLite |
+
+Secrets are never read from `config.toml` — set them in the shell or a `.env` file sourced before running.
+
+## Database
+
+Apply migrations before first use (creates `options_agent.db` when using SQLite):
 
 ```bash
-uv run python -m options_agent
+uv run alembic upgrade head
 ```
 
-## Lint / type-check / test
+To use Postgres locally, start the bundled container first:
+
+```bash
+docker compose up -d
+DB_URL=postgresql://postgres:postgres@localhost/options_agent_test uv run alembic upgrade head
+```
+
+## Tests
+
+```bash
+# Unit + mocked tests only (no credentials required)
+uv run pytest -m "not integration"
+
+# Full suite including broker smoke test (requires ALPACA_API_KEY + ALPACA_SECRET_KEY)
+uv run pytest
+
+# Postgres dialect (CI runs this automatically; requires DB_URL)
+DB_URL=postgresql://postgres:postgres@localhost/options_agent_test uv run pytest
+```
+
+## Lint / type-check
 
 ```bash
 uv run ruff check .
 uv run ruff format .
 uv run pyright
-uv run pytest
 ```
+
+## Entry point
+
+`python -m options_agent` is not yet wired (WP-8 — orchestration). The sub-systems below are individually complete and testable:
+
+| Sub-system | Module | Runnable without credentials |
+|---|---|---|
+| Risk & guardrails | `options_agent/risk/` | Yes |
+| State & journal | `options_agent/state/` | Yes (SQLite) |
+| Data & signals | `options_agent/data/` | No (needs Alpaca keys) |
+| Broker & execution | `options_agent/execution/` | No (needs Alpaca keys) |
+| Vertical slice | `options_agent/orchestrator.py` | No (needs Alpaca keys) |
