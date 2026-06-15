@@ -207,6 +207,17 @@ def test_regime_label_above_vix_high_threshold() -> None:
     assert pb.regime_label(pb.vix_high_vol_threshold + 0.1) == "high-vol"
 
 
+def test_regime_label_at_vix_low_threshold() -> None:
+    pb = PlaybookConfig()
+    # Exactly at low threshold → normal (low-vol is strictly <, not ≤)
+    assert pb.regime_label(pb.vix_low_vol_threshold) == "normal"
+
+
+def test_regime_label_just_below_vix_low_threshold() -> None:
+    pb = PlaybookConfig()
+    assert pb.regime_label(pb.vix_low_vol_threshold - 0.1) == "low-vol"
+
+
 # ---------------------------------------------------------------------------
 # Config — PlaybookConfig integration
 # ---------------------------------------------------------------------------
@@ -346,8 +357,12 @@ def test_prompt_reflects_custom_strategy_set() -> None:
     )
     prompt = build_system_prompt(pb, Limits())
     assert "iron_condor" in prompt
-    # Removed strategies should not appear in the table rows
-    assert "bear_call_spread" not in prompt or "worked example" in prompt.lower()
+    # Removed strategies must not appear in the strategy table section.
+    # Split at the worked examples header so the hardcoded examples in that
+    # section don't satisfy the assertion — the table must be clean.
+    table_section = prompt.split("## Worked examples")[0]
+    assert "bear_call_spread" not in table_section
+    assert "bear_put_spread" not in table_section
 
 
 def test_prompt_contains_defined_risk_constraint() -> None:
