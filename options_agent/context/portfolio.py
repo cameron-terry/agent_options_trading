@@ -18,9 +18,16 @@ OptionContract docstring). The field is set to 0.0 until a separate gamma source
 is available.
 
 Greek unit convention (confirmed WP-4.4; matches Limits docstring):
-  dollar_delta = Σ (delta × side_sign × ratio × qty × underlying_price × 100)
-  dollar_vega  = Σ (vega  × side_sign × ratio × qty × 100)   # per 1 vol-point
-  dollar_theta = Σ (theta × side_sign × ratio × qty × 100)   # per calendar day
+  dollar_delta = Σ (delta × side_sign × filled_qty × underlying_price × 100)
+  dollar_vega  = Σ (vega  × side_sign × filled_qty × 100)   # per 1 vol-point
+  dollar_theta = Σ (theta × side_sign × filled_qty × 100)   # per calendar day
+
+filled_qty (from PositionLeg) is the actual number of contracts filled for each
+leg and equals ratio × position.quantity for fully-filled positions. Using
+filled_qty directly handles the ratio without needing a separate multiplication,
+and also correctly reflects partial-fill state if a position were ever seen
+before full completion (though WP-1 reconcile should only produce OPEN positions
+once fully filled).
 
 side_sign is +1 for "buy" legs and -1 for "sell" legs, reflecting that selling
 a put (negative BSM delta) creates a positive portfolio delta exposure.
@@ -71,8 +78,7 @@ def aggregate_portfolio_greeks(
             leg = pos_leg.leg
             key = (leg.right, leg.strike, leg.expiration.isoformat())
             side_sign = 1.0 if leg.side == "buy" else -1.0
-            qty = position.quantity
-            ratio = leg.ratio
+            filled_qty = pos_leg.filled_qty
 
             greeks = greek_lookup.get(key)
             if greeks is None:
@@ -84,9 +90,9 @@ def aggregate_portfolio_greeks(
                 continue
 
             delta, vega, theta = greeks
-            net_dollar_delta += delta * side_sign * ratio * qty * underlying_price * 100
-            net_dollar_vega += vega * side_sign * ratio * qty * 100
-            net_dollar_theta += theta * side_sign * ratio * qty * 100
+            net_dollar_delta += delta * side_sign * filled_qty * underlying_price * 100
+            net_dollar_vega += vega * side_sign * filled_qty * 100
+            net_dollar_theta += theta * side_sign * filled_qty * 100
 
     return (
         portfolio_raw.model_copy(

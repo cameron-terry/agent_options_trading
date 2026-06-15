@@ -247,8 +247,11 @@ def render_overview(bundle: ContextBundle) -> str:
     tool-use loop. It covers the broad context the agent always needs; detailed
     chain and position-history data remain available via live tool calls.
 
-    Priority order matches design doc §10: vol context first, Greeks second,
-    chain/liquidity summary third, events fourth, account state fifth.
+    Rendering order: portfolio state (positions + Greeks) first — the agent needs
+    to know its existing exposure before evaluating new candidates — then universe
+    snapshot (IV rank / vol context per design doc §10), events, journal summary,
+    and data-gap notices. Full chains and position history remain as live tool
+    calls; they are not rendered here.
     """
     lines: list[str] = []
     p = bundle.portfolio

@@ -630,8 +630,10 @@ def test_render_overview_shows_excluded_when_present() -> None:
         limits_version="0.2.0",
     )
     # Inject a fake exclusion to test rendering
-    object.__setattr__(bundle, "excluded", {"FAKE": "chain_unavailable"})
-    overview = render_overview(bundle)
+    bundle_with_excluded = bundle.model_copy(
+        update={"excluded": {"FAKE": "chain_unavailable"}}
+    )
+    overview = render_overview(bundle_with_excluded)
     assert "DATA GAPS" in overview
     assert "FAKE" in overview
 
@@ -643,8 +645,10 @@ def test_render_overview_shows_greek_warning_when_present() -> None:
         prompt_version="0.1",
         limits_version="0.2.0",
     )
-    object.__setattr__(bundle, "greek_warnings", ["pos test-001: leg not in chain"])
-    overview = render_overview(bundle)
+    bundle_with_warnings = bundle.model_copy(
+        update={"greek_warnings": ["pos test-001: leg not in chain"]}
+    )
+    overview = render_overview(bundle_with_warnings)
     assert "Greek warnings" in overview
 
 
