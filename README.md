@@ -60,8 +60,9 @@ uv run pyright
 
 | Sub-system | Module | Runnable without credentials |
 |---|---|---|
-| Risk & guardrails | `options_agent/risk/` | Yes |
-| State & journal | `options_agent/state/` | Yes (SQLite) |
-| Data & signals | `options_agent/data/` | No (needs Alpaca keys) |
-| Broker & execution | `options_agent/execution/` | No (needs Alpaca keys) |
-| Vertical slice | `options_agent/orchestrator.py` | No (needs Alpaca keys) |
+| Risk & guardrails | `options_agent/risk/` | Yes — [docs](docs/features/risk-guardrails.md) |
+| State & journal | `options_agent/state/` | Yes (SQLite) — [docs](docs/features/state-persistence.md) |
+| Data & signals | `options_agent/data/` | No (needs Alpaca keys) — [docs](docs/features/data-signals.md) |
+| Broker & execution | `options_agent/execution/` | No (needs Alpaca keys) — [docs](docs/features/broker-execution.md) |
+| Agent tools & mock harness | `options_agent/agent/` | Yes — [docs](docs/features/agent-tools.md) |
+| Vertical slice | `options_agent/orchestrator.py` | No (needs Alpaca keys) — [docs](docs/features/vertical-slice.md) |
