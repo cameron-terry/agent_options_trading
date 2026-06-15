@@ -177,6 +177,15 @@ def test_mock_portfolio_state_pnl_arithmetic_consistent() -> None:
             )
 
 
+def test_mock_portfolio_state_pnl_equals_sum_of_positions() -> None:
+    state = _get_portfolio_state({})
+    expected = sum(pos.unrealized_pnl for pos in state.positions)
+    assert abs(state.unrealized_pnl - expected) < 0.01, (
+        f"Portfolio unrealized_pnl={state.unrealized_pnl} != "
+        f"sum of positions ({expected})"
+    )
+
+
 def test_mock_universe_snapshot_type() -> None:
     result = _get_universe_snapshot({})
     assert isinstance(result, UniverseSnapshot)
