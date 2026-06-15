@@ -14,18 +14,9 @@ alpaca_paper = true
 # correlate trade outcomes with the exact limits active at the time.
 limits_version = "0.2.0"
 
-# Allowed strategy names. agent/prompts.py (WP-6.3) must use these same
-# names so the agent can never propose a strategy the validator will reject.
-allowed_strategies = [
-    "bull_put_spread",
-    "bear_call_spread",
-    "bull_call_spread",
-    "bear_put_spread",
-    "iron_condor",
-    "iron_butterfly",
-    "covered_call",
-    "cash_secured_put",
-]
+# allowed_strategies is intentionally absent here — it is derived from
+# [playbook] by Config._sync_allowed_strategies. Never set it in [limits];
+# PlaybookConfig is the single source of truth.
 
 # Risk / sizing
 max_loss_per_trade_pct = 0.01        # 1% of equity hard ceiling per trade
@@ -81,3 +72,48 @@ stop_loss_mult_min = 1.5       # stop must be at least 1.5× entry_net_amount
 stop_loss_mult_max = 5.0       # stop no looser than 5× (prevents runaway loss)
 time_stop_dte_min = 7          # must have a time-stop; 7 DTE minimum
 time_stop_dte_max = 45         # time-stop must be within the chain filter window
+
+# ---------------------------------------------------------------------------
+# Strategy playbook
+# Bump playbook_version whenever thresholds or strategy sets change so WP-7
+# analytics can correlate outcomes with the exact playbook active at the time.
+# ---------------------------------------------------------------------------
+[playbook]
+playbook_version = "1.0.0"
+
+# IV-rank band boundaries (0.0–1.0 percentile of the symbol's trailing-year IV).
+# These are v1 placeholders — expect WP-7 evidence to drive retunes.
+iv_rank_high_threshold = 0.50   # ≥ this → high band (sell premium)
+iv_rank_low_threshold  = 0.25   # < this → low band (buy premium); between → medium
+
+# VIX regime tiers (advisory context only — not enforced by the validator).
+# Named for volatility level, not market direction.
+vix_high_vol_threshold = 25.0   # > this → high-vol
+vix_low_vol_threshold  = 15.0   # < this → low-vol; between → normal
+
+# Strategy sets per IV band.
+# High/low are hard-enforced; medium is permissive (agent picks based on thesis).
+# covered_call and cash_secured_put are absent from low_iv_strategies — selling
+# premium in low-IV environments captures too little to be worth the risk.
+high_iv_strategies = [
+    "bear_call_spread",
+    "bull_put_spread",
+    "cash_secured_put",
+    "covered_call",
+    "iron_butterfly",
+    "iron_condor",
+]
+medium_iv_strategies = [
+    "bear_call_spread",
+    "bear_put_spread",
+    "bull_call_spread",
+    "bull_put_spread",
+    "cash_secured_put",
+    "covered_call",
+    "iron_butterfly",
+    "iron_condor",
+]
+low_iv_strategies = [
+    "bear_put_spread",
+    "bull_call_spread",
+]

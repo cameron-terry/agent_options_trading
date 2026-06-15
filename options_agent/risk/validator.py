@@ -17,10 +17,10 @@ from options_agent.risk.limits import Limits
 # Position.net_delta is not available in contracts (WP-0 gap); this heuristic
 # covers all playbook strategies until Position carries live delta.
 #
-# MAINTENANCE: This dict must mirror Limits.allowed_strategies exactly.
-# If a new strategy is added to allowed_strategies (Limits / config.toml)
-# without a corresponding entry here, conflict detection silently fails open
-# for that strategy. There is no runtime enforcement — update both together.
+# MAINTENANCE: This dict must mirror PlaybookConfig.all_allowed_strategies.
+# PlaybookConfig (config.py / config.toml [playbook]) is the authoritative source.
+# If a strategy is added to the playbook without a corresponding entry here,
+# conflict detection silently fails open for that strategy. Update both together.
 _STRATEGY_DELTA_SIGN: dict[str, int] = {
     "bull_put_spread": 1,
     "bull_call_spread": 1,

@@ -1,4 +1,4 @@
-from options_agent.config import Config
+from options_agent.config import Config, PlaybookConfig
 from options_agent.contracts.data import (
     ChainFilterParams,
     EarningsEvent,
@@ -54,6 +54,7 @@ from options_agent.risk.limits import ChainFilterLimits, ExitPlanDefaults, Limit
 __all__ = [
     # config
     "Config",
+    "PlaybookConfig",
     # data return types
     "ChainFilterParams",
     "EarningsEvent",
