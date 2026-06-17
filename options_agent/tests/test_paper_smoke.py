@@ -52,8 +52,8 @@ from options_agent.state.journal import read_journal_record
 # Helpers
 # ---------------------------------------------------------------------------
 
-_FILL_POLL_INTERVAL_SECS: float = 3.0
-_FILL_POLL_TIMEOUT_SECS: float = 90.0
+_FILL_POLL_INTERVAL_SECS: float = 5.0
+_FILL_POLL_TIMEOUT_SECS: float = 300.0
 
 
 def _market_is_open() -> bool:
@@ -179,24 +179,40 @@ def test_paper_smoke_run_entry_cycle() -> None:
             assert pos is not None
 
         if pos.status != PositionStatus.OPEN:
-            # Paper MLEG fill not simulated: cancel the order and verify that
-            # reconcile detects the CANCELLED transition within one pass.
+            # Fill did not occur within the poll window. Cancel the order to
+            # force a terminal state, then run reconcile once more.
+            # Two outcomes are valid here (both documented in broker.cancel()):
+            #
+            #   CANCELLED — cancel succeeded; reconcile must detect it.
+            #   FILLED    — fill raced the cancel (Alpaca paper has async fills);
+            #               reconcile must transition the position to OPEN.
             with get_connection(engine) as conn:
                 local_order = get_order(conn, jr.order_ids[0])
             assert local_order is not None
             cancelled = broker.cancel(local_order)
-            assert cancelled.status == OrderStatus.CANCELLED, (
-                f"Expected cancel → CANCELLED; got {cancelled.status}. "
-                f"broker_order_id={local_order.broker_order_id}"
-            )
+
             with get_connection(engine) as conn:
                 reconcile(broker, conn)
                 db_order = get_order(conn, jr.order_ids[0])
+                pos = get_position(conn, jr.position_ids[0])
             assert db_order is not None
-            assert db_order.status == OrderStatus.CANCELLED, (
-                f"reconcile() did not detect CANCELLED after explicit cancel; "
-                f"db_order.status={db_order.status}"
-            )
+            assert pos is not None
+
+            if cancelled.status == OrderStatus.FILLED:
+                # Fill raced the cancel — the position must now be OPEN.
+                assert pos.status == PositionStatus.OPEN, (
+                    f"Order FILLED (race with cancel) but reconcile did not "
+                    f"transition position to OPEN; pos.status={pos.status}"
+                )
+            else:
+                assert cancelled.status == OrderStatus.CANCELLED, (
+                    f"Unexpected status after cancel: {cancelled.status}. "
+                    f"broker_order_id={local_order.broker_order_id}"
+                )
+                assert db_order.status == OrderStatus.CANCELLED, (
+                    f"reconcile() did not detect CANCELLED after explicit cancel; "
+                    f"db_order.status={db_order.status}"
+                )
 
         # ── AC #5: JournalRecord reads back losslessly (round-trip) ──────────
         with get_connection(engine) as conn:
