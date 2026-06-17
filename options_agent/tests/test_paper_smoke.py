@@ -180,29 +180,40 @@ def test_paper_smoke_run_entry_cycle() -> None:
 
         if pos.status != PositionStatus.OPEN:
             # Fill did not occur within the poll window. Cancel the order to
-            # force a terminal state, then run reconcile once more.
-            # Two outcomes are valid here (both documented in broker.cancel()):
+            # force a terminal transition, then run a short reconcile retry loop.
             #
-            #   CANCELLED — cancel succeeded; reconcile must detect it.
-            #   FILLED    — fill raced the cancel (Alpaca paper has async fills);
-            #               reconcile must transition the position to OPEN.
+            # Two outcomes from broker.cancel() (both documented in broker.cancel()):
+            #   CANCELLED — cancel succeeded before the fill.
+            #   FILLED    — fill raced the cancel (Alpaca paper fills are async).
+            #
+            # In either case we need a bounded reconcile retry rather than a
+            # single call: Alpaca paper has an eventual-consistency window where
+            # list_open_orders() may still return the order in "pending_cancel"
+            # state (mapped to WORKING) for a few seconds after the fill/cancel
+            # is finalised, causing reconcile to see no status change and skip it.
             with get_connection(engine) as conn:
                 local_order = get_order(conn, jr.order_ids[0])
             assert local_order is not None
             cancelled = broker.cancel(local_order)
 
-            with get_connection(engine) as conn:
-                reconcile(broker, conn)
-                db_order = get_order(conn, jr.order_ids[0])
-                pos = get_position(conn, jr.position_ids[0])
-            assert db_order is not None
-            assert pos is not None
+            db_order = local_order  # pre-cancel snapshot; updated in loop below
+            settle_deadline = monotonic() + 45.0
+            while monotonic() < settle_deadline:
+                sleep(3.0)
+                with get_connection(engine) as conn:
+                    reconcile(broker, conn)
+                    db_order = get_order(conn, jr.order_ids[0])
+                    pos = get_position(conn, jr.position_ids[0])
+                assert db_order is not None and pos is not None
+                terminal = {OrderStatus.FILLED, OrderStatus.CANCELLED}
+                if pos.status == PositionStatus.OPEN or db_order.status in terminal:
+                    break
 
             if cancelled.status == OrderStatus.FILLED:
-                # Fill raced the cancel — the position must now be OPEN.
                 assert pos.status == PositionStatus.OPEN, (
                     f"Order FILLED (race with cancel) but reconcile did not "
-                    f"transition position to OPEN; pos.status={pos.status}"
+                    f"transition position to OPEN within 45s settle; "
+                    f"pos.status={pos.status}"
                 )
             else:
                 assert cancelled.status == OrderStatus.CANCELLED, (
@@ -210,7 +221,7 @@ def test_paper_smoke_run_entry_cycle() -> None:
                     f"broker_order_id={local_order.broker_order_id}"
                 )
                 assert db_order.status == OrderStatus.CANCELLED, (
-                    f"reconcile() did not detect CANCELLED after explicit cancel; "
+                    f"reconcile() did not detect CANCELLED after cancel + 45s settle; "
                     f"db_order.status={db_order.status}"
                 )
 
