@@ -222,6 +222,21 @@ class Decision(BaseModel):
     action_taken: ActionTaken
 
 
+class ToolCallRecord(BaseModel):
+    """One tool-call exchange from the agent's exploration phase.
+
+    Stored in ContextSnapshot.tool_calls_transcript (WP-6.4 additive amendment).
+    tool_input mirrors the model's input dict so the exchange is replayable.
+    result_json is pre-serialized because tool results are heterogeneous
+    (Pydantic models, dicts, lists) and uniform JSON storage avoids
+    per-type deserialization logic in WP-7 analytics.
+    """
+
+    tool_name: str
+    tool_input: dict[str, Any]
+    result_json: str
+
+
 class ContextSnapshot(BaseModel):
     """
     The assembled, post-filter context bundle the agent actually saw.
@@ -230,6 +245,9 @@ class ContextSnapshot(BaseModel):
     context_hash is stored alongside to support WP-7 reproducibility queries
     (e.g. 'did identical context produce different proposals?').
     model_id and prompt_version enable honest before/after prompt analysis.
+    tool_calls_transcript records the read-only tool exchanges the agent made
+    during the exploration phase (WP-6.4 additive amendment). Empty for cycles
+    that short-circuit before the LLM call and for pre-WP-6.4 records.
     """
 
     assembled_context: dict[str, Any]
@@ -237,6 +255,7 @@ class ContextSnapshot(BaseModel):
     model_id: str
     prompt_version: str
     assembled_at: datetime
+    tool_calls_transcript: list[ToolCallRecord] = []
 
 
 # ---------------------------------------------------------------------------

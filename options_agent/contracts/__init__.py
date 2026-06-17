@@ -48,6 +48,7 @@ from options_agent.contracts.state import (
     PositionStatus,
     ReconcileAnomaly,
     StateDiff,
+    ToolCallRecord,
 )
 from options_agent.risk.limits import ChainFilterLimits, ExitPlanDefaults, Limits
 
@@ -93,6 +94,7 @@ __all__ = [
     "PositionStatus",
     "ReconcileAnomaly",
     "StateDiff",
+    "ToolCallRecord",
     # journal types
     "JournalRecord",
     "OutcomeEventType",
