@@ -45,6 +45,7 @@ testpaths = ["options_agent/tests"]
 markers = [
     "integration: live-network tests; skipped when ALPACA_API_KEY is absent",
     "smoke: end-to-end smoke tests requiring market open and live paper credentials; run on-demand",
+    "eval: prompt eval tests that call the real Anthropic API; run explicitly with: pytest tests/evals/ -m eval",
 ]
 
 [tool.pyright]
