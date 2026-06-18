@@ -164,6 +164,24 @@ def reconcile(
 
         if broker_id in broker_open:
             alpaca_order = broker_open[broker_id]
+            # "pending_cancel" appears in the open-order index while a cancel
+            # request is in-flight.  Alpaca paper (and occasionally live) lags
+            # in removing the order from the index after the fill or cancel is
+            # finalised, so the index may show "pending_cancel" long after the
+            # primary store holds "filled" or "canceled".  Re-fetch via
+            # get_order_by_id to get the authoritative terminal state so that a
+            # fill that races a cancel is not silently missed.
+            if str(alpaca_order.status.value) == "pending_cancel":
+                try:
+                    fresh = broker.get_broker_order(broker_id)
+                    if fresh is not None:
+                        alpaca_order = fresh
+                except Exception as exc:
+                    logger.warning(
+                        "reconcile: error re-fetching pending_cancel order %s: %s",
+                        broker_id,
+                        exc,
+                    )
         else:
             # Order dropped off the open list — fetch its terminal status.
             try:
