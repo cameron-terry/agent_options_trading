@@ -40,7 +40,7 @@ This is the integration target all subsequent WPs wire into.
 
 **Stub proposal (hardcoded in `agent/stub_reasoner.py`):**
 - Strategy: `bull_put_spread` on SPY
-- Legs: sell SPY 450 put / buy SPY 445 put, expiry 2026-09-19
+- Legs: sell SPY 560 put / buy SPY 555 put, expiry 2026-09-18
 - Limit price: controlled by `slice_limit_price` in config (default `−1.50`; smoke test overrides to `−0.01` to guarantee a paper fill)
 
 ---
@@ -142,7 +142,7 @@ from sqlalchemy.pool import StaticPool
 from options_agent.config import Config
 from options_agent.orchestrator import run_entry_cycle
 from options_agent.state.db import get_connection, metadata
-from options_agent.state.journal import read_journal_record, query_journal
+from options_agent.state.journal import read_journal_record
 from options_agent.contracts.state import ActionTaken
 
 logging.basicConfig(level=logging.INFO)
@@ -211,5 +211,6 @@ sqlite3 slice_verify.db \
 1. Open `options_agent/agent/stub_reasoner.py`.
 2. Update `_STUB_EXPIRY` to a real quarterly options expiration date (third
    Friday of March, June, September, or December, at least 45 days out).
-3. Confirm the new expiry satisfies the chain filter (`min_dte=20`, `max_dte=45`
-   in `config.toml`).
+3. The new expiry must be at least `_STUB_EXPIRY_GUARD_DTE` (30) days out — the
+   `min_dte`/`max_dte` chain filter in `config.toml` applies only to live chain
+   fetching (WP-3) and is not checked by the stub path.
