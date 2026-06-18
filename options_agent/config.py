@@ -174,6 +174,14 @@ class Config(BaseModel):
     order_poll_timeout_secs: float = Field(default=30.0, gt=0)
     order_limit_offset_from_mid: float = Field(default=0.0, ge=0)
 
+    # WP-0.5 slice entry limit price (net combo price; negative = credit received).
+    # The default -1.50 is used in normal paper runs. Override to -0.01 in the
+    # smoke test to guarantee fill independent of live market levels — a near-zero
+    # credit limit fills trivially on paper. WP-3/WP-8 replaces this field with
+    # real mid-price pricing logic.
+    # Guard: may only be changed from default on alpaca_paper=True runs.
+    slice_limit_price: float = Field(default=-1.50)
+
     # Risk limits (nested)
     limits: Limits = Field(default_factory=Limits)
 
@@ -200,6 +208,16 @@ class Config(BaseModel):
                 f"See exchange_calendars.get_calendar_names() for valid names."
             )
         return v
+
+    @model_validator(mode="after")
+    def _slice_limit_price_paper_only(self) -> "Config":
+        if not self.alpaca_paper and self.slice_limit_price != -1.50:
+            raise ValueError(
+                "slice_limit_price may only be overridden on paper runs "
+                "(alpaca_paper=True). Do not set a non-default slice_limit_price "
+                "on a live account."
+            )
+        return self
 
     @classmethod
     def from_toml(cls, path: Path) -> "Config":

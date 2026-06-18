@@ -3,9 +3,9 @@ from datetime import date
 from options_agent.contracts.proposal import ExitPlan, Leg, TradeProposal
 from options_agent.contracts.state import ContextSnapshot
 
-# Hardcoded expiry for the WP-0.5 vertical slice — a real quarterly options
-# expiration. Bump this when the guard below fires.
-_STUB_EXPIRY = date(2026, 9, 19)
+# Hardcoded expiry for the WP-0.5 vertical slice — third Friday of September 2026
+# (the standard quarterly options expiration). Bump when the guard below fires.
+_STUB_EXPIRY = date(2026, 9, 18)
 _STUB_EXPIRY_GUARD_DTE = 30
 
 
@@ -32,12 +32,15 @@ def stub_reasoner(context: ContextSnapshot | None = None) -> TradeProposal:
         underlying="SPY",
         strategy="bull_put_spread",
         legs=[
-            Leg(right="put", side="sell", strike=450.0, expiration=_STUB_EXPIRY),
-            Leg(right="put", side="buy", strike=445.0, expiration=_STUB_EXPIRY),
+            # Strikes chosen to be near-the-money (SPY ~$580) so Alpaca paper
+            # has the contracts listed. 450/445 were too far OTM to appear in
+            # the chain. Expiry is the third Friday of September 2026 (Sep 18).
+            Leg(right="put", side="sell", strike=560.0, expiration=_STUB_EXPIRY),
+            Leg(right="put", side="buy", strike=555.0, expiration=_STUB_EXPIRY),
         ],
         thesis=(
-            "SPY is trading near the 450 level with a bullish macro backdrop;"
-            " probability of closing below 445 at expiry is low given current"
+            "SPY is trading near the 580 level with a bullish macro backdrop;"
+            " probability of closing below 555 at expiry is low given current"
             " technical support and trend structure."
         ),
         iv_rationale=(
@@ -54,7 +57,7 @@ def stub_reasoner(context: ContextSnapshot | None = None) -> TradeProposal:
         conviction=0.65,
         est_max_loss=350.0,
         est_max_profit=150.0,
-        breakevens=[448.50],
+        breakevens=[558.50],
         net_delta=0.12,
         net_theta=8.50,
         net_vega=-0.30,
