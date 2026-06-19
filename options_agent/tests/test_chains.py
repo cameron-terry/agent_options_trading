@@ -24,6 +24,7 @@ from options_agent.contracts.state import (
 )
 from options_agent.data.chains import LegKey, get_filtered_chain, get_held_leg_greeks
 from options_agent.data.providers import (
+    DataAuthError,
     DataProvider,
     DataUnavailableError,
     RawOptionContract,
@@ -735,6 +736,40 @@ def test_held_leg_greeks_provider_error_logs_warning_continues(
     assert spy_key in result
 
     # A warning should have been logged for AAPL.
+    assert any("AAPL" in r.message for r in caplog.records)
+
+
+def test_held_leg_greeks_auth_error_logs_warning_continues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    spy_pos = _make_position(underlying="SPY", expiration=_AGED_EXPIRY)
+    aapl_pos = _make_position(
+        pos_id="pos-002",
+        underlying="AAPL",
+        strike=185.0,
+        expiration=_AGED_EXPIRY,
+    )
+    good_raw = _raw(
+        underlying="SPY",
+        strike=450.0,
+        expiration=_AGED_EXPIRY,
+        delta=-0.30,
+        vega=0.18,
+        theta=-0.05,
+    )
+
+    mock = MagicMock(spec=DataProvider)
+
+    def side_effect(sym: str) -> list[RawOptionContract]:
+        if sym == "AAPL":
+            raise DataAuthError("Alpaca rejected credentials (401)")
+        return [good_raw]
+
+    mock.fetch_option_chain.side_effect = side_effect
+    result = get_held_leg_greeks([spy_pos, aapl_pos], mock)  # type: ignore[arg-type]
+
+    spy_key: LegKey = ("SPY", "put", 450.0, _AGED_EXPIRY.isoformat())
+    assert spy_key in result
     assert any("AAPL" in r.message for r in caplog.records)
 
 
