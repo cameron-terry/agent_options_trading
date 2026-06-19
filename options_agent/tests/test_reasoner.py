@@ -752,3 +752,49 @@ def test_reason_turn_cap_commit_does_not_add_extra_user_message() -> None:
         assert not (roles[i] == "user" and roles[i + 1] == "user"), (
             f"Consecutive user messages at positions {i} and {i + 1}: {roles}"
         )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# WP-3.9: get_events batch dispatch end-to-end
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_reason_get_events_dispatches_batch_form() -> None:
+    """get_events dispatch: reasoner passes {"symbols": [...]} and receives dict.
+
+    Verifies the end-to-end dispatch path through reason():
+      - model emits get_events with {"symbols": ["SPY", "AAPL"]} (batch form)
+      - tool impl receives that exact dict (not {"symbol": "SPY"} singular)
+      - result dict is serialised into the transcript correctly
+    """
+    from options_agent.contracts.data import EventInfo
+
+    batch_input = {"symbols": ["SPY", "AAPL"]}
+    events_result: dict[str, EventInfo] = {
+        "SPY": EventInfo(symbol="SPY", earnings=None, ex_dividend=None),
+        "AAPL": EventInfo(symbol="AAPL", earnings=None, ex_dividend=None),
+    }
+
+    events_block = _tool_use_block("get_events", batch_input, "tu_events")
+    responses = [
+        _mock_response("tool_use", [events_block]),
+        _mock_response("end_turn", [_text_block()]),
+        _mock_response("tool_use", [_tool_use_block(_TSUB, _VP, "tu_commit")]),
+    ]
+
+    mock_impl = MagicMock(return_value=events_result)
+    context = _make_context()
+    proposal, _ = _patched_reason_ctx(
+        responses,
+        context,
+        tool_impls={"get_events": mock_impl},
+    )
+
+    assert isinstance(proposal, TradeProposal)
+    mock_impl.assert_called_once_with(batch_input)
+    assert len(context.tool_calls_transcript) == 1
+    record = context.tool_calls_transcript[0]
+    assert record.tool_name == "get_events"
+    assert record.tool_input == batch_input
+    assert '"SPY"' in record.result_json
+    assert '"AAPL"' in record.result_json
