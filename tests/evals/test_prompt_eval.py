@@ -118,7 +118,8 @@ def _run_scenario(
     proposals: list[TradeProposal] = []
     all_tool_calls: list[list[str]] = []
 
-    for _run_idx in range(k):
+    for run_idx in range(k):
+        print(f"\n[{scenario.id}] run {run_idx + 1}/{k} — calling reason() ...")
         context = _make_eval_context(scenario)
         spy_impls, calls = make_spy_tool_impls(scenario.tool_impls)
         proposal = reason(
@@ -126,6 +127,11 @@ def _run_scenario(
             tool_impls=spy_impls,
             playbook=config.playbook,
             limits=config.limits,
+        )
+        print(
+            f"[{scenario.id}] run {run_idx + 1}/{k} done — "
+            f"action={proposal.action} strategy={proposal.strategy!r} "
+            f"underlying={proposal.underlying} tools={calls}"
         )
         proposals.append(proposal)
         all_tool_calls.append(list(calls))

@@ -84,6 +84,12 @@ class ReasonerError(Exception):
         self.last_validation_error = last_validation_error
 
 
+def _fmt_input(tool_input: dict[str, Any], max_len: int = 60) -> str:
+    """Format tool input dict as a short string for log lines."""
+    s = json.dumps(tool_input, default=str)
+    return s if len(s) <= max_len else s[: max_len - 1] + "…"
+
+
 def _serialize_tool_result(result: Any) -> str:
     """Serialize a tool return value to a JSON string for the messages list."""
     if result is None:
@@ -165,8 +171,11 @@ def reason(
 
     tool_calls_transcript: list[ToolCallRecord] = []
 
+    log.info("reason() starting — model=%s max_turns=%d", model_id, max_turns)
+
     # ── Phase 1: Exploration ──────────────────────────────────────────────────
     for _turn in range(max_turns):
+        log.info("  exploration turn %d — waiting for model response", _turn + 1)
         response = client.messages.create(
             model=model_id,
             max_tokens=max_tokens,
@@ -180,6 +189,11 @@ def reason(
 
         if response.stop_reason != "tool_use":
             # Model stopped calling tools — exploration complete.
+            log.info(
+                "  exploration complete after %d turn(s) — %d tool call(s) recorded",
+                _turn + 1,
+                len(tool_calls_transcript),
+            )
             break
 
         # Dispatch all tool calls in this response and collect results.
@@ -204,6 +218,7 @@ def reason(
                 )
 
             tool_input = cast(dict[str, Any], block.input)
+            log.info("    → tool_use: %s(%s)", block.name, _fmt_input(tool_input))
             result = impl(tool_input)
             result_json = _serialize_tool_result(result)
 
@@ -254,6 +269,11 @@ def reason(
         )
 
     for attempt in range(max_schema_retries + 1):
+        log.info(
+            "  commit attempt %d/%d — waiting for model response",
+            attempt + 1,
+            max_schema_retries + 1,
+        )
         commit_response = client.messages.create(
             model=model_id,
             max_tokens=max_tokens,
@@ -316,6 +336,12 @@ def reason(
 
         # Success — stamp the exploration transcript onto the context snapshot
         # so the caller can persist it with the journal record.
+        log.info(
+            "  commit success — action=%s strategy=%r underlying=%s",
+            proposal.action,
+            proposal.strategy,
+            proposal.underlying,
+        )
         context.tool_calls_transcript = tool_calls_transcript
         return proposal
 
