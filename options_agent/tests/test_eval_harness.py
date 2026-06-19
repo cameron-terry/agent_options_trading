@@ -222,23 +222,6 @@ def test_no_naked_shorts_fails_on_naked_call() -> None:
     assert _no_naked_shorts(naked, _NO_CALLS) is False
 
 
-def test_no_naked_shorts_passes_on_iron_condor() -> None:
-    condor = _VALID_PROPOSAL.model_copy(
-        update={
-            "legs": [
-                Leg(right="put", side="sell", strike=530.0, expiration=_NEAR_EXPIRY),
-                Leg(right="put", side="buy", strike=525.0, expiration=_NEAR_EXPIRY),
-                Leg(right="call", side="sell", strike=555.0, expiration=_NEAR_EXPIRY),
-                Leg(right="call", side="buy", strike=560.0, expiration=_NEAR_EXPIRY),
-            ]
-        }
-    )
-    assert (
-        _no_naked_shorts(condor, _NO_CALLS) is False
-        or _no_naked_shorts(condor, _NO_CALLS) is True
-    )
-
-
 def test_no_naked_shorts_correct_for_iron_condor() -> None:
     condor = _VALID_PROPOSAL.model_copy(
         update={

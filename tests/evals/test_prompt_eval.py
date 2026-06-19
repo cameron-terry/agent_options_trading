@@ -9,11 +9,9 @@ NOT for every-push CI. Run explicitly when prompt or playbook changes:
 
 See tests/evals/conftest.py for setup and cost notes.
 
-Sequencing:
-    This eval is meaningless until WP-6.4 (PR #50) merges — reason() is a
-    NotImplementedError stub until then. The first successful run establishes
-    the prompt baseline. Capture per-property pass rates from the -v output
-    and calibrate min_pass_rate thresholds in eval_scenarios.py accordingly.
+The first successful run establishes the prompt baseline. Capture
+per-property pass rates from the -v output and use them to calibrate
+min_pass_rate thresholds in eval_scenarios.py accordingly.
 
 Invariant violation format:
     When an invariant fails, the assertion message includes the run index and
@@ -26,6 +24,10 @@ Preference report format:
 
 from __future__ import annotations
 
+import hashlib
+import json
+from datetime import UTC, datetime
+
 import pytest
 
 from options_agent.agent.eval_scenarios import (
@@ -33,51 +35,43 @@ from options_agent.agent.eval_scenarios import (
     EvalScenario,
     make_spy_tool_impls,
 )
-from options_agent.agent.prompts import build_system_prompt
+from options_agent.agent.reasoner import reason
 from options_agent.config import Config
 from options_agent.contracts.proposal import TradeProposal
+from options_agent.contracts.state import ContextSnapshot
 
 from .conftest import EVAL_RUNS_PER_SCENARIO
 
 # ──────────────────────────────────────────────────────────────────────────────
-# reason() import — skip gracefully until WP-6.4 merges
-# ──────────────────────────────────────────────────────────────────────────────
-
-try:
-    from options_agent.agent.reasoner import reason as _reason
-
-    def _call_reason(*args, **kwargs) -> TradeProposal:  # type: ignore[no-untyped-def]
-        result = _reason(*args, **kwargs)
-        if isinstance(result, TradeProposal):
-            return result
-        raise TypeError(f"reason() returned {type(result)!r}, expected TradeProposal")
-
-except NotImplementedError:
-    _call_reason = None  # type: ignore[assignment]
-
-
-def _get_reason():  # type: ignore[no-untyped-def]
-    if _call_reason is None:
-        pytest.skip(
-            "reason() raises NotImplementedError — WP-6.4 (PR #50) has not merged yet. "
-            "Tier-2 eval will run once that PR lands."
-        )
-    try:
-        _call_reason.__self__  # type: ignore[attr-defined]
-    except AttributeError:
-        pass
-    return _call_reason
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# System prompt — built once per session from the default config
+# Config — built once per session
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture(scope="session")
-def system_prompt() -> str:
-    config = Config()
-    return build_system_prompt(config.playbook, config.limits)
+def config() -> Config:
+    return Config()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Context snapshot factory
+#
+# Intentionally minimal assembled_context so the agent must call
+# get_universe_snapshot and other tools to discover market state — which is
+# exactly what the base invariants test.  A fully pre-populated context would
+# let the model skip tool calls and silently pass tool-call invariants.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _make_eval_context(scenario_id: str) -> ContextSnapshot:
+    assembled: dict[str, object] = {"eval_scenario": scenario_id}
+    blob = json.dumps(assembled, sort_keys=True)
+    return ContextSnapshot(
+        assembled_context=assembled,
+        context_hash=hashlib.sha256(blob.encode()).hexdigest()[:16],
+        model_id="claude-sonnet-4-6",
+        prompt_version="eval",
+        assembled_at=datetime.now(tz=UTC),
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -87,20 +81,21 @@ def system_prompt() -> str:
 
 def _run_scenario(
     scenario: EvalScenario,
-    system_prompt: str,
+    config: Config,
     k: int,
     _api_key: str,  # forces dependency on anthropic_api_key fixture (skip guard)
 ) -> None:
-    reason = _get_reason()
-
     proposals: list[TradeProposal] = []
     all_tool_calls: list[list[str]] = []
 
-    for run_idx in range(k):
+    for _run_idx in range(k):
+        context = _make_eval_context(scenario.id)
         spy_impls, calls = make_spy_tool_impls(scenario.tool_impls)
         proposal = reason(
+            context=context,
             tool_impls=spy_impls,
-            system_prompt=system_prompt,
+            playbook=config.playbook,
+            limits=config.limits,
         )
         proposals.append(proposal)
         all_tool_calls.append(list(calls))
@@ -165,13 +160,13 @@ def _run_scenario(
 )
 def test_scenario(
     scenario: EvalScenario,
-    system_prompt: str,
+    config: Config,
     anthropic_api_key: str,
 ) -> None:
     """Run one eval scenario K times and assert invariants + preferences."""
     _run_scenario(
         scenario=scenario,
-        system_prompt=system_prompt,
+        config=config,
         k=EVAL_RUNS_PER_SCENARIO,
         _api_key=anthropic_api_key,
     )
