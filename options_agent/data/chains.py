@@ -35,8 +35,13 @@ from options_agent.contracts.data import (
     FilteredChain,
     OptionContract,
 )
+from options_agent.contracts.state import Position
 from options_agent.data.greeks_iv import enrich_greeks_iv
-from options_agent.data.providers import DataProvider
+from options_agent.data.providers import (
+    DataAuthError,
+    DataProvider,
+    DataUnavailableError,
+)
 from options_agent.risk.limits import ChainFilterLimits
 
 logger = logging.getLogger(__name__)
@@ -238,3 +243,59 @@ def get_filtered_chain(
         truncated=truncated,
         total_before_cap=total_before_cap,
     )
+
+
+# (underlying, right, strike, expiration_isoformat)
+type LegKey = tuple[str, str, float, str]
+# (delta, vega, theta) — same order as the greek_lookup tuple in portfolio.py
+type LegGreeks = tuple[float, float, float]
+
+
+def get_held_leg_greeks(
+    positions: list[Position],
+    provider: DataProvider,
+) -> dict[LegKey, LegGreeks]:
+    """Fetch current Greeks for held position legs without entry-criteria filters.
+
+    Unlike get_filtered_chain(), no DTE window or delta range is applied — the
+    full provider chain for each underlying is fetched and only Greek plausibility
+    checks (enrich_greeks_iv) are run. This closes the gap where a held leg that
+    has aged below dte_min would be absent from the entry chain and silently
+    contribute 0.0 to portfolio Greek aggregation.
+
+    Returns a dict keyed by (underlying, right, strike, expiration_isoformat)
+    mapping to (delta, vega, theta). Contracts absent from the provider snapshot
+    (e.g. expired options no longer quoted) are simply omitted; callers fall back
+    to 0.0 + warning when a key is not present.
+
+    Only fetches for underlyings that have at least one option leg in positions.
+    EQUITY positions (empty legs list) are skipped automatically.
+    """
+    underlyings = {pos.underlying for pos in positions if pos.legs}
+
+    result: dict[LegKey, LegGreeks] = {}
+
+    for underlying in underlyings:
+        try:
+            raw_contracts = enrich_greeks_iv(provider.fetch_option_chain(underlying))
+        except (DataUnavailableError, DataAuthError) as exc:
+            logger.warning(
+                "get_held_leg_greeks(%r): chain fetch failed (%s) —"
+                " legs for this underlying will not have held-leg Greek fallback.",
+                underlying,
+                exc,
+            )
+            continue
+
+        for raw in raw_contracts:
+            if raw.delta is None or raw.vega is None or raw.theta is None:
+                continue
+            key: LegKey = (
+                underlying,
+                raw.right,
+                raw.strike,
+                raw.expiration.isoformat(),
+            )
+            result[key] = (raw.delta, raw.vega, raw.theta)
+
+    return result

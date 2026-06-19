@@ -1,4 +1,4 @@
-"""Tests for data/chains.py — get_filtered_chain().
+"""Tests for data/chains.py — get_filtered_chain() and get_held_leg_greeks().
 
 All tests use fixture RawOptionContracts and a mock DataProvider so no live
 API calls are made. The mock provider is created inline via unittest.mock to
@@ -14,8 +14,21 @@ from unittest.mock import MagicMock
 import pytest
 
 from options_agent.contracts.data import FilteredChain
-from options_agent.data.chains import get_filtered_chain
-from options_agent.data.providers import DataProvider, RawOptionContract
+from options_agent.contracts.proposal import ExitPlan, Leg
+from options_agent.contracts.state import (
+    AssetClass,
+    LegStatus,
+    Position,
+    PositionLeg,
+    PositionStatus,
+)
+from options_agent.data.chains import LegKey, get_filtered_chain, get_held_leg_greeks
+from options_agent.data.providers import (
+    DataAuthError,
+    DataProvider,
+    DataUnavailableError,
+    RawOptionContract,
+)
 from options_agent.risk.limits import ChainFilterLimits
 
 # ---------------------------------------------------------------------------
@@ -521,3 +534,275 @@ def test_spread_width_as_tiebreaker() -> None:
     chain = _run(raws)
     assert chain.contracts[0].spread_width == pytest.approx(0.05)
     assert chain.contracts[1].spread_width == pytest.approx(0.10)
+
+
+# ---------------------------------------------------------------------------
+# get_held_leg_greeks
+# ---------------------------------------------------------------------------
+
+_AGED_EXPIRY = date(2026, 6, 28)  # 14 DTE from _TODAY — below dte_min=20
+
+
+def _make_position(
+    pos_id: str = "pos-001",
+    underlying: str = "SPY",
+    right: str = "put",
+    strike: float = 450.0,
+    expiration: date = _AGED_EXPIRY,
+    filled_qty: int = 1,
+) -> Position:
+    return Position(
+        id=pos_id,
+        underlying=underlying,
+        strategy="bull_put_spread",
+        legs=[
+            PositionLeg(
+                leg=Leg(
+                    right=right,  # type: ignore[arg-type]
+                    side="sell",
+                    strike=strike,
+                    expiration=expiration,
+                ),
+                filled_qty=filled_qty,
+                avg_fill_price=1.50,
+                status=LegStatus.OPEN,
+            )
+        ],
+        quantity=1,
+        entry_net_amount=-1.50,
+        current_mark=-0.80,
+        marked_at=datetime(2026, 6, 14, 14, 30, tzinfo=UTC),
+        unrealized_pnl=70.0,
+        realized_pnl=None,
+        exit_plan=ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=7),
+        status=PositionStatus.OPEN,
+        opened_at=datetime(2026, 6, 1, 15, 0, tzinfo=UTC),
+        closed_at=None,
+        nearest_expiration=expiration,
+        est_max_loss=300.0,
+        est_max_profit=150.0,
+        opening_order_id="ord-001",
+        asset_class=AssetClass.OPTION_STRATEGY,
+    )
+
+
+def _held_provider(
+    contracts: list[RawOptionContract],
+    price: float = _UNDERLYING_PRICE,
+) -> DataProvider:
+    mock = MagicMock(spec=DataProvider)
+    mock.fetch_option_chain.return_value = contracts
+    mock.fetch_latest_price.return_value = price
+    return mock  # type: ignore[return-value]
+
+
+def test_held_leg_greeks_returns_greeks_for_held_leg() -> None:
+    position = _make_position(
+        underlying="SPY", right="put", strike=450.0, expiration=_AGED_EXPIRY
+    )
+    raw = _raw(
+        underlying="SPY",
+        right="put",
+        strike=450.0,
+        expiration=_AGED_EXPIRY,
+        delta=-0.35,
+        vega=0.22,
+        theta=-0.07,
+    )
+    provider = _held_provider([raw])
+    result = get_held_leg_greeks([position], provider)
+
+    key: LegKey = ("SPY", "put", 450.0, _AGED_EXPIRY.isoformat())
+    assert key in result
+    delta, vega, theta = result[key]
+    assert delta == pytest.approx(-0.35)
+    assert vega == pytest.approx(0.22)
+    assert theta == pytest.approx(-0.07)
+
+
+def test_held_leg_greeks_no_dte_filter_applied() -> None:
+    # _AGED_EXPIRY is 14 DTE — below dte_min=20, excluded by get_filtered_chain.
+    # get_held_leg_greeks must still return it.
+    position = _make_position(expiration=_AGED_EXPIRY)
+    raw = _raw(expiration=_AGED_EXPIRY, delta=-0.30, vega=0.18, theta=-0.05)
+    provider = _held_provider([raw])
+    result = get_held_leg_greeks([position], provider)
+
+    key: LegKey = ("SPY", "put", 450.0, _AGED_EXPIRY.isoformat())
+    assert key in result
+
+
+def test_held_leg_greeks_no_delta_filter_applied() -> None:
+    # |delta|=0.05 is below min_abs_delta=0.15; get_filtered_chain would drop it.
+    # get_held_leg_greeks must still return it.
+    position = _make_position(expiration=_AGED_EXPIRY)
+    raw = _raw(expiration=_AGED_EXPIRY, delta=-0.05, vega=0.10, theta=-0.01)
+    provider = _held_provider([raw])
+    result = get_held_leg_greeks([position], provider)
+
+    key: LegKey = ("SPY", "put", 450.0, _AGED_EXPIRY.isoformat())
+    assert key in result
+    assert result[key][0] == pytest.approx(-0.05)
+
+
+def test_held_leg_greeks_omits_contract_with_none_delta() -> None:
+    position = _make_position(expiration=_AGED_EXPIRY)
+    raw = _raw(expiration=_AGED_EXPIRY, delta=None, vega=0.18, theta=-0.05)
+    provider = _held_provider([raw])
+    result = get_held_leg_greeks([position], provider)
+
+    key: LegKey = ("SPY", "put", 450.0, _AGED_EXPIRY.isoformat())
+    assert key not in result
+
+
+def test_held_leg_greeks_omits_contract_with_none_vega() -> None:
+    position = _make_position(expiration=_AGED_EXPIRY)
+    raw = _raw(expiration=_AGED_EXPIRY, delta=-0.30, vega=None, theta=-0.05)
+    provider = _held_provider([raw])
+    result = get_held_leg_greeks([position], provider)
+
+    key: LegKey = ("SPY", "put", 450.0, _AGED_EXPIRY.isoformat())
+    assert key not in result
+
+
+def test_held_leg_greeks_omits_contract_with_none_theta() -> None:
+    position = _make_position(expiration=_AGED_EXPIRY)
+    raw = _raw(expiration=_AGED_EXPIRY, delta=-0.30, vega=0.18, theta=None)
+    provider = _held_provider([raw])
+    result = get_held_leg_greeks([position], provider)
+
+    key: LegKey = ("SPY", "put", 450.0, _AGED_EXPIRY.isoformat())
+    assert key not in result
+
+
+def test_held_leg_greeks_multiple_underlyings_fetched() -> None:
+    spy_pos = _make_position(underlying="SPY", expiration=_AGED_EXPIRY)
+    aapl_pos = _make_position(
+        pos_id="pos-002",
+        underlying="AAPL",
+        strike=185.0,
+        expiration=_AGED_EXPIRY,
+    )
+
+    def _multi_side_effect(sym: str) -> list[RawOptionContract]:
+        strike = 450.0 if sym == "SPY" else 185.0
+        delta = -0.30 if sym == "SPY" else -0.25
+        return [
+            _raw(underlying=sym, strike=strike, expiration=_AGED_EXPIRY, delta=delta)
+        ]
+
+    mock = MagicMock(spec=DataProvider)
+    mock.fetch_option_chain.side_effect = _multi_side_effect
+    get_held_leg_greeks([spy_pos, aapl_pos], mock)  # type: ignore[arg-type]
+
+    assert mock.fetch_option_chain.call_count == 2
+    called_with = {c.args[0] for c in mock.fetch_option_chain.call_args_list}
+    assert called_with == {"SPY", "AAPL"}
+
+
+def test_held_leg_greeks_provider_error_logs_warning_continues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    spy_pos = _make_position(underlying="SPY", expiration=_AGED_EXPIRY)
+    aapl_pos = _make_position(
+        pos_id="pos-002",
+        underlying="AAPL",
+        strike=185.0,
+        expiration=_AGED_EXPIRY,
+    )
+    good_raw = _raw(
+        underlying="SPY",
+        strike=450.0,
+        expiration=_AGED_EXPIRY,
+        delta=-0.30,
+        vega=0.18,
+        theta=-0.05,
+    )
+
+    mock = MagicMock(spec=DataProvider)
+
+    def side_effect(sym: str) -> list[RawOptionContract]:
+        if sym == "AAPL":
+            raise DataUnavailableError(
+                "fetch_option_chain", "AAPL", RuntimeError("timeout")
+            )
+        return [good_raw]
+
+    mock.fetch_option_chain.side_effect = side_effect
+    result = get_held_leg_greeks([spy_pos, aapl_pos], mock)  # type: ignore[arg-type]
+
+    # SPY should still be present despite AAPL failing.
+    spy_key: LegKey = ("SPY", "put", 450.0, _AGED_EXPIRY.isoformat())
+    assert spy_key in result
+
+    # A warning should have been logged for AAPL.
+    assert any("AAPL" in r.message for r in caplog.records)
+
+
+def test_held_leg_greeks_auth_error_logs_warning_continues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    spy_pos = _make_position(underlying="SPY", expiration=_AGED_EXPIRY)
+    aapl_pos = _make_position(
+        pos_id="pos-002",
+        underlying="AAPL",
+        strike=185.0,
+        expiration=_AGED_EXPIRY,
+    )
+    good_raw = _raw(
+        underlying="SPY",
+        strike=450.0,
+        expiration=_AGED_EXPIRY,
+        delta=-0.30,
+        vega=0.18,
+        theta=-0.05,
+    )
+
+    mock = MagicMock(spec=DataProvider)
+
+    def side_effect(sym: str) -> list[RawOptionContract]:
+        if sym == "AAPL":
+            raise DataAuthError("Alpaca rejected credentials (401)")
+        return [good_raw]
+
+    mock.fetch_option_chain.side_effect = side_effect
+    result = get_held_leg_greeks([spy_pos, aapl_pos], mock)  # type: ignore[arg-type]
+
+    spy_key: LegKey = ("SPY", "put", 450.0, _AGED_EXPIRY.isoformat())
+    assert spy_key in result
+    assert any("AAPL" in r.message for r in caplog.records)
+
+
+def test_held_leg_greeks_empty_positions_returns_empty() -> None:
+    provider = _held_provider([])
+    result = get_held_leg_greeks([], provider)
+    assert result == {}
+    provider.fetch_option_chain.assert_not_called()  # type: ignore[attr-defined]
+
+
+def test_held_leg_greeks_equity_position_skipped() -> None:
+    equity_pos = Position(
+        id="eq-001",
+        underlying="SPY",
+        strategy="equity",
+        legs=[],  # EQUITY positions have no option legs
+        quantity=100,
+        entry_net_amount=54520.0,
+        current_mark=54520.0,
+        marked_at=datetime(2026, 6, 14, 14, 30, tzinfo=UTC),
+        unrealized_pnl=0.0,
+        realized_pnl=None,
+        exit_plan=None,
+        status=PositionStatus.OPEN,
+        opened_at=datetime(2026, 6, 14, 14, 0, tzinfo=UTC),
+        closed_at=None,
+        nearest_expiration=date(9999, 12, 31),
+        est_max_loss=0.0,
+        est_max_profit=0.0,
+        opening_order_id="ord-eq-001",
+        asset_class=AssetClass.EQUITY,
+    )
+    provider = _held_provider([])
+    result = get_held_leg_greeks([equity_pos], provider)
+    assert result == {}
+    provider.fetch_option_chain.assert_not_called()  # type: ignore[attr-defined]
