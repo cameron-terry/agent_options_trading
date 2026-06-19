@@ -18,7 +18,8 @@ Run in parallel:
 ### Phase 2 — Collect all completed and in-review work
 
 1. **Fetch in parallel** using the hardcoded board ID. Do not call `get_board_details`.
-   - `mcp__trello__trello_get_board_cards` with `filter: all` — includes archived/closed cards; completed sub-task cards are routinely archived after merge and will be silently missed without this filter
+   - `mcp__trello__trello_search` — search for `<WP-N.M>` (e.g. `WP-0.8`) scoped to the board to find the target card. Do **not** include brackets in the query — the search API does not require them and the card names will contain the tag.
+   - `mcp__trello__trello_search` — search for the parent epic `<WP-N>` (e.g. `WP-0`) scoped to the board
    - `mcp__trello__get_lists` — list IDs and names (lightweight; used to map each card's `listId` to its list name)
 
 2. **Filter to this WP** — collect every card whose name starts with `[<WP-N>` (epic card + all sub-tasks). Include cards in any list (Done, In Review, In Progress, To-Do) and any archived (`closed: true`) cards returned by `filter: all`.
