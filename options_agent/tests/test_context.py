@@ -392,6 +392,182 @@ def test_missing_leg_partial_greek_counted() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# held-leg Greek fallback in aggregate_portfolio_greeks (WP-3.8)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Acceptance criteria: a position whose leg has aged below dte_min (entry chain
+# won't contain it) still produces correct net_dollar_delta when held_leg_greeks
+# is provided.
+
+_AGED_EXPIRY = date(2026, 6, 28)  # 14 DTE — below _FILTER_PARAMS.dte_min=21
+
+
+def _make_aged_position(
+    pos_id: str = "pos-aged-001",
+    underlying: str = "SPY",
+    sell_strike: float = 530.0,
+    qty: int = 1,
+) -> Position:
+    """Position with a single sell leg whose expiry is below dte_min."""
+    return Position(
+        id=pos_id,
+        underlying=underlying,
+        strategy="bull_put_spread",
+        legs=[
+            PositionLeg(
+                leg=Leg(
+                    right="put",
+                    side="sell",
+                    strike=sell_strike,
+                    expiration=_AGED_EXPIRY,
+                ),
+                filled_qty=qty,
+                avg_fill_price=2.00,
+                status=LegStatus.OPEN,
+            )
+        ],
+        quantity=qty,
+        entry_net_amount=-2.00,
+        current_mark=-1.00,
+        marked_at=_AS_OF,
+        unrealized_pnl=100.0,
+        realized_pnl=None,
+        exit_plan=ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=7),
+        status=PositionStatus.OPEN,
+        opened_at=datetime(2026, 6, 1, 15, 0, 0, tzinfo=UTC),
+        closed_at=None,
+        nearest_expiration=_AGED_EXPIRY,
+        est_max_loss=300.0,
+        est_max_profit=200.0,
+        opening_order_id="ord-aged-001",
+        asset_class=AssetClass.OPTION_STRATEGY,
+    )
+
+
+def test_held_leg_fallback_correct_net_dollar_delta() -> None:
+    """Aged leg absent from entry chain contributes correctly via held-leg greeks."""
+    position = _make_aged_position(sell_strike=530.0, qty=1)
+    portfolio_raw = _make_empty_portfolio(position)
+
+    # Entry chain for SPY has underlying_price but does NOT contain the aged leg.
+    chain = FilteredChain(
+        underlying="SPY",
+        underlying_price=545.20,
+        as_of=_AS_OF,
+        filter_params=_FILTER_PARAMS,
+        contracts=[],  # empty — aged leg filtered out by DTE
+    )
+
+    # Held-leg greeks from get_held_leg_greeks (unfiltered fetch).
+    held_key = ("SPY", "put", 530.0, _AGED_EXPIRY.isoformat())
+    held_greeks: dict = {held_key: (-0.21, 0.38, -0.18)}  # (delta, vega, theta)
+
+    result, warnings = aggregate_portfolio_greeks(
+        portfolio_raw, {"SPY": chain}, held_leg_greeks=held_greeks
+    )
+
+    # Short sell, side_sign=-1, qty=1, price=545.20
+    expected_delta = -0.21 * -1 * 1 * 545.20 * 100
+    assert abs(result.net_dollar_delta - expected_delta) < 0.01
+    assert warnings == []
+
+
+def test_held_leg_fallback_no_warning_on_success() -> None:
+    """When held-leg lookup succeeds, no warning is emitted."""
+    position = _make_aged_position()
+    portfolio_raw = _make_empty_portfolio(position)
+    chain = FilteredChain(
+        underlying="SPY",
+        underlying_price=545.20,
+        as_of=_AS_OF,
+        filter_params=_FILTER_PARAMS,
+        contracts=[],
+    )
+    held_key = ("SPY", "put", 530.0, _AGED_EXPIRY.isoformat())
+    held_greeks: dict = {held_key: (-0.21, 0.38, -0.18)}
+
+    _, warnings = aggregate_portfolio_greeks(
+        portfolio_raw, {"SPY": chain}, held_leg_greeks=held_greeks
+    )
+    assert warnings == []
+
+
+def test_held_leg_fallback_warns_when_both_miss() -> None:
+    """When the leg is absent from both entry chain and held-leg dict, emit warning."""
+    position = _make_aged_position()
+    portfolio_raw = _make_empty_portfolio(position)
+    chain = FilteredChain(
+        underlying="SPY",
+        underlying_price=545.20,
+        as_of=_AS_OF,
+        filter_params=_FILTER_PARAMS,
+        contracts=[],
+    )
+    # Held-leg dict is empty — simulates expired contract no longer in provider.
+    _, warnings = aggregate_portfolio_greeks(
+        portfolio_raw, {"SPY": chain}, held_leg_greeks={}
+    )
+    assert len(warnings) == 1
+    assert "held-leg" in warnings[0]
+    assert "expired" in warnings[0]
+
+
+def test_no_held_leg_greeks_preserves_original_warning_text() -> None:
+    """When held_leg_greeks is None, the 'filter window' warning is used."""
+    position = _make_aged_position()
+    portfolio_raw = _make_empty_portfolio(position)
+    chain = FilteredChain(
+        underlying="SPY",
+        underlying_price=545.20,
+        as_of=_AS_OF,
+        filter_params=_FILTER_PARAMS,
+        contracts=[],
+    )
+    _, warnings = aggregate_portfolio_greeks(portfolio_raw, {"SPY": chain})
+    assert len(warnings) == 1
+    assert "filter window" in warnings[0]
+
+
+def test_held_leg_fallback_contributes_zero_when_both_miss() -> None:
+    """net_dollar_delta is 0.0 when the leg misses both lookups."""
+    position = _make_aged_position()
+    portfolio_raw = _make_empty_portfolio(position)
+    chain = FilteredChain(
+        underlying="SPY",
+        underlying_price=545.20,
+        as_of=_AS_OF,
+        filter_params=_FILTER_PARAMS,
+        contracts=[],
+    )
+    result, _ = aggregate_portfolio_greeks(
+        portfolio_raw, {"SPY": chain}, held_leg_greeks={}
+    )
+    assert result.net_dollar_delta == 0.0
+
+
+def test_held_leg_fallback_entry_chain_takes_priority() -> None:
+    """When the leg is present in the entry chain, held-leg greeks are not used."""
+    position = _make_position()  # 530 & 525 puts at _EXPIRY (in-range DTE)
+    portfolio_raw = _make_empty_portfolio(position)
+    chain = _make_spy_chain()
+
+    # Provide different greeks in held-leg dict — should be ignored.
+    held_530_key = ("SPY", "put", 530.0, _EXPIRY.isoformat())
+    held_525_key = ("SPY", "put", 525.0, _EXPIRY.isoformat())
+    held_greeks: dict = {
+        held_530_key: (-0.99, 9.99, -9.99),
+        held_525_key: (-0.99, 9.99, -9.99),
+    }
+
+    result, warnings = aggregate_portfolio_greeks(
+        portfolio_raw, {"SPY": chain}, held_leg_greeks=held_greeks
+    )
+    # Greeks should match entry chain values, not held-leg values.
+    assert abs(result.net_dollar_delta - _EXPECTED_DELTA) < 0.01
+    assert warnings == []
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # assemble_context — full integration against mock tool impls
 # ──────────────────────────────────────────────────────────────────────────────
 

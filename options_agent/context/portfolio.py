@@ -3,14 +3,11 @@
 Aggregates net portfolio dollar-Greeks from open positions using the current
 filtered chain for each underlying.
 
-Cross-WP note (WP-3 dependency): the entry-filtered chain is bounded by
-dte_min/dte_max and the configured delta range. Contracts for positions entered
-earlier in their lifecycle (e.g. a 45-DTE leg now at 10 DTE) may fall outside
-those bounds and will not appear in the chain. When a held leg is absent from
-the chain its Greek contribution is treated as 0.0 and a warning is emitted.
-This understates portfolio exposure and may make the net-delta band check less
-conservative than intended. WP-3 should expose a separate held-leg Greek fetch
-(unfiltered by entry criteria) to close this gap.
+Cross-WP note (WP-3.8): the entry-filtered chain is bounded by dte_min/dte_max
+and the configured delta range. Legs that have aged below dte_min (e.g. a 30-DTE
+entry now at 18 DTE) will not appear in it. aggregate_portfolio_greeks accepts an
+optional held_leg_greeks dict (produced by data.chains.get_held_leg_greeks) to
+cover these legs; a leg absent from both sources falls back to 0.0 + warning.
 
 net_dollar_gamma is not computed here because OptionContract intentionally omits
 per-contract gamma (not meaningful as a per-row entry signal; see contracts/data.py
@@ -34,17 +31,25 @@ a put (negative BSM delta) creates a positive portfolio delta exposure.
 """
 
 from options_agent.contracts.data import FilteredChain, PortfolioState
+from options_agent.data.chains import LegGreeks, LegKey
 
 
 def aggregate_portfolio_greeks(
     portfolio_raw: PortfolioState,
     chains_by_symbol: dict[str, FilteredChain],
+    held_leg_greeks: dict[LegKey, LegGreeks] | None = None,
 ) -> tuple[PortfolioState, list[str]]:
     """Recompute net dollar-Greeks on *portfolio_raw* from current chain data.
 
     Returns a new PortfolioState with net_dollar_delta/vega/theta overwritten by
     values computed from *chains_by_symbol*, plus a list of warning strings for
     any position legs that could not be matched in the supplied chains.
+
+    When *held_leg_greeks* is provided (pre-fetched via get_held_leg_greeks()),
+    legs absent from the entry-filtered chain are looked up there before falling
+    back to 0.0. This handles legs that have aged outside the DTE filter window.
+    A warning is emitted only if both the entry chain and held-leg fetch miss the
+    leg; if held-leg lookup succeeds, the contribution is counted silently.
 
     net_dollar_gamma is always set to 0.0 (see module docstring).
     The account-level fields (equity, buying_power, etc.) and positions list
@@ -82,12 +87,29 @@ def aggregate_portfolio_greeks(
 
             greeks = greek_lookup.get(key)
             if greeks is None:
-                warnings.append(
-                    f"pos {position.id}: {leg.side} {leg.right} {leg.strike}"
-                    f" exp {leg.expiration} not in chain (may be outside entry"
-                    " filter window); Greek contribution set to 0.0"
-                )
-                continue
+                if held_leg_greeks is not None:
+                    held_key: LegKey = (
+                        position.underlying,
+                        leg.right,
+                        leg.strike,
+                        leg.expiration.isoformat(),
+                    )
+                    greeks = held_leg_greeks.get(held_key)
+                if greeks is None:
+                    if held_leg_greeks is not None:
+                        warnings.append(
+                            f"pos {position.id}: {leg.side} {leg.right} {leg.strike}"
+                            f" exp {leg.expiration} not in entry chain; held-leg"
+                            " fetch also missed it (may be expired); Greek"
+                            " contribution set to 0.0"
+                        )
+                    else:
+                        warnings.append(
+                            f"pos {position.id}: {leg.side} {leg.right} {leg.strike}"
+                            f" exp {leg.expiration} not in chain (may be outside entry"
+                            " filter window); Greek contribution set to 0.0"
+                        )
+                    continue
 
             delta, vega, theta = greeks
             net_dollar_delta += delta * side_sign * filled_qty * underlying_price * 100
