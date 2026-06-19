@@ -255,7 +255,9 @@ def test_filtered_chain_called_passes_for_open_when_in_calls() -> None:
 
 
 def test_filtered_chain_called_fails_for_open_when_absent() -> None:
-    assert _filtered_chain_called_for_open(_VALID_PROPOSAL, _WITH_UNIVERSE_CALL) is False
+    assert (
+        _filtered_chain_called_for_open(_VALID_PROPOSAL, _WITH_UNIVERSE_CALL) is False
+    )
 
 
 def test_filtered_chain_called_passes_for_no_action_without_chain() -> None:
