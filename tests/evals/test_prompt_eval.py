@@ -48,6 +48,8 @@ from options_agent.config import Config
 from options_agent.contracts.proposal import TradeProposal
 from options_agent.contracts.state import ContextSnapshot
 
+from .conftest import EVAL_RUNS_PER_SCENARIO
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Config — built once per session
 # ──────────────────────────────────────────────────────────────────────────────
@@ -204,6 +206,6 @@ def test_scenario(
     _run_scenario(
         scenario=scenario,
         config=config,
-        k=scenario.runs,
+        k=EVAL_RUNS_PER_SCENARIO,
         _api_key=anthropic_api_key,
     )

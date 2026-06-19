@@ -78,7 +78,6 @@ class EvalScenario:
     tool_impls: dict[str, ToolImpl]
     invariants: list[InvariantCheck]
     preferences: list[PreferenceCheck]
-    runs: int = 5  # K repetitions for this scenario; override per scenario as needed
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -253,7 +252,6 @@ SCENARIO_A = EvalScenario(
         "preference treats NO_ACTION as a pass for this reason."
     ),
     tool_impls=_BASE_TOOL_IMPLS,
-    runs=3,
     invariants=[
         *_BASE_INVARIANTS,
         InvariantCheck(
@@ -267,7 +265,7 @@ SCENARIO_A = EvalScenario(
             name="spy_credit_spread",
             description="SPY high IV → agent should choose a credit spread strategy.",
             check=_spy_credit_spread_or_no_action,
-            min_pass_rate=0.67,  # 2 of 3 runs (scenario A uses runs=3)
+            min_pass_rate=0.67,  # 3 of 5 — NO_ACTION is valid given open pos-001
         ),
         PreferenceCheck(
             name="chain_drilled_in",
@@ -522,7 +520,7 @@ SCENARIO_E = EvalScenario(
                 "ID, demonstrating the agent looked at history before proposing."
             ),
             check=_informed_by_nonempty,
-            min_pass_rate=0.4,  # 2 of 5 — aspirational; calibrate after baseline
+            min_pass_rate=0.8,  # 4 of 5 — baseline was 5/5
         ),
         PreferenceCheck(
             name="thesis_mentions_existing_position",
@@ -530,7 +528,7 @@ SCENARIO_E = EvalScenario(
                 "Thesis or iv_rationale should acknowledge the live SPY position."
             ),
             check=_thesis_mentions_existing,
-            min_pass_rate=0.4,
+            min_pass_rate=0.8,  # 4 of 5 — baseline was 5/5
         ),
     ],
 )

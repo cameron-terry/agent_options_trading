@@ -227,6 +227,38 @@ def reason(
         messages.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason != "tool_use":
+            # When max_tokens fires mid-tool-call the response may contain a
+            # partial tool_use block.  The API requires every tool_use to be
+            # followed by a matching tool_result; without one the next call
+            # returns 400.  Inject synthetic errors to keep the conversation
+            # valid before the commit phase runs.
+            if response.stop_reason == "max_tokens":
+                unmatched = [b for b in response.content if b.type == "tool_use"]
+                if unmatched:
+                    log.warning(
+                        "  exploration turn %d hit max_tokens with %d unmatched "
+                        "tool_use block(s) — injecting synthetic tool_result errors",
+                        _turn + 1,
+                        len(unmatched),
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": b.id,
+                                    "is_error": True,
+                                    "content": (
+                                        "Response truncated by max_tokens limit. "
+                                        "Proceed directly to submit_trade_proposal."
+                                    ),
+                                }
+                                for b in unmatched
+                            ],
+                        }
+                    )
+
             # Model stopped calling tools — exploration complete.
             log.info(
                 "  exploration complete after %d turn(s) — %d tool call(s) recorded",
