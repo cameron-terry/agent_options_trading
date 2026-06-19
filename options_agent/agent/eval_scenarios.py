@@ -204,11 +204,12 @@ _BASE_INVARIANTS: list[InvariantCheck] = [
         description="Every sell leg must be covered by a buy leg of the same right.",
         check=_no_naked_shorts,
     ),
-    InvariantCheck(
-        name="universe_snapshot_called",
-        description="Agent must call get_universe_snapshot before proposing.",
-        check=_universe_snapshot_called,
-    ),
+    # universe_snapshot_called is intentionally absent: the eval harness
+    # pre-populates assembled_context with universe data (matching production
+    # behaviour from the WP-6.2 context assembler), so the agent will not call
+    # get_universe_snapshot during the reasoning loop — just as it doesn't in
+    # production.  _universe_snapshot_called still exists and is tested in
+    # test_eval_harness.py; it is simply not a base invariant for this flow.
 ]
 
 
@@ -501,14 +502,12 @@ SCENARIO_E = EvalScenario(
     ),
     tool_impls=make_portfolio_aware_tool_impls(),
     invariants=[
+        # portfolio_state_consulted is intentionally absent: the eval harness
+        # pre-populates assembled_context with portfolio data, so the agent
+        # will not call get_portfolio_state during the loop.  Whether the agent
+        # actually uses the portfolio context is tested via the preferences below
+        # (informed_by_populated, thesis_mentions_existing_position).
         *_BASE_INVARIANTS,
-        InvariantCheck(
-            name="portfolio_state_consulted",
-            description=(
-                "Agent must call get_portfolio_state to see the existing position."
-            ),
-            check=_portfolio_state_was_consulted,
-        ),
     ],
     preferences=[
         PreferenceCheck(
