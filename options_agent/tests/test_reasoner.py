@@ -216,10 +216,25 @@ def test_submit_tool_action_enum_includes_no_action() -> None:
     )
 
 
-def test_submit_tool_not_in_agent_tools() -> None:
-    assert TOOL_SUBMIT_TRADE_PROPOSAL not in AGENT_TOOL_NAMES, (
-        "submit_trade_proposal must not appear in AGENT_TOOLS. "
-        "It is the commit mechanism, not a read-only data tool."
+def test_agent_tool_names_is_exactly_read_only_set() -> None:
+    """Exhaustive check: AGENT_TOOL_NAMES must be exactly the allowed read-only set.
+
+    Catches future regressions where an execution-type tool (cancel_order, etc.)
+    is accidentally added to AGENT_TOOLS. A partial exclusion check is not
+    sufficient — the full set must match exactly.
+    """
+    expected = {
+        "get_events",
+        "get_filtered_chain",
+        "get_journal_by_symbol",
+        "get_portfolio_state",
+        "get_position_history",
+        "get_universe_snapshot",
+    }
+    assert set(AGENT_TOOL_NAMES) == expected, (
+        f"AGENT_TOOL_NAMES changed. "
+        f"Extra: {set(AGENT_TOOL_NAMES) - expected}. "
+        f"Missing: {expected - set(AGENT_TOOL_NAMES)}."
     )
 
 
@@ -631,6 +646,26 @@ def test_reason_missing_impl_raises_reasoner_error() -> None:
     ]
     with pytest.raises(ReasonerError, match="No implementation"):
         _patched_reason(responses, tool_impls={})
+
+
+def test_reason_tool_impl_exception_propagates() -> None:
+    """Exceptions raised by tool impls propagate uncaught through reason().
+
+    Intentional design: run_entry_cycle owns the error handling policy.
+    This test makes that behavior explicit rather than accidental.
+    """
+    responses = [
+        _mock_response(
+            "tool_use",
+            [_tool_use_block("get_universe_snapshot", {})],
+        ),
+    ]
+    boom = RuntimeError("data feed down")
+    with pytest.raises(RuntimeError, match="data feed down"):
+        _patched_reason(
+            responses,
+            tool_impls={"get_universe_snapshot": MagicMock(side_effect=boom)},
+        )
 
 
 def test_reason_no_tool_use_block_in_commit_raises() -> None:

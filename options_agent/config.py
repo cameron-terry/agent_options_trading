@@ -194,6 +194,10 @@ class Config(BaseModel):
     max_schema_retries: int = Field(default=2, ge=0, le=10)
     # max_reasoning_turns: cap on exploration-phase turns before forcing commit.
     max_reasoning_turns: int = Field(default=10, ge=1, le=50)
+    # max_tokens: output token cap for both exploration and commit API calls.
+    # 4096 covers most proposals; raise if the agent truncates during verbose
+    # multi-tool exploration runs or produces long rationale fields.
+    max_tokens: int = Field(default=4096, ge=1, le=65536)
 
     # Risk limits (nested)
     limits: Limits = Field(default_factory=Limits)

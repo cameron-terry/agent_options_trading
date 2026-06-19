@@ -112,6 +112,7 @@ def reason(
     model_id: str = "claude-sonnet-4-6",
     max_schema_retries: int = 2,
     max_turns: int = 10,
+    max_tokens: int = 4096,
 ) -> TradeProposal:
     """Run the agent reasoning loop and return a validated TradeProposal.
 
@@ -132,6 +133,9 @@ def reason(
                             Total attempts = max_schema_retries + 1.
         max_turns:          Exploration phase turn cap. When hit, proceeds to
                             commit with whatever context the agent has gathered.
+        max_tokens:         Output token cap for both exploration and commit
+                            API calls. Raise if the agent truncates during
+                            verbose multi-tool runs. Defaults match Config.
 
     Returns:
         A pyright-clean TradeProposal on success (including action=NO_ACTION).
@@ -140,6 +144,8 @@ def reason(
         ReasonerError: Schema validation failed after all retries, or the model
                        called an unknown tool, or a required impl was missing.
                        API errors from the Anthropic SDK are NOT caught here.
+                       Exceptions raised by tool_impl callables also propagate
+                       uncaught — run_entry_cycle owns the error handling policy.
     """
     client = anthropic.Anthropic()
     system_prompt = build_system_prompt(playbook=playbook, limits=limits)
@@ -163,7 +169,7 @@ def reason(
     for _turn in range(max_turns):
         response = client.messages.create(
             model=model_id,
-            max_tokens=4096,
+            max_tokens=max_tokens,
             system=system_prompt,
             tools=AGENT_TOOLS,  # type: ignore[arg-type]
             tool_choice={"type": "auto"},
@@ -250,7 +256,7 @@ def reason(
     for attempt in range(max_schema_retries + 1):
         commit_response = client.messages.create(
             model=model_id,
-            max_tokens=4096,
+            max_tokens=max_tokens,
             system=system_prompt,
             tools=[SUBMIT_TRADE_PROPOSAL],  # type: ignore[arg-type]
             tool_choice={"type": "tool", "name": TOOL_SUBMIT_TRADE_PROPOSAL},
