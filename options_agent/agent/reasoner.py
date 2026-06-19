@@ -125,7 +125,7 @@ def reason(
     max_schema_retries: int = 2,
     max_turns: int = 10,
     max_tokens: int = 2048,
-    max_tokens_explore: int = 512,
+    max_tokens_explore: int = 1024,
 ) -> TradeProposal:
     """Run the agent reasoning loop and return a validated TradeProposal.
 
@@ -153,10 +153,11 @@ def reason(
                              Raise only if commit responses are being truncated.
         max_tokens_explore:  Output token cap for exploration turns. Each turn
                              only needs tool-call JSON (~30-50 tokens per call)
-                             plus brief bridging text — 512 tokens is ample.
-                             Capping here prevents the model from generating
-                             multi-hundred-token reasoning text on the final
-                             exploration turn (discarded once commit runs).
+                             plus any bridging text — 1024 tokens provides safe
+                             headroom. 512 proved too small: the model can emit
+                             a text block before the tool_use JSON, causing the
+                             tool call to be truncated mid-stream. 1024 keeps
+                             the budget tight while eliminating that failure.
 
     Returns:
         A pyright-clean TradeProposal on success (including action=NO_ACTION).

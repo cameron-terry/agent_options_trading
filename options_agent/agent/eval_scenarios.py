@@ -163,8 +163,14 @@ def _universe_snapshot_called(_proposal: TradeProposal, calls: list[str]) -> boo
     return TOOL_GET_UNIVERSE_SNAPSHOT in calls
 
 
-def _filtered_chain_called(_proposal: TradeProposal, calls: list[str]) -> bool:
-    """Confirms drill-in: agent fetched a chain before committing to a structure."""
+def _filtered_chain_called_for_open(proposal: TradeProposal, calls: list[str]) -> bool:
+    """Hard constraint: if action=OPEN, agent must have called get_filtered_chain.
+
+    NO_ACTION/CLOSE/ROLL passes unconditionally — chain data is only mandatory
+    when the agent is specifying strikes and expiries for a new position.
+    """
+    if proposal.action != "OPEN":
+        return True
     return TOOL_GET_FILTERED_CHAIN in calls
 
 
@@ -204,6 +210,14 @@ _BASE_INVARIANTS: list[InvariantCheck] = [
         description="Every sell leg must be covered by a buy leg of the same right.",
         check=_no_naked_shorts,
     ),
+    InvariantCheck(
+        name="chain_drilled_in",
+        description=(
+            "If action=OPEN, agent must have called get_filtered_chain before "
+            "committing. Mirrored by Hard constraint 7 in the system prompt."
+        ),
+        check=_filtered_chain_called_for_open,
+    ),
     # universe_snapshot_called is intentionally absent: the eval harness
     # pre-populates assembled_context with universe data (matching production
     # behaviour from the WP-6.2 context assembler), so the agent will not call
@@ -234,13 +248,6 @@ def _spy_credit_spread_or_no_action(proposal: TradeProposal, _calls: list[str]) 
     return True  # AAPL/NVDA are expected to be skipped
 
 
-def _chain_drilled_in(proposal: TradeProposal, calls: list[str]) -> bool:
-    """Preference: agent must have drilled into at least one chain before proposing."""
-    return TOOL_GET_FILTERED_CHAIN in calls
-
-
-_CHAIN_DESC = "Agent must fetch the chain before committing to a specific structure."
-
 SCENARIO_A = EvalScenario(
     id="A_high_iv_neutral",
     description=(
@@ -266,12 +273,6 @@ SCENARIO_A = EvalScenario(
             description="SPY high IV → agent should choose a credit spread strategy.",
             check=_spy_credit_spread_or_no_action,
             min_pass_rate=0.67,  # 3 of 5 — NO_ACTION is valid given open pos-001
-        ),
-        PreferenceCheck(
-            name="chain_drilled_in",
-            description=_CHAIN_DESC,
-            check=_chain_drilled_in,
-            min_pass_rate=1.0,  # should always drill in
         ),
     ],
 )
@@ -326,12 +327,6 @@ SCENARIO_B = EvalScenario(
             ),
             check=_debit_spread_preferred,
             min_pass_rate=0.6,  # 3 of 5; bear_put_spread also valid
-        ),
-        PreferenceCheck(
-            name="chain_drilled_in",
-            description=_CHAIN_DESC,
-            check=_chain_drilled_in,
-            min_pass_rate=1.0,
         ),
     ],
 )

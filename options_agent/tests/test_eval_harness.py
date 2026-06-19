@@ -28,7 +28,7 @@ from options_agent.agent.eval_scenarios import (
     _BASE_INVARIANTS,
     EVAL_SCENARIOS,
     _catalyst_check_substantive,
-    _filtered_chain_called,
+    _filtered_chain_called_for_open,
     _iv_rationale_substantive,
     _low_iv_strategy_or_no_action,
     _no_action_required,
@@ -250,12 +250,17 @@ def test_universe_snapshot_called_fails_when_absent() -> None:
     assert _universe_snapshot_called(_VALID_PROPOSAL, _NO_CALLS) is False
 
 
-def test_filtered_chain_called_passes_when_in_calls() -> None:
-    assert _filtered_chain_called(_VALID_PROPOSAL, _WITH_BOTH_CALLS) is True
+def test_filtered_chain_called_passes_for_open_when_in_calls() -> None:
+    assert _filtered_chain_called_for_open(_VALID_PROPOSAL, _WITH_BOTH_CALLS) is True
 
 
-def test_filtered_chain_called_fails_when_absent() -> None:
-    assert _filtered_chain_called(_VALID_PROPOSAL, _WITH_UNIVERSE_CALL) is False
+def test_filtered_chain_called_fails_for_open_when_absent() -> None:
+    assert _filtered_chain_called_for_open(_VALID_PROPOSAL, _WITH_UNIVERSE_CALL) is False
+
+
+def test_filtered_chain_called_passes_for_no_action_without_chain() -> None:
+    # NO_ACTION: chain fetch not required, so the invariant must not fire.
+    assert _filtered_chain_called_for_open(_NO_ACTION_PROPOSAL, _NO_CALLS) is True
 
 
 # ──────────────────────────────────────────────────────────────────────────────
