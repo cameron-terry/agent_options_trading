@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -202,10 +201,9 @@ def test_scenario(
     anthropic_api_key: str,
 ) -> None:
     """Run one eval scenario K times and assert invariants + preferences."""
-    k = 1 if os.environ.get("CI") else scenario.runs
     _run_scenario(
         scenario=scenario,
         config=config,
-        k=k,
+        k=scenario.runs,
         _api_key=anthropic_api_key,
     )
