@@ -12,8 +12,8 @@ Requires ANTHROPIC_API_KEY in the environment.
 
 Cost note:
     Each scenario runs K=5 times through a multi-turn tool loop (Sonnet 4.6).
-    Budget ~$0.10–0.50 per eval run across all 5 scenarios depending on
-    response length. Run deliberately, not on every push.
+    Budget ~$1.50–2.50 per full suite (all 5 scenarios) at list pricing.
+    Run deliberately, not on every push.
 
 Trigger guidance (from WP-6.5 design decisions):
     - Any PR touching agent/prompts.py, the PlaybookConfig, or reasoner.py
