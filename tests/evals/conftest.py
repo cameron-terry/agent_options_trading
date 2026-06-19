@@ -18,9 +18,9 @@ Cost note:
 Trigger guidance (from WP-6.5 design decisions):
     - Any PR touching agent/prompts.py, the PlaybookConfig, or reasoner.py
       should include a tier-2 eval run as part of review.
-    - The first successful run after WP-6.4 (PR #50) merges establishes the
-      baseline pass rates. Capture those rates and use them to calibrate
-      min_pass_rate thresholds in eval_scenarios.py.
+    - The first successful run establishes the baseline pass rates. Capture
+      those rates and use them to calibrate min_pass_rate thresholds in
+      eval_scenarios.py.
 """
 
 import os

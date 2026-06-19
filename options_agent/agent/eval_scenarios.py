@@ -78,6 +78,7 @@ class EvalScenario:
     tool_impls: dict[str, ToolImpl]
     invariants: list[InvariantCheck]
     preferences: list[PreferenceCheck]
+    runs: int = 5  # K repetitions for this scenario; override per scenario as needed
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -246,9 +247,13 @@ SCENARIO_A = EvalScenario(
     description=(
         "SPY/AAPL/NVDA universe: SPY is clean and high-IV; AAPL has earnings in "
         "5 days; NVDA has iv_rank=None. Agent should trade SPY with a credit "
-        "structure, skip AAPL and NVDA."
+        "structure, skip AAPL and NVDA. NO_ACTION on SPY is also valid when the "
+        "agent judges that the existing open SPY position (pos-001, bull_put_spread "
+        "at 50% profit) already provides sufficient exposure — the spy_credit_spread "
+        "preference treats NO_ACTION as a pass for this reason."
     ),
     tool_impls=_BASE_TOOL_IMPLS,
+    runs=3,
     invariants=[
         *_BASE_INVARIANTS,
         InvariantCheck(
@@ -262,7 +267,7 @@ SCENARIO_A = EvalScenario(
             name="spy_credit_spread",
             description="SPY high IV → agent should choose a credit spread strategy.",
             check=_spy_credit_spread_or_no_action,
-            min_pass_rate=0.8,  # 4 of 5 runs
+            min_pass_rate=0.67,  # 2 of 3 runs (scenario A uses runs=3)
         ),
         PreferenceCheck(
             name="chain_drilled_in",

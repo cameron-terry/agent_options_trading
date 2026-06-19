@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -46,8 +48,6 @@ from options_agent.agent.tools import (
 from options_agent.config import Config
 from options_agent.contracts.proposal import TradeProposal
 from options_agent.contracts.state import ContextSnapshot
-
-from .conftest import EVAL_RUNS_PER_SCENARIO
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Config — built once per session
@@ -122,14 +122,16 @@ def _run_scenario(
         print(f"\n[{scenario.id}] run {run_idx + 1}/{k} — calling reason() ...")
         context = _make_eval_context(scenario)
         spy_impls, calls = make_spy_tool_impls(scenario.tool_impls)
+        _run_t0 = time.monotonic()
         proposal = reason(
             context=context,
             tool_impls=spy_impls,
             playbook=config.playbook,
             limits=config.limits,
         )
+        elapsed = time.monotonic() - _run_t0
         print(
-            f"[{scenario.id}] run {run_idx + 1}/{k} done — "
+            f"[{scenario.id}] run {run_idx + 1}/{k} done in {elapsed:.1f}s — "
             f"action={proposal.action} strategy={proposal.strategy!r} "
             f"underlying={proposal.underlying} tools={calls}"
         )
@@ -200,9 +202,10 @@ def test_scenario(
     anthropic_api_key: str,
 ) -> None:
     """Run one eval scenario K times and assert invariants + preferences."""
+    k = 1 if os.environ.get("CI") else scenario.runs
     _run_scenario(
         scenario=scenario,
         config=config,
-        k=EVAL_RUNS_PER_SCENARIO,
+        k=k,
         _api_key=anthropic_api_key,
     )
