@@ -182,6 +182,23 @@ class Config(BaseModel):
     # Guard: may only be changed from default on alpaca_paper=True runs.
     slice_limit_price: float = Field(default=-1.50)
 
+    # Agent / reasoner settings
+    # model_id is stamped on ContextSnapshot so before/after model comparisons
+    # in WP-7 can filter without unpacking nested snapshots.
+    # Default: claude-sonnet-4-6 — cost-efficient baseline for the 90-day paper
+    # run; upgrade to claude-opus-4-8 only after the journal names a specific
+    # reasoning failure that warrants it.
+    model_id: str = Field(default="claude-sonnet-4-6")
+    # max_schema_retries: additional commit attempts after the first schema-invalid
+    # response. Total attempts = max_schema_retries + 1.
+    max_schema_retries: int = Field(default=2, ge=0, le=10)
+    # max_reasoning_turns: cap on exploration-phase turns before forcing commit.
+    max_reasoning_turns: int = Field(default=10, ge=1, le=50)
+    # max_tokens: output token cap for both exploration and commit API calls.
+    # 4096 covers most proposals; raise if the agent truncates during verbose
+    # multi-tool exploration runs or produces long rationale fields.
+    max_tokens: int = Field(default=4096, ge=1, le=65536)
+
     # Risk limits (nested)
     limits: Limits = Field(default_factory=Limits)
 
