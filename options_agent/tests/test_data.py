@@ -12,6 +12,7 @@ from options_agent.contracts import (
     Leg,
     LegStatus,
     MacroEvent,
+    MarketRegime,
     OptionContract,
     PortfolioState,
     Position,
@@ -119,7 +120,7 @@ def _make_symbol_snapshot(**overrides: object) -> SymbolSnapshot:
         "iv_rank": 65.0,
         "iv_percentile": 72.0,
         "historical_vol": 0.18,
-        "regime": "neutral",
+        "regime": MarketRegime.NORMAL,
         "days_to_earnings": None,
     }
     defaults.update(overrides)
@@ -131,7 +132,7 @@ def _make_universe_snapshot(**overrides: object) -> UniverseSnapshot:
     defaults: dict = {
         "symbol_snapshots": {"SPY": snap},
         "vix_level": 18.4,
-        "market_regime": "neutral",
+        "market_regime": MarketRegime.NORMAL,
         "macro_events": [],
         "as_of": _NOW,
     }
@@ -450,7 +451,7 @@ def test_universe_snapshot_construction() -> None:
     u = _make_universe_snapshot()
     assert "SPY" in u.symbol_snapshots
     assert u.vix_level == 18.4
-    assert u.market_regime == "neutral"
+    assert u.market_regime == MarketRegime.NORMAL
     assert u.macro_events == []
 
 

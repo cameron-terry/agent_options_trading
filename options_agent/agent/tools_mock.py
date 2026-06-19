@@ -51,6 +51,7 @@ from options_agent.contracts.data import (
     EventInfo,
     FilteredChain,
     MacroEvent,
+    MarketRegime,
     OptionContract,
     PortfolioState,
     SymbolSnapshot,
@@ -160,7 +161,7 @@ _MOCK_UNIVERSE_SNAPSHOT = UniverseSnapshot(
             iv_rank=62.0,
             iv_percentile=65.0,
             historical_vol=0.14,
-            regime="neutral",
+            regime=MarketRegime.NORMAL,
             days_to_earnings=None,
         ),
         # Earnings approaching — 5 days out, within the typical blackout
@@ -173,7 +174,7 @@ _MOCK_UNIVERSE_SNAPSHOT = UniverseSnapshot(
             iv_rank=71.0,
             iv_percentile=74.0,
             historical_vol=0.22,
-            regime="bullish",
+            regime=MarketRegime.NORMAL,
             days_to_earnings=5,
         ),
         # Warm-up period: iv_rank and iv_percentile are None — insufficient
@@ -191,7 +192,7 @@ _MOCK_UNIVERSE_SNAPSHOT = UniverseSnapshot(
         ),
     },
     vix_level=16.8,
-    market_regime="neutral",
+    market_regime=MarketRegime.NORMAL,
     macro_events=[
         MacroEvent(
             name="FOMC Rate Decision",
@@ -650,12 +651,12 @@ _LOW_IV_BULLISH_UNIVERSE = UniverseSnapshot(
             iv_rank=12.0,  # 12th percentile → low band (< 25th threshold)
             iv_percentile=10.0,
             historical_vol=0.11,
-            regime="bullish",
+            regime=MarketRegime.LOW_VOL,
             days_to_earnings=None,
         ),
     },
     vix_level=12.5,  # low-vol regime (< 15.0 threshold)
-    market_regime="low-vol",
+    market_regime=MarketRegime.LOW_VOL,
     macro_events=[],
     as_of=_AS_OF,
 )
