@@ -59,7 +59,7 @@ log = logging.getLogger(__name__)
 
 # Sonnet 4.6 list pricing — used for the per-call cost estimate in log output.
 # Update if model or pricing tier changes.
-_INPUT_COST_PER_TOKEN: float = 3e-6   # $3.00 / 1M input tokens
+_INPUT_COST_PER_TOKEN: float = 3e-6  # $3.00 / 1M input tokens
 _OUTPUT_COST_PER_TOKEN: float = 15e-6  # $15.00 / 1M output tokens
 
 # Type alias for a tool implementation callable.
