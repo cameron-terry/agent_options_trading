@@ -501,3 +501,345 @@ MOCK_TOOL_IMPLS: dict[str, ToolImpl] = {
     TOOL_GET_JOURNAL_BY_SYMBOL: _get_journal_by_symbol,
     TOOL_GET_POSITION_HISTORY: _get_position_history,
 }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WP-6.5 EVAL SCENARIO EXTENSIONS
+#
+# Scenario-specific tool implementation maps for the prompt eval harness.
+# These share the same data vocabulary as MOCK_TOOL_IMPLS (same types,
+# reference timestamps, filter params) but represent distinct market states.
+# eval_scenarios.py composes these into EvalScenario objects.
+#
+# Naming: make_<scenario>_tool_impls() → dict[str, ToolImpl]
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Shared flat portfolio (no open positions) used by scenarios B, C, D
+# ──────────────────────────────────────────────────────────────────────────────
+
+_FLAT_PORTFOLIO_STATE = PortfolioState(
+    positions=[],
+    account_equity=50000.0,
+    buying_power=50000.0,
+    options_buying_power=47500.0,
+    unrealized_pnl=0.0,
+    realized_pnl_today=0.0,
+    approval_level=3,
+    net_dollar_delta=0.0,
+    net_dollar_gamma=0.0,
+    net_dollar_theta=0.0,
+    net_dollar_vega=0.0,
+)
+
+
+def _get_flat_portfolio(_tool_input: dict[str, Any]) -> PortfolioState:
+    return _FLAT_PORTFOLIO_STATE
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Scenario B — QQQ low-IV bullish
+# Universe: QQQ only, iv_rank=12 (12th percentile → low band < 25th threshold)
+# Regime: bullish; VIX=12.5 (low-vol < 15 threshold); no events
+# Portfolio: flat
+# Expected: strategy in low_iv_strategies (bull_call_spread or bear_put_spread)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_QQQ_EXPIRY = date(2026, 7, 18)  # same ~34 DTE window as the base mock
+
+_QQQ_CHAIN_CONTRACTS = [
+    # Call side — primary for bull_call_spread in a bullish + low-IV regime
+    OptionContract(
+        symbol="QQQ260718C00482500",
+        strike=482.50,
+        expiration=_QQQ_EXPIRY,
+        right="call",
+        bid=4.20,
+        ask=4.40,
+        mid=4.30,
+        volume=1800,
+        open_interest=9200,
+        delta=0.38,
+        theta=-0.18,
+        vega=0.52,
+        iv=0.108,
+        spread_width=0.20,
+        dte=34,
+        greek_source="alpaca",
+    ),
+    OptionContract(
+        symbol="QQQ260718C00487500",
+        strike=487.50,
+        expiration=_QQQ_EXPIRY,
+        right="call",
+        bid=2.10,
+        ask=2.25,
+        mid=2.175,
+        volume=2400,
+        open_interest=11000,
+        delta=0.28,
+        theta=-0.14,
+        vega=0.43,
+        iv=0.102,
+        spread_width=0.15,
+        dte=34,
+        greek_source="alpaca",
+    ),
+    OptionContract(
+        symbol="QQQ260718C00492500",
+        strike=492.50,
+        expiration=_QQQ_EXPIRY,
+        right="call",
+        bid=0.85,
+        ask=0.95,
+        mid=0.90,
+        volume=3100,
+        open_interest=13400,
+        delta=0.18,
+        theta=-0.09,
+        vega=0.31,
+        iv=0.096,
+        spread_width=0.10,
+        dte=34,
+        greek_source="alpaca",
+    ),
+    # Put side — available for bear_put_spread (also in low_iv_strategies)
+    OptionContract(
+        symbol="QQQ260718P00475000",
+        strike=475.00,
+        expiration=_QQQ_EXPIRY,
+        right="put",
+        bid=2.05,
+        ask=2.20,
+        mid=2.125,
+        volume=1600,
+        open_interest=8100,
+        delta=-0.25,
+        theta=-0.12,
+        vega=0.38,
+        iv=0.104,
+        spread_width=0.15,
+        dte=34,
+        greek_source="alpaca",
+    ),
+    OptionContract(
+        symbol="QQQ260718P00470000",
+        strike=470.00,
+        expiration=_QQQ_EXPIRY,
+        right="put",
+        bid=0.80,
+        ask=0.90,
+        mid=0.85,
+        volume=2200,
+        open_interest=10500,
+        delta=-0.15,
+        theta=-0.08,
+        vega=0.25,
+        iv=0.097,
+        spread_width=0.10,
+        dte=34,
+        greek_source="alpaca",
+    ),
+]
+
+_LOW_IV_BULLISH_UNIVERSE = UniverseSnapshot(
+    symbol_snapshots={
+        "QQQ": SymbolSnapshot(
+            symbol="QQQ",
+            price=480.50,
+            iv_rank=12.0,  # 12th percentile → low band (< 25th threshold)
+            iv_percentile=10.0,
+            historical_vol=0.11,
+            regime="bullish",
+            days_to_earnings=None,
+        ),
+    },
+    vix_level=12.5,  # low-vol regime (< 15.0 threshold)
+    market_regime="low-vol",
+    macro_events=[],
+    as_of=_AS_OF,
+)
+
+
+def _get_low_iv_universe(_tool_input: dict[str, Any]) -> UniverseSnapshot:
+    return _LOW_IV_BULLISH_UNIVERSE
+
+
+def _get_qqq_filtered_chain(tool_input: dict[str, Any]) -> FilteredChain:
+    strategy_hint: str | None = tool_input.get("strategy_hint")
+    if strategy_hint in _CALL_ONLY_HINTS:
+        contracts = [c for c in _QQQ_CHAIN_CONTRACTS if c.right == "call"]
+    elif strategy_hint in _PUT_ONLY_HINTS:
+        contracts = [c for c in _QQQ_CHAIN_CONTRACTS if c.right == "put"]
+    else:
+        contracts = list(_QQQ_CHAIN_CONTRACTS)
+    return FilteredChain(
+        underlying=tool_input.get("symbol", "QQQ"),
+        underlying_price=480.50,
+        as_of=_AS_OF,
+        filter_params=_SPY_FILTER_PARAMS,
+        contracts=contracts,
+        strategy_hint=strategy_hint,
+        oi_available=True,
+        excluded_for_missing_greeks=0,
+        truncated=False,
+        total_before_cap=len(contracts),
+    )
+
+
+def _get_qqq_events(tool_input: dict[str, Any]) -> dict[str, EventInfo]:
+    return {
+        sym: EventInfo(symbol=sym, earnings=None, ex_dividend=None)
+        for sym in tool_input["symbols"]
+    }
+
+
+def _get_empty_journal(_tool_input: dict[str, Any]) -> list[JournalRecord]:
+    return []
+
+
+def _get_no_position_history(_tool_input: dict[str, Any]) -> PositionHistory | None:
+    return None
+
+
+def make_low_iv_bullish_tool_impls() -> dict[str, ToolImpl]:
+    """Scenario B: QQQ-only low-IV bullish universe, flat portfolio."""
+    return {
+        TOOL_GET_PORTFOLIO_STATE: _get_flat_portfolio,
+        TOOL_GET_UNIVERSE_SNAPSHOT: _get_low_iv_universe,
+        TOOL_GET_FILTERED_CHAIN: _get_qqq_filtered_chain,
+        TOOL_GET_EVENTS: _get_qqq_events,
+        TOOL_GET_JOURNAL_BY_SYMBOL: _get_empty_journal,
+        TOOL_GET_POSITION_HISTORY: _get_no_position_history,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Scenario C — AAPL earnings blackout
+# Universe: AAPL only, iv_rank=71 (high band), confirmed earnings in 5 days
+# blackout_days default=5 → within blackout; agent must decline
+# Portfolio: flat
+# Expected: action=NO_ACTION (proactive decline before validator rejects)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_AAPL_ONLY_UNIVERSE = UniverseSnapshot(
+    symbol_snapshots={
+        "AAPL": _MOCK_UNIVERSE_SNAPSHOT.symbol_snapshots["AAPL"],
+    },
+    vix_level=_MOCK_UNIVERSE_SNAPSHOT.vix_level,
+    market_regime=_MOCK_UNIVERSE_SNAPSHOT.market_regime,
+    macro_events=[],
+    as_of=_AS_OF,
+)
+
+
+def _get_aapl_only_universe(_tool_input: dict[str, Any]) -> UniverseSnapshot:
+    return _AAPL_ONLY_UNIVERSE
+
+
+def _get_aapl_events(tool_input: dict[str, Any]) -> dict[str, EventInfo]:
+    return {
+        sym: _MOCK_EVENTS.get(
+            sym, EventInfo(symbol=sym, earnings=None, ex_dividend=None)
+        )
+        for sym in tool_input["symbols"]
+    }
+
+
+def make_earnings_blackout_tool_impls() -> dict[str, ToolImpl]:
+    """Scenario C: AAPL-only universe with earnings 5 days out, flat portfolio."""
+    return {
+        TOOL_GET_PORTFOLIO_STATE: _get_flat_portfolio,
+        TOOL_GET_UNIVERSE_SNAPSHOT: _get_aapl_only_universe,
+        TOOL_GET_FILTERED_CHAIN: _get_filtered_chain,  # reuse SPY-shaped chain
+        TOOL_GET_EVENTS: _get_aapl_events,
+        TOOL_GET_JOURNAL_BY_SYMBOL: _get_empty_journal,
+        TOOL_GET_POSITION_HISTORY: _get_no_position_history,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Scenario D — NVDA no IV history (warm-up period)
+# Universe: NVDA only, iv_rank=None, iv_percentile=None
+# Portfolio: flat
+# Expected: action=NO_ACTION — system prompt mandates NO_ACTION when iv_rank is None
+# ──────────────────────────────────────────────────────────────────────────────
+
+_NVDA_ONLY_UNIVERSE = UniverseSnapshot(
+    symbol_snapshots={
+        "NVDA": _MOCK_UNIVERSE_SNAPSHOT.symbol_snapshots["NVDA"],
+    },
+    vix_level=_MOCK_UNIVERSE_SNAPSHOT.vix_level,
+    market_regime=_MOCK_UNIVERSE_SNAPSHOT.market_regime,
+    macro_events=[],
+    as_of=_AS_OF,
+)
+
+
+def _get_nvda_only_universe(_tool_input: dict[str, Any]) -> UniverseSnapshot:
+    return _NVDA_ONLY_UNIVERSE
+
+
+def _get_nvda_events(tool_input: dict[str, Any]) -> dict[str, EventInfo]:
+    return {
+        sym: EventInfo(symbol=sym, earnings=None, ex_dividend=None)
+        for sym in tool_input["symbols"]
+    }
+
+
+def make_no_iv_history_tool_impls() -> dict[str, ToolImpl]:
+    """Scenario D: NVDA-only universe with iv_rank=None, flat portfolio."""
+    return {
+        TOOL_GET_PORTFOLIO_STATE: _get_flat_portfolio,
+        TOOL_GET_UNIVERSE_SNAPSHOT: _get_nvda_only_universe,
+        TOOL_GET_FILTERED_CHAIN: _get_filtered_chain,
+        TOOL_GET_EVENTS: _get_nvda_events,
+        TOOL_GET_JOURNAL_BY_SYMBOL: _get_empty_journal,
+        TOOL_GET_POSITION_HISTORY: _get_no_position_history,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Scenario E — portfolio-aware (existing SPY position at 50% profit target)
+# Universe: SPY only (high IV, neutral), portfolio has live SPY position
+# Portfolio: existing SPY bull_put_spread at 50% profit (entry_net_amount=-2.70,
+#   current_mark=-1.35) — the monitor's profit-target rule would normally fire.
+#   The agent should account for this in its reasoning, ideally consulting
+#   get_journal_by_symbol and populating informed_by.
+# Expected: get_portfolio_state called; informed_by non-empty (preference)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_SPY_ONLY_UNIVERSE = UniverseSnapshot(
+    symbol_snapshots={
+        "SPY": _MOCK_UNIVERSE_SNAPSHOT.symbol_snapshots["SPY"],
+    },
+    vix_level=_MOCK_UNIVERSE_SNAPSHOT.vix_level,
+    market_regime=_MOCK_UNIVERSE_SNAPSHOT.market_regime,
+    macro_events=_MOCK_UNIVERSE_SNAPSHOT.macro_events,
+    as_of=_AS_OF,
+)
+
+
+def _get_spy_only_universe(_tool_input: dict[str, Any]) -> UniverseSnapshot:
+    return _SPY_ONLY_UNIVERSE
+
+
+def _get_spy_events(tool_input: dict[str, Any]) -> dict[str, EventInfo]:
+    return {
+        sym: _MOCK_EVENTS.get(
+            sym, EventInfo(symbol=sym, earnings=None, ex_dividend=None)
+        )
+        for sym in tool_input["symbols"]
+    }
+
+
+def make_portfolio_aware_tool_impls() -> dict[str, ToolImpl]:
+    """Scenario E: SPY-only universe with an existing open position."""
+    return {
+        TOOL_GET_PORTFOLIO_STATE: _get_portfolio_state,  # open position at 50% profit
+        TOOL_GET_UNIVERSE_SNAPSHOT: _get_spy_only_universe,
+        TOOL_GET_FILTERED_CHAIN: _get_filtered_chain,
+        TOOL_GET_EVENTS: _get_spy_events,
+        TOOL_GET_JOURNAL_BY_SYMBOL: _get_journal_by_symbol,  # has SPY opening record
+        TOOL_GET_POSITION_HISTORY: _get_position_history,  # has pos-001 history
+    }

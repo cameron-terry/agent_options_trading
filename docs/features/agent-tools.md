@@ -131,6 +131,33 @@ This places the position exactly at the 50% profit target, which is the default 
 
 `get_position_history("pos-001")` returns the `PositionHistory` for the open SPY position with `outcome_records=[]` (no exit events yet). Unknown position IDs return `None`.
 
+## Prompt eval harness
+
+`options_agent/agent/eval_scenarios.py` packages the mock tool impls into `EvalScenario` objects — each scenario is a named context the agent reasons against, with **invariants** (must pass 100% of runs) and **preferences** (rate-based thresholds calibrated to baseline). Five scenarios ship with WP-6.5:
+
+| ID | Scenario |
+|---|---|
+| `A_high_iv_neutral` | SPY/AAPL/NVDA, SPY high-IV; AAPL in earnings blackout; NVDA iv_rank=None |
+| `B_low_iv_bullish` | QQQ-only, low-IV bullish regime — debit structures expected |
+| `C_earnings_blackout` | AAPL-only, confirmed earnings in 5 days — NO_ACTION expected |
+| `D_no_iv_history` | NVDA-only, iv_rank=None — NO_ACTION mandatory |
+| `E_portfolio_aware` | SPY-only, existing position at 50% profit — portfolio awareness tested |
+
+Run all five scenarios (requires `ANTHROPIC_API_KEY`; ~$1.50–2.50 per full suite at Sonnet 4.6 list pricing):
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+uv run pytest tests/evals/ -m eval -v -s --log-cli-level=INFO
+```
+
+Single scenario:
+
+```bash
+uv run pytest tests/evals/ -m eval -k A_high_iv_neutral -s --log-cli-level=INFO
+```
+
+`-s --log-cli-level=INFO` shows per-run progress, tool calls, token counts, and preference pass-rate summaries inline. Run deliberately — not on every push.
+
 ## Cross-WP alignment notes
 
 **WP-2 (`state/journal.py`):** `JOURNAL_MAX_RECORDS = 20` is defined in `agent/tools.py` and imported by `tools_mock.py`. WP-2 must import and enforce this same constant in `query_journal` — it must not hard-code 20 or rely on prose documentation.

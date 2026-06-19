@@ -40,6 +40,7 @@ Design (see Trello WP-6.4 for full rationale):
 
 import json
 import logging
+import time
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -55,6 +56,11 @@ from options_agent.contracts.state import ContextSnapshot, ToolCallRecord
 from options_agent.risk.limits import Limits
 
 log = logging.getLogger(__name__)
+
+# Sonnet 4.6 list pricing — used for the per-call cost estimate in log output.
+# Update if model or pricing tier changes.
+_INPUT_COST_PER_TOKEN: float = 3e-6  # $3.00 / 1M input tokens
+_OUTPUT_COST_PER_TOKEN: float = 15e-6  # $15.00 / 1M output tokens
 
 # Type alias for a tool implementation callable.
 # Mirrors tools_mock.ToolImpl — kept local so reasoner.py has no import
@@ -82,6 +88,12 @@ class ReasonerError(Exception):
     ) -> None:
         super().__init__(message)
         self.last_validation_error = last_validation_error
+
+
+def _fmt_input(tool_input: dict[str, Any], max_len: int = 60) -> str:
+    """Format tool input dict as a short string for log lines."""
+    s = json.dumps(tool_input, default=str)
+    return s if len(s) <= max_len else s[: max_len - 1] + "…"
 
 
 def _serialize_tool_result(result: Any) -> str:
@@ -112,30 +124,39 @@ def reason(
     model_id: str = "claude-sonnet-4-6",
     max_schema_retries: int = 2,
     max_turns: int = 10,
-    max_tokens: int = 4096,
+    max_tokens: int = 2048,
+    max_tokens_explore: int = 512,
 ) -> TradeProposal:
     """Run the agent reasoning loop and return a validated TradeProposal.
 
     Two-phase agentic loop — see module docstring for full design rationale.
 
     Args:
-        context:            Assembled context bundle from context/assembler.py.
-                            tool_calls_transcript is stamped onto this object
-                            before returning so the caller can save it to the
-                            journal with the full exploration transcript.
-        tool_impls:         Map of tool_name -> callable. Production callers
-                            inject real WP-3 implementations; tests inject mocks
-                            from agent/tools_mock.py. Never defaults to mocks.
-        playbook:           Strategy playbook — passed to build_system_prompt().
-        limits:             Risk limits — passed to build_system_prompt().
-        model_id:           Anthropic model identifier. Defaults match Config.
-        max_schema_retries: Additional commit attempts after first failure.
-                            Total attempts = max_schema_retries + 1.
-        max_turns:          Exploration phase turn cap. When hit, proceeds to
-                            commit with whatever context the agent has gathered.
-        max_tokens:         Output token cap for both exploration and commit
-                            API calls. Raise if the agent truncates during
-                            verbose multi-tool runs. Defaults match Config.
+        context:             Assembled context bundle from context/assembler.py.
+                             tool_calls_transcript is stamped onto this object
+                             before returning so the caller can save it to the
+                             journal with the full exploration transcript.
+        tool_impls:          Map of tool_name -> callable. Production callers
+                             inject real WP-3 implementations; tests inject mocks
+                             from agent/tools_mock.py. Never defaults to mocks.
+        playbook:            Strategy playbook — passed to build_system_prompt().
+        limits:              Risk limits — passed to build_system_prompt().
+        model_id:            Anthropic model identifier. Defaults match Config.
+        max_schema_retries:  Additional commit attempts after first failure.
+                             Total attempts = max_schema_retries + 1.
+        max_turns:           Exploration phase turn cap. When hit, proceeds to
+                             commit with whatever context the agent has gathered.
+        max_tokens:          Output token cap for commit API calls. Observed
+                             commit responses run ~1300-1500 tokens when the
+                             model produces verbose thesis/iv_rationale/
+                             catalyst_check fields; 2048 provides safe headroom.
+                             Raise only if commit responses are being truncated.
+        max_tokens_explore:  Output token cap for exploration turns. Each turn
+                             only needs tool-call JSON (~30-50 tokens per call)
+                             plus brief bridging text — 512 tokens is ample.
+                             Capping here prevents the model from generating
+                             multi-hundred-token reasoning text on the final
+                             exploration turn (discarded once commit runs).
 
     Returns:
         A pyright-clean TradeProposal on success (including action=NO_ACTION).
@@ -157,29 +178,93 @@ def reason(
             "content": (
                 "Here is the assembled market context for this reasoning cycle:\n\n"
                 + json.dumps(context.assembled_context, indent=2, default=str)
-                + "\n\nUse the read-only tools to investigate candidates as needed, "
-                "then call submit_trade_proposal with your final decision."
+                + "\n\nThe context above already contains portfolio state, universe "
+                "snapshot, events calendar, and recent journal history — do not "
+                "re-fetch any of those. Use the read-only tools only for targeted "
+                "drill-ins not available above (e.g. get_filtered_chain to inspect "
+                "specific strikes and expiries before committing to a structure). "
+                "Then call submit_trade_proposal with your final decision."
             ),
         }
     ]
 
     tool_calls_transcript: list[ToolCallRecord] = []
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+
+    _reason_t0 = time.monotonic()
+    log.info(
+        "reason() starting — model=%s max_turns=%d "
+        "max_tokens_explore=%d max_tokens_commit=%d",
+        model_id,
+        max_turns,
+        max_tokens_explore,
+        max_tokens,
+    )
 
     # ── Phase 1: Exploration ──────────────────────────────────────────────────
     for _turn in range(max_turns):
+        log.info("  exploration turn %d — waiting for model response", _turn + 1)
+        _t0 = time.monotonic()
         response = client.messages.create(
             model=model_id,
-            max_tokens=max_tokens,
+            max_tokens=max_tokens_explore,
             system=system_prompt,
             tools=AGENT_TOOLS,  # type: ignore[arg-type]
             tool_choice={"type": "auto"},
             messages=messages,  # type: ignore[arg-type]
         )
+        total_input_tokens += response.usage.input_tokens
+        total_output_tokens += response.usage.output_tokens
+        log.info(
+            "  exploration turn %d response — %.1fs (%d in, %d out tokens)",
+            _turn + 1,
+            time.monotonic() - _t0,
+            response.usage.input_tokens,
+            response.usage.output_tokens,
+        )
 
         messages.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason != "tool_use":
+            # When max_tokens fires mid-tool-call the response may contain a
+            # partial tool_use block.  The API requires every tool_use to be
+            # followed by a matching tool_result; without one the next call
+            # returns 400.  Inject synthetic errors to keep the conversation
+            # valid before the commit phase runs.
+            if response.stop_reason == "max_tokens":
+                unmatched = [b for b in response.content if b.type == "tool_use"]
+                if unmatched:
+                    log.warning(
+                        "  exploration turn %d hit max_tokens with %d unmatched "
+                        "tool_use block(s) — injecting synthetic tool_result errors",
+                        _turn + 1,
+                        len(unmatched),
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": b.id,
+                                    "is_error": True,
+                                    "content": (
+                                        "Response truncated by max_tokens limit. "
+                                        "Proceed directly to submit_trade_proposal."
+                                    ),
+                                }
+                                for b in unmatched
+                            ],
+                        }
+                    )
+
             # Model stopped calling tools — exploration complete.
+            log.info(
+                "  exploration complete after %d turn(s) — %d tool call(s) recorded",
+                _turn + 1,
+                len(tool_calls_transcript),
+            )
             break
 
         # Dispatch all tool calls in this response and collect results.
@@ -204,6 +289,7 @@ def reason(
                 )
 
             tool_input = cast(dict[str, Any], block.input)
+            log.info("    → tool_use: %s(%s)", block.name, _fmt_input(tool_input))
             result = impl(tool_input)
             result_json = _serialize_tool_result(result)
 
@@ -254,6 +340,12 @@ def reason(
         )
 
     for attempt in range(max_schema_retries + 1):
+        log.info(
+            "  commit attempt %d/%d — waiting for model response",
+            attempt + 1,
+            max_schema_retries + 1,
+        )
+        _t0 = time.monotonic()
         commit_response = client.messages.create(
             model=model_id,
             max_tokens=max_tokens,
@@ -263,6 +355,16 @@ def reason(
             messages=commit_messages,  # type: ignore[arg-type]
         )
 
+        total_input_tokens += commit_response.usage.input_tokens
+        total_output_tokens += commit_response.usage.output_tokens
+        log.info(
+            "  commit attempt %d/%d response — %.1fs (%d in, %d out tokens)",
+            attempt + 1,
+            max_schema_retries + 1,
+            time.monotonic() - _t0,
+            commit_response.usage.input_tokens,
+            commit_response.usage.output_tokens,
+        )
         proposal_block = next(
             (b for b in commit_response.content if b.type == "tool_use"),
             None,
@@ -316,6 +418,23 @@ def reason(
 
         # Success — stamp the exploration transcript onto the context snapshot
         # so the caller can persist it with the journal record.
+        est_cost = (
+            total_input_tokens * _INPUT_COST_PER_TOKEN
+            + total_output_tokens * _OUTPUT_COST_PER_TOKEN
+        )
+        log.info(
+            "reason() done — %d in + %d out tokens, est. $%.4f (Sonnet 4.6)",
+            total_input_tokens,
+            total_output_tokens,
+            est_cost,
+        )
+        log.info(
+            "  commit success — action=%s strategy=%r underlying=%s (total %.1fs)",
+            proposal.action,
+            proposal.strategy,
+            proposal.underlying,
+            time.monotonic() - _reason_t0,
+        )
         context.tool_calls_transcript = tool_calls_transcript
         return proposal
 
