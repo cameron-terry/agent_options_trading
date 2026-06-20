@@ -39,7 +39,11 @@ from datetime import UTC, datetime
 from options_agent.config import PlaybookConfig
 from options_agent.contracts.data import MarketRegime, SymbolSnapshot, UniverseSnapshot
 from options_agent.data.events import get_macro_events
-from options_agent.data.providers import DataProvider, DataUnavailableError
+from options_agent.data.providers import (
+    DataAuthError,
+    DataProvider,
+    DataUnavailableError,
+)
 from options_agent.data.providers.volatility_provider import VolatilityIndexProvider
 
 logger = logging.getLogger(__name__)
@@ -93,7 +97,7 @@ def get_universe_snapshot(
     for symbol in symbols:
         try:
             price = provider.fetch_latest_price(symbol)
-        except DataUnavailableError:
+        except (DataUnavailableError, DataAuthError):
             logger.warning(
                 "Price fetch failed for %s — excluding from snapshot this cycle",
                 symbol,

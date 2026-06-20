@@ -397,6 +397,23 @@ def test_get_universe_snapshot_excludes_symbol_on_price_failure() -> None:
     assert "FAIL" not in result.symbol_snapshots
 
 
+def test_get_universe_snapshot_excludes_symbol_on_auth_error() -> None:
+    from options_agent.data.providers import DataAuthError
+
+    dp = MagicMock()
+    dp.fetch_latest_price.side_effect = DataAuthError("credentials rejected")
+    vp = _make_vol_provider(18.0)
+
+    result = get_universe_snapshot(
+        symbols=["SPY"],
+        provider=dp,
+        vol_provider=vp,
+        playbook=_PLAYBOOK,
+        as_of=_AS_OF,
+    )
+    assert "SPY" not in result.symbol_snapshots
+
+
 def test_get_universe_snapshot_partial_failure_keeps_healthy_symbols() -> None:
     dp = MagicMock()
 
