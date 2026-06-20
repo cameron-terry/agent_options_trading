@@ -114,7 +114,7 @@ Once all CI gates are green, commit the work and open a pull request:
 2. Push the branch and create a PR using `gh pr create`. The PR body should include:
    - **Summary** — bullet points describing what was built
    - **Decisions resolved** — a table of any design/toolchain choices made during this WP (the "why" future readers need), drawn from the Phase 3 briefing and any follow-up discussion
-   - **Test plan** — a checklist the reviewer can run manually to verify the acceptance criteria
+   - **Test plan** — a checklist the reviewer can run manually to verify the acceptance criteria, should require the reviwer to write + run code if possible
 
 3. Post the PR URL to the user.
 

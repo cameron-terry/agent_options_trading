@@ -53,21 +53,23 @@ The card's name and description are already available from Phase 1's `get_list_c
 
 ### Phase 2.5 — Run author verification steps
 
-After Phase 2 completes and you have the PR body:
+After Phase 2 completes and you have the PR body, extract and run **all three forms** of author verification:
 
-1. **Extract verification statements** — scan the PR body for lines matching the pattern `Verify <something>` (in checklist `- [ ] Verify ...` / `- [x] Verify ...` or plain `Verify ...` form). These are claims the author committed to validating.
+**Form A — `Verify` checklist lines:** lines matching `- [ ] Verify ...` / `- [x] Verify ...` or plain `Verify <something>`. Write a minimal `uv run python -c "..."` snippet for each, assert the claim, and print `PASS` or the observed value on failure.
 
-2. **Run each verification** — for each extracted statement, write a minimal Python snippet and execute it with `uv run python -c "..."`. Each snippet should:
-   - Import only what it needs from `options_agent.contracts` (or other modules touched by the diff).
-   - Assert the specific claim (e.g., `assert len(list(ActionTaken)) == 8`).
-   - Print a single `PASS` line or raise/print the observed value on failure.
-   - Use the real enum/field names from the diff — run a quick `uv run python -c "from options_agent.contracts import X; print(list(X))"` first if you need to confirm exact values before asserting.
+**Form B — Shell commands in the Test plan:** any `uv run pytest ...` or `uv run python ...` command in the PR body (typically under a "Test plan" heading). Run each command exactly as written. Record the exit code and key output (pass count, skip count, or error).
 
-3. **Collect results** — record each check as `PASS` or `FAIL (observed: <value>, expected: <value>)`.
+**Form C — Python code blocks introduced as manual verification:** any fenced ` ```python ` block preceded by a sentence like "To manually verify", "To verify", "Run in a Python shell", or similar. Execute the block with `uv run python -c "..."` (or write it to a temp file if it spans multiple statements that can't be inlined). Capture stdout/stderr.
+
+**Run all three forms every time.** Do not skip a form because another form was found. If the PR body has a Test plan with pytest commands AND a Python snippet AND a `Verify` line, run all of them.
+
+**Collect results** — record each check as one line:
+- Shell command → `PASS (N passed, M skipped)` or `FAIL (exit N — <first error line>)`
+- Python snippet → `PASS` (with the observed stdout if informative) or `FAIL (observed: <value>, expected: <value>)`
 
 **If any check FAILS:** treat it as a concrete bug under `### Bugs and logical inconsistencies`, with the actual vs. expected values. A failing author verification overrides passing static analysis — the code is not correct if the author's own stated claims don't hold.
 
-**If no `Verify` lines are found in the PR body:** write "No author verification steps found." in the Verification results section and proceed.
+**If the PR body contains none of the above forms:** write "No author verification steps found." in the Verification results section and proceed.
 
 ### Phase 3 — Deliver the review
 
