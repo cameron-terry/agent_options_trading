@@ -1,21 +1,29 @@
-# Kill-switch
+# Observability & Safety
 
 **Module:** `options_agent/obs/`  
 **Credentials required:** none  
-**Status:** complete (WP-7.1)
+**Status:** kill-switch complete (WP-7.1); alerts and review stubs pending
 
-Append-only safety lever that gates new entries and (under FLATTEN) forces closure of all open positions. State is persisted to the `kill_switch_log` table so it survives restarts. The orchestrator reads it at the top of every cycle.
-
-See [docs/runbook_kill_switch.md](../runbook_kill_switch.md) for the three-tier escalation procedure (CLI → raw SQL → Alpaca key revocation).
+Runtime safety controls and operational visibility into the running agent. The module owns anything that lets an operator observe, pause, or stop the system without touching the core trading logic.
 
 ## Sub-modules
 
 | File | Responsibility |
 |---|---|
-| `obs/killswitch.py` | Core API: state helpers, DB reads/writes |
-| `obs/__main__.py` | CLI: `status`, `set`, `resume`, `history` commands |
+| `obs/killswitch.py` | Kill-switch core API: state helpers, DB reads/writes |
+| `obs/__main__.py` | Kill-switch CLI: `status`, `set`, `resume`, `history` |
+| `obs/alerts.py` | _(stub)_ Alerting on anomalous cycle outcomes |
+| `obs/review.py` | _(stub)_ Human-in-the-loop review queue |
 
-## States
+---
+
+## Kill-switch (WP-7.1)
+
+Append-only safety lever that gates new entries and (under FLATTEN) forces closure of all open positions. State is persisted to the `kill_switch_log` table so it survives restarts. The orchestrator reads it at the top of every cycle.
+
+See [docs/runbook_kill_switch.md](../runbook_kill_switch.md) for the three-tier escalation procedure (CLI → raw SQL → Alpaca key revocation).
+
+### States
 
 | State | New entries | Monitor cycle | Use when |
 |---|---|---|---|
@@ -27,7 +35,7 @@ See [docs/runbook_kill_switch.md](../runbook_kill_switch.md) for the three-tier 
 
 **HALT does not freeze the monitor.** Exit rules (stop-loss, profit-target, DTE expiry) still fire under `HALT`. An unmanaged position under a "safety halt" is the opposite of safe.
 
-## CLI
+### CLI
 
 ```bash
 # Check current state and recent history
@@ -51,7 +59,7 @@ python -m options_agent.obs history --n 20
 
 `--set-by` defaults to `$USER`. Override with `--set-by <name>` when running under a service account.
 
-## Python API
+### Python API
 
 ```python
 from options_agent.state.db import build_engine, get_connection, metadata
@@ -93,7 +101,7 @@ for e in history:
     print(e.created_at, e.state, e.set_by, e.reason)
 ```
 
-## DB schema
+### DB schema
 
 `kill_switch_log` is **append-only** — never UPDATE an existing row. The current state is always the most recent row ordered by `(created_at DESC, id DESC)`.
 
@@ -107,7 +115,7 @@ for e in history:
 
 Migration: `alembic/versions/004_kill_switch_log.py`
 
-## Fail-safe contracts
+### Fail-safe contracts
 
 The orchestrator enforces these at the top of each cycle. The core module (`killswitch.py`) propagates exceptions to the caller — fail-safe logic lives in `orchestrator.py`.
 

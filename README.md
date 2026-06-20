@@ -65,5 +65,5 @@ uv run pyright
 | Data & signals | `options_agent/data/` | No (needs Alpaca keys) — [docs](docs/features/data-signals.md) |
 | Broker & execution | `options_agent/execution/` | No (needs Alpaca keys) — [docs](docs/features/broker-execution.md) |
 | Agent tools & mock harness | `options_agent/agent/` | Yes — [docs](docs/features/agent-tools.md) |
-| Kill-switch & safety | `options_agent/obs/` | Yes (SQLite) — [docs](docs/features/kill-switch.md) |
+| Observability & safety | `options_agent/obs/` | Yes (SQLite) — [docs](docs/features/observability.md) |
 | Vertical slice | `options_agent/orchestrator.py` | No (needs Alpaca keys) — [docs](docs/features/vertical-slice.md) |
