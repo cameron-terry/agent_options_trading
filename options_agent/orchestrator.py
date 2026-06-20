@@ -22,6 +22,7 @@ from options_agent.contracts.state import (
     AssetClass,
     ContextSnapshot,
     Decision,
+    KillSwitchState,
     LegStatus,
     OrderStatus,
     Position,
@@ -30,6 +31,7 @@ from options_agent.contracts.state import (
 )
 from options_agent.execution.broker import BrokerClient
 from options_agent.execution.reconcile import reconcile as _reconcile
+from options_agent.obs.killswitch import get_current_state, is_flatten, is_halted
 from options_agent.risk.sizing import size as _size
 from options_agent.risk.validator import validate_structural
 from options_agent.state.crud import insert_order, insert_position
@@ -141,7 +143,43 @@ def run_entry_cycle(
     now = datetime.now(UTC)
     cycle_id = str(uuid.uuid4())
 
-    # ── Step 1: REASON ──────────────────────────────────────────────────────
+    # ── Step 1: KILL_SWITCH ──────────────────────────────────────────────────
+    # Fail-safe: if the DB read fails we cannot confirm the switch is NONE,
+    # so we fail closed — treat as HALT and block the entry cycle.
+    # Infrastructure failures that prevent reading the safety lever must halt,
+    # not silently allow trading to continue.
+    try:
+        with get_connection(engine) as _ks_conn:
+            _ks_state = get_current_state(_ks_conn)
+    except Exception:
+        logger.critical(
+            "cycle %s: kill-switch read failed — failing closed (treating as HALT)",
+            cycle_id,
+        )
+        return CycleResult(
+            cycle_id=cycle_id,
+            action_taken=ActionTaken.NO_ACTION_GATED,
+            short_circuit_reason=ShortCircuitReason.KILL_SWITCH_HALT,
+        )
+
+    if is_halted(_ks_state):
+        _sc_reason = (
+            ShortCircuitReason.KILL_SWITCH_FLATTEN
+            if is_flatten(_ks_state)
+            else ShortCircuitReason.KILL_SWITCH_HALT
+        )
+        logger.warning(
+            "cycle %s: kill switch %s — aborting entry cycle", cycle_id, _ks_state
+        )
+        return CycleResult(
+            cycle_id=cycle_id,
+            action_taken=ActionTaken.NO_ACTION_GATED,
+            short_circuit_reason=_sc_reason,
+        )
+
+    # ── Step 2 (stub): REASON ───────────────────────────────────────────────
+    # WP-8 expands this to the full 9-step flow. Steps below retain their
+    # original numbers from the WP-0.5 stub until WP-8 wires them correctly.
     proposal = stub_reasoner()
     logger.info(
         "cycle %s: stub_reasoner emitted %s on %s",
@@ -395,19 +433,41 @@ def run_entry_cycle(
     )
 
 
-def run_monitor_cycle(positions: list[Position], config: Config) -> MonitorResult:
-    """Run one monitor cycle over the supplied open positions. WP-8 fills in the body.
+def run_monitor_cycle(
+    positions: list[Position],
+    config: Config,
+    *,
+    engine: Engine | None = None,
+) -> MonitorResult:
+    """Run one monitor cycle over the supplied open positions.
+
+    WP-5/WP-8 fills in the body.
 
     Flow (for each position in positions):
-    1. Evaluate stop-loss rule: if unrealized loss >= ExitPlan.stop_loss_mult
+    1. Kill-switch check (this WP — WP-7.1).
+    2. Evaluate stop-loss rule: if unrealized loss >= ExitPlan.stop_loss_mult
        * credit received, submit a closing order.
-    2. Evaluate profit-target rule: if unrealized profit >=
+    3. Evaluate profit-target rule: if unrealized profit >=
        ExitPlan.profit_target_pct * est_max_profit, submit a closing order.
-    3. Evaluate time-stop rule: if DTE (nearest_expiration - today) <=
+    4. Evaluate time-stop rule: if DTE (nearest_expiration - today) <=
        ExitPlan.time_stop_dte, submit a closing order.
-    4. If any rule fires, submit a closing order via execution/broker.py and
+    5. If any rule fires, submit a closing order via execution/broker.py and
        journal the exit decision (which rule fired, order submitted).
-    5. Collect per-position errors into MonitorResult.errors.
+    6. Collect per-position errors into MonitorResult.errors.
+
+    Kill-switch semantics (distinct from entry cycle):
+        NONE    — normal exit evaluation (stop/target/DTE per WP-5).
+        HALT    — monitor runs normally; existing positions are still managed
+                  to their planned exits. HALT does NOT freeze the monitor —
+                  an unmanaged position under HALT defeats the purpose of a halt.
+        FLATTEN — monitor submits closing orders for ALL open positions,
+                  overriding normal stop/target logic. WP-5 receives
+                  flatten_mode=True to activate this distinct code path.
+
+    Fail-safe on kill-switch read error:
+        Proceed with NONE semantics (normal exit evaluation).
+        Never auto-FLATTEN on an unreadable flag — FLATTEN must be an explicit
+        operator decision, not an inference from a broken DB connection.
 
     This function never touches the LLM and has no opinion on entries.
 
@@ -422,8 +482,37 @@ def run_monitor_cycle(positions: list[Position], config: Config) -> MonitorResul
         on a position before submitting a new close.
 
     The caller (WP-8 / scheduler) is responsible for fetching open positions
-    from state and passing them here. This function does not read the DB.
+    from state and passing them here. This function does not read the DB
+    except for the kill-switch state.
     """
+    if engine is None:
+        engine = build_engine(config.db_url)
+
+    # ── Step 1: KILL_SWITCH ──────────────────────────────────────────────────
+    # Fail-safe: if the DB read fails, proceed with normal exit logic (NONE).
+    # We never auto-FLATTEN on an unreadable flag; FLATTEN must be explicit.
+    try:
+        with get_connection(engine) as _ks_conn:
+            _ks_state = get_current_state(_ks_conn)
+    except Exception:
+        logger.critical(
+            "run_monitor_cycle: kill-switch read failed — proceeding with normal "
+            "exit logic (fail-safe: never auto-FLATTEN on unreadable flag)"
+        )
+        _ks_state = KillSwitchState.NONE
+
+    # flatten_mode signals WP-5 to close all positions rather than evaluate rules.
+    # Under HALT, flatten_mode is False — exits still fire per normal stop/target logic.
+    _flatten_mode = is_flatten(_ks_state)
+    logger.debug(
+        "run_monitor_cycle: kill_switch=%s flatten_mode=%s positions=%d",
+        _ks_state,
+        _flatten_mode,
+        len(positions),
+    )
+
+    # WP-5/WP-8 fills in the monitor exit body here.
+    # Receives: positions, config, engine, flatten_mode=_flatten_mode
     raise NotImplementedError
 
 

@@ -210,7 +210,7 @@ def test_regime_label_above_vix_high_threshold() -> None:
 
 def test_regime_label_at_vix_low_threshold() -> None:
     pb = PlaybookConfig()
-    # Exactly at low threshold → normal (low-vol is strictly <, not ≤)
+    # Exactly at low threshold → normal (low_vol is strictly <, not ≤)
     assert pb.regime_label(pb.vix_low_vol_threshold) == MarketRegime.NORMAL
 
 
