@@ -90,7 +90,10 @@ def _close_proposal(
     pos: Position, thesis: str = "Monitor exit trigger"
 ) -> TradeProposal:
     """Build a closing TradeProposal from pos by reversing all leg sides."""
-    assert pos.exit_plan is not None  # caller must guard before calling
+    if pos.exit_plan is None:
+        raise ValueError(
+            f"_close_proposal called on position {pos.id!r} with no exit_plan"
+        )
     reversed_legs = [
         Leg(
             right=pl.leg.right,
@@ -174,6 +177,10 @@ def check_stop_loss(
     now must be UTC-aware. max_mark_age is the acceptable staleness window
     (e.g. timedelta(minutes=10) for a 5-minute monitor cycle with some slack).
     """
+    if now.tzinfo is None:
+        raise ValueError(
+            f"check_stop_loss: now must be UTC-aware, got naive datetime {now!r}"
+        )
     if pos.asset_class != AssetClass.OPTION_STRATEGY:
         logger.info(
             "check_stop_loss: skipping equity position %s (asset_class=%s); "
@@ -298,6 +305,10 @@ def check_profit_target(
 
     Returns None if the profit-target threshold has not been reached.
     """
+    if now.tzinfo is None:
+        raise ValueError(
+            f"check_profit_target: now must be UTC-aware, got naive datetime {now!r}"
+        )
     if pos.asset_class != AssetClass.OPTION_STRATEGY:
         logger.info(
             "check_profit_target: skipping equity position %s (asset_class=%s); "
@@ -437,6 +448,10 @@ def check_time_stop(
 
     now must be UTC-aware.
     """
+    if now.tzinfo is None:
+        raise ValueError(
+            f"check_time_stop: now must be UTC-aware, got naive datetime {now!r}"
+        )
     if pos.asset_class != AssetClass.OPTION_STRATEGY:
         logger.info(
             "check_time_stop: skipping equity position %s (asset_class=%s); "
