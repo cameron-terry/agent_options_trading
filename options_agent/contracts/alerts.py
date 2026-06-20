@@ -19,18 +19,19 @@ from pydantic import BaseModel, Field
 class AlertEventType(StrEnum):
     """What triggered the alert.
 
-    FILL                  — a position leg was filled by the broker.
-    REJECTION             — a TradeProposal was rejected by the validator.
-    KILL_SWITCH_CHANGE    — kill-switch state changed (HALT, FLATTEN, or NONE resume).
-    ALERT_DELIVERY_FAILED — the alerting channel itself failed; written to DB so the
-                            absence of a notification alert is queryable rather than
-                            silently missing.
+    FILL               — a position leg was filled by the broker.
+    REJECTION          — a TradeProposal was rejected by the validator.
+    KILL_SWITCH_CHANGE — kill-switch state changed (HALT, FLATTEN, or NONE resume).
+
+    Delivery failures are recorded as rows in alert_delivery_failures (DB),
+    not as AlertEvents dispatched through the channel — dispatching would be
+    circular. If a future WP needs to react programmatically to persistent
+    delivery failures, scope the meta-alert flow in that WP's ticket.
     """
 
     FILL = "FILL"
     REJECTION = "REJECTION"
     KILL_SWITCH_CHANGE = "KILL_SWITCH_CHANGE"
-    ALERT_DELIVERY_FAILED = "ALERT_DELIVERY_FAILED"
 
 
 class AlertSeverity(StrEnum):
@@ -50,7 +51,6 @@ DEFAULT_SEVERITY: dict[AlertEventType, AlertSeverity] = {
     AlertEventType.FILL: AlertSeverity.INFO,
     AlertEventType.REJECTION: AlertSeverity.WARN,
     AlertEventType.KILL_SWITCH_CHANGE: AlertSeverity.CRITICAL,
-    AlertEventType.ALERT_DELIVERY_FAILED: AlertSeverity.WARN,
 }
 
 

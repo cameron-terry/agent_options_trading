@@ -57,6 +57,78 @@ def test_discord_channel_raises_on_empty_url() -> None:
         DiscordChannel("")
 
 
+def test_discord_channel_send_posts_well_formed_embed() -> None:
+    """DiscordChannel.send() must POST a valid Discord embed JSON payload."""
+    import json
+    from unittest.mock import MagicMock, patch
+
+    channel = DiscordChannel("https://discord.com/api/webhooks/test/token")
+    ev = AlertEvent(
+        event_type=AlertEventType.KILL_SWITCH_CHANGE,
+        severity=AlertSeverity.CRITICAL,
+        detail="HALT engaged",
+        symbol="SPY",
+        order_id="ord-abc",
+    )
+
+    mock_resp = MagicMock()
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+
+    with patch("options_agent.obs.alerts.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = mock_resp
+        channel.send(ev)
+
+    mock_urlopen.assert_called_once()
+    req = mock_urlopen.call_args[0][0]
+
+    assert req.get_method() == "POST"
+    assert req.get_header("Content-type") == "application/json"
+    assert req.full_url == "https://discord.com/api/webhooks/test/token"
+
+    payload = json.loads(req.data)
+    assert "embeds" in payload and len(payload["embeds"]) == 1
+    embed = payload["embeds"][0]
+    assert embed["title"] == "[CRITICAL] KILL_SWITCH_CHANGE"
+    assert embed["description"] == "HALT engaged"
+    assert embed["color"] == 15_548_997  # red — CRITICAL
+
+    field_names = [f["name"] for f in embed["fields"]]
+    assert "Event" in field_names
+    assert "Severity" in field_names
+    assert "Symbol" in field_names
+    assert "Order ID" in field_names
+
+
+def test_discord_channel_send_info_color_and_no_optional_fields() -> None:
+    """INFO severity gets blue color; missing symbol/order_id omitted from fields."""
+    import json
+    from unittest.mock import MagicMock, patch
+
+    channel = DiscordChannel("https://discord.com/api/webhooks/test/token")
+    ev = AlertEvent(
+        event_type=AlertEventType.FILL,
+        severity=AlertSeverity.INFO,
+        detail="SPY fill 2.35",
+    )
+
+    mock_resp = MagicMock()
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+
+    with patch("options_agent.obs.alerts.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = mock_resp
+        channel.send(ev)
+
+    payload = json.loads(mock_urlopen.call_args[0][0].data)
+    embed = payload["embeds"][0]
+    assert embed["color"] == 3_447_003  # blue — INFO
+
+    field_names = [f["name"] for f in embed["fields"]]
+    assert "Symbol" not in field_names
+    assert "Order ID" not in field_names
+
+
 # ---------------------------------------------------------------------------
 # AlertEvent defaults
 # ---------------------------------------------------------------------------
@@ -90,7 +162,6 @@ def test_default_severity_mapping() -> None:
     assert DEFAULT_SEVERITY[AlertEventType.FILL] == AlertSeverity.INFO
     assert DEFAULT_SEVERITY[AlertEventType.REJECTION] == AlertSeverity.WARN
     assert DEFAULT_SEVERITY[AlertEventType.KILL_SWITCH_CHANGE] == AlertSeverity.CRITICAL
-    assert DEFAULT_SEVERITY[AlertEventType.ALERT_DELIVERY_FAILED] == AlertSeverity.WARN
 
 
 # ---------------------------------------------------------------------------
