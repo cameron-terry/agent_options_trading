@@ -174,6 +174,12 @@ def check_stop_loss(
     (e.g. timedelta(minutes=10) for a 5-minute monitor cycle with some slack).
     """
     if pos.asset_class != AssetClass.OPTION_STRATEGY:
+        logger.info(
+            "check_stop_loss: skipping equity position %s (asset_class=%s); "
+            "disposition belongs to WP-8",
+            pos.id,
+            pos.asset_class,
+        )
         return None
 
     if pos.exit_plan is None:
@@ -291,6 +297,12 @@ def check_profit_target(
     Returns None if the profit-target threshold has not been reached.
     """
     if pos.asset_class != AssetClass.OPTION_STRATEGY:
+        logger.info(
+            "check_profit_target: skipping equity position %s (asset_class=%s); "
+            "disposition belongs to WP-8",
+            pos.id,
+            pos.asset_class,
+        )
         return None
 
     if pos.exit_plan is None:
@@ -423,6 +435,12 @@ def check_time_stop(
     now must be UTC-aware.
     """
     if pos.asset_class != AssetClass.OPTION_STRATEGY:
+        logger.info(
+            "check_time_stop: skipping equity position %s (asset_class=%s); "
+            "disposition belongs to WP-8",
+            pos.id,
+            pos.asset_class,
+        )
         return None
 
     if pos.exit_plan is None:

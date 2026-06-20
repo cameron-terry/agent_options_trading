@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/monitor/`  
 **Credentials required:** none (exit rule evaluators are pure logic against cached position state)  
-**Status:** in progress (WP-5.1 stop-loss ✓, WP-5.2 profit-target ✓, WP-5.3 DTE ✓, WP-5.4 idempotency ✓; WP-5.5 cycle body pending)
+**Status:** in progress (WP-5.1 stop-loss ✓, WP-5.2 profit-target ✓, WP-5.3 DTE ✓, WP-5.4 idempotency ✓, WP-5.6 equity guards ✓; WP-5.5 cycle body pending)
 
 The fast, deterministic exit loop. No LLM, no context assembly — per-position rule evaluation that runs every 1–5 minutes during market hours. Rules read cached state from the last reconcile cycle; the monitor never makes live broker quote calls for individual positions.
 
@@ -24,7 +24,7 @@ The fast, deterministic exit loop. No LLM, no context assembly — per-position 
 
 The two layers resolve disagreement toward caution: if either says a close is in flight, no new close is submitted. The position-status check short-circuits before the Order-table query on the common path.
 
-**EQUITY positions always skip.** All evaluators return `None` immediately if `pos.asset_class != OPTION_STRATEGY`. EQUITY positions (from assignment) have no `exit_plan`.
+**EQUITY positions always skip — and are logged.** All evaluators return `None` immediately if `pos.asset_class != OPTION_STRATEGY`, and emit a `logger.info` message naming the position ID. This makes EQUITY positions visible in logs each monitor cycle even though WP-5 takes no action on them. Disposition (auto-liquidate vs. HALT) belongs to WP-8.6. EQUITY positions (created by options assignment) have no `exit_plan` and use `expiration = date(9999, 12, 31)` as a sentinel; both are harmless once the guard fires first.
 
 ## Idempotency guard (`has_pending_close`)
 
