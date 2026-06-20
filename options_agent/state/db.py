@@ -186,6 +186,28 @@ outcome_records_table = Table(
 
 
 # ---------------------------------------------------------------------------
+# kill_switch_log — append-only; one row per state change.
+#
+# Current state = latest row by created_at (tie-broken by id, UUID descending).
+# Append-only by design: a safety/audit record that is UPDATE'd in place is no
+# longer an audit record — the change history is exactly what post-incident
+# analysis needs.
+#
+# The reason column is required: in an emergency the operator must record why
+# the switch was set, which feeds post-mortems and WP-7.2 alerting.
+# ---------------------------------------------------------------------------
+kill_switch_log_table = Table(
+    "kill_switch_log",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("state", String, nullable=False),  # KillSwitchState value
+    Column("set_by", String, nullable=False),  # operator name or script identifier
+    Column("reason", String, nullable=False),  # required context for audit
+    Column("created_at", DateTime(timezone=True), nullable=False, index=True),
+)
+
+
+# ---------------------------------------------------------------------------
 # Engine factory
 # ---------------------------------------------------------------------------
 

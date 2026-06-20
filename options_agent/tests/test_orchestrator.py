@@ -284,9 +284,9 @@ def test_monitor_result_round_trip() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_run_monitor_cycle_raises_not_implemented() -> None:
+def test_run_monitor_cycle_raises_not_implemented(engine) -> None:
     with pytest.raises(NotImplementedError):
-        run_monitor_cycle(positions=[], config=Config())
+        run_monitor_cycle(positions=[], config=Config(), engine=engine)
 
 
 # ---------------------------------------------------------------------------
