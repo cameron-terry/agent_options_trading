@@ -543,17 +543,23 @@ def _check_exit_plan_bounds(
             )
         )
 
-    if not b.stop_loss_mult_min <= exit_plan.stop_loss_mult <= b.stop_loss_mult_max:
+    if not (
+        b.stop_loss_max_loss_fraction_min
+        <= exit_plan.stop_loss_max_loss_fraction
+        <= b.stop_loss_max_loss_fraction_max
+    ):
         reasons.append(
             RejectionReason(
                 rule_id=ValidationRuleId.INVALID_EXIT_PLAN,
                 severity=Severity.ERROR,
                 human_message=(
-                    f"stop_loss_mult {exit_plan.stop_loss_mult} outside"
-                    f" policy [{b.stop_loss_mult_min}, {b.stop_loss_mult_max}]"
+                    "stop_loss_max_loss_fraction"
+                    f" {exit_plan.stop_loss_max_loss_fraction} outside"
+                    f" [{b.stop_loss_max_loss_fraction_min},"
+                    f" {b.stop_loss_max_loss_fraction_max}]"
                 ),
-                field_affected="exit_plan.stop_loss_mult",
-                observed=exit_plan.stop_loss_mult,
+                field_affected="exit_plan.stop_loss_max_loss_fraction",
+                observed=exit_plan.stop_loss_max_loss_fraction,
             )
         )
 

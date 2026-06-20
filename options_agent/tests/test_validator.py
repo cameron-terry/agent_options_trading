@@ -62,7 +62,9 @@ from options_agent.risk.validator import (
 # Shared fixtures
 # ---------------------------------------------------------------------------
 
-_EXIT = ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21)
+_EXIT = ExitPlan(
+    profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+)
 _EXP = date(2026, 8, 15)
 
 
@@ -619,7 +621,9 @@ def test_liquidity_valid_chain_passes() -> None:
 def test_exit_plan_profit_target_too_low_rejected() -> None:
     # 0.10 is structurally valid (>0) but below policy min of 0.25
     proposal = _make_proposal(
-        exit_plan=ExitPlan(profit_target_pct=0.10, stop_loss_mult=2.0, time_stop_dte=21)
+        exit_plan=ExitPlan(
+            profit_target_pct=0.10, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+        )
     )
     reasons = _run(proposal=proposal)
     ep_reasons = [r for r in reasons if r.rule_id == ValidationRuleId.INVALID_EXIT_PLAN]
@@ -627,29 +631,35 @@ def test_exit_plan_profit_target_too_low_rejected() -> None:
     assert ep_reasons[0].field_affected == "exit_plan.profit_target_pct"
 
 
-def test_exit_plan_stop_loss_mult_too_low_rejected() -> None:
+def test_exit_plan_stop_loss_max_loss_fraction_too_low_rejected() -> None:
     proposal = _make_proposal(
-        exit_plan=ExitPlan(profit_target_pct=0.50, stop_loss_mult=1.0, time_stop_dte=21)
+        exit_plan=ExitPlan(
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=0.05, time_stop_dte=21
+        )
     )
     reasons = _run(proposal=proposal)
     ep_reasons = [r for r in reasons if r.rule_id == ValidationRuleId.INVALID_EXIT_PLAN]
     assert len(ep_reasons) == 1
-    assert ep_reasons[0].field_affected == "exit_plan.stop_loss_mult"
+    assert ep_reasons[0].field_affected == "exit_plan.stop_loss_max_loss_fraction"
 
 
-def test_exit_plan_stop_loss_mult_too_high_rejected() -> None:
+def test_exit_plan_stop_loss_max_loss_fraction_too_high_rejected() -> None:
     proposal = _make_proposal(
-        exit_plan=ExitPlan(profit_target_pct=0.50, stop_loss_mult=6.0, time_stop_dte=21)
+        exit_plan=ExitPlan(
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=1.1, time_stop_dte=21
+        )
     )
     reasons = _run(proposal=proposal)
     ep_reasons = [r for r in reasons if r.rule_id == ValidationRuleId.INVALID_EXIT_PLAN]
     assert len(ep_reasons) == 1
-    assert ep_reasons[0].field_affected == "exit_plan.stop_loss_mult"
+    assert ep_reasons[0].field_affected == "exit_plan.stop_loss_max_loss_fraction"
 
 
 def test_exit_plan_time_stop_dte_too_low_rejected() -> None:
     proposal = _make_proposal(
-        exit_plan=ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=3)
+        exit_plan=ExitPlan(
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=3
+        )
     )
     reasons = _run(proposal=proposal)
     ep_reasons = [r for r in reasons if r.rule_id == ValidationRuleId.INVALID_EXIT_PLAN]
@@ -659,7 +669,9 @@ def test_exit_plan_time_stop_dte_too_low_rejected() -> None:
 
 def test_exit_plan_time_stop_dte_too_high_rejected() -> None:
     proposal = _make_proposal(
-        exit_plan=ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=60)
+        exit_plan=ExitPlan(
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=60
+        )
     )
     reasons = _run(proposal=proposal)
     ep_reasons = [r for r in reasons if r.rule_id == ValidationRuleId.INVALID_EXIT_PLAN]
@@ -668,16 +680,18 @@ def test_exit_plan_time_stop_dte_too_high_rejected() -> None:
 
 
 def test_exit_plan_valid_passes() -> None:
-    # default _EXIT: profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21
+    # default _EXIT: profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5
     reasons = _run()
     assert not any(r.rule_id == ValidationRuleId.INVALID_EXIT_PLAN for r in reasons)
 
 
 def test_exit_plan_bounds_at_exact_minimums_pass() -> None:
     # Boundaries are inclusive; values exactly at the min must pass.
-    # Defaults: profit_target_pct_min=0.25, stop_loss_mult_min=1.5, time_stop_dte_min=7
+    # Defaults: pct_min=0.25, stop_loss_max_loss_fraction_min=0.1, dte_min=7
     proposal = _make_proposal(
-        exit_plan=ExitPlan(profit_target_pct=0.25, stop_loss_mult=1.5, time_stop_dte=7)
+        exit_plan=ExitPlan(
+            profit_target_pct=0.25, stop_loss_max_loss_fraction=0.1, time_stop_dte=7
+        )
     )
     reasons = _run(proposal=proposal)
     assert not any(r.rule_id == ValidationRuleId.INVALID_EXIT_PLAN for r in reasons)
@@ -685,9 +699,11 @@ def test_exit_plan_bounds_at_exact_minimums_pass() -> None:
 
 def test_exit_plan_bounds_at_exact_maximums_pass() -> None:
     # Boundaries are inclusive; values exactly at the max must pass.
-    # Defaults: profit_target_pct_max=1.0, stop_loss_mult_max=5.0, time_stop_dte_max=45
+    # Defaults: pct_max=1.0, stop_loss_max_loss_fraction_max=1.0, dte_max=45
     proposal = _make_proposal(
-        exit_plan=ExitPlan(profit_target_pct=1.0, stop_loss_mult=5.0, time_stop_dte=45)
+        exit_plan=ExitPlan(
+            profit_target_pct=1.0, stop_loss_max_loss_fraction=1.0, time_stop_dte=45
+        )
     )
     reasons = _run(proposal=proposal)
     assert not any(r.rule_id == ValidationRuleId.INVALID_EXIT_PLAN for r in reasons)

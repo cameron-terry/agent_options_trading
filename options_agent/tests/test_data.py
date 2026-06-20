@@ -60,7 +60,9 @@ _CONTRACT = OptionContract(
 
 
 def _make_exit_plan() -> ExitPlan:
-    return ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21)
+    return ExitPlan(
+        profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+    )
 
 
 def _make_position_leg() -> PositionLeg:

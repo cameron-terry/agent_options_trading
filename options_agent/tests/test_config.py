@@ -51,7 +51,7 @@ def test_chain_filter_round_trip() -> None:
 def test_exit_plan_defaults() -> None:
     epd = ExitPlanDefaults()
     assert epd.profit_target_pct == 0.50
-    assert epd.stop_loss_mult == 2.0
+    assert epd.stop_loss_max_loss_fraction == 0.5
     assert epd.time_stop_dte == 21
 
 
@@ -173,7 +173,7 @@ max_abs_delta = 0.45
 
 [limits.exit_plan_defaults]
 profit_target_pct = 0.50
-stop_loss_mult = 2.0
+stop_loss_max_loss_fraction = 0.5
 time_stop_dte = 21
 """
     toml_path = tmp_path / "config.toml"

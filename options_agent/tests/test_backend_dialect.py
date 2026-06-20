@@ -36,7 +36,9 @@ from options_agent.state.crud import (
 from options_agent.state.db import get_connection
 
 _LEG = Leg(right="put", side="sell", strike=450.0, expiration=date(2026, 7, 18))
-_EXIT = ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21)
+_EXIT = ExitPlan(
+    profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+)
 _NOW = datetime(2026, 6, 7, 14, 30, 0, 123456, tzinfo=UTC)
 
 

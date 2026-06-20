@@ -92,7 +92,7 @@ def _make_position(
         unrealized_pnl=135.0,
         realized_pnl=None,
         exit_plan=ExitPlan(
-            profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
         ),
         status=PositionStatus.OPEN,
         opened_at=datetime(2026, 6, 7, 15, 0, 0, tzinfo=UTC),
@@ -432,7 +432,9 @@ def _make_aged_position(
         marked_at=_AS_OF,
         unrealized_pnl=100.0,
         realized_pnl=None,
-        exit_plan=ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=7),
+        exit_plan=ExitPlan(
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=7
+        ),
         status=PositionStatus.OPEN,
         opened_at=datetime(2026, 6, 1, 15, 0, 0, tzinfo=UTC),
         closed_at=None,

@@ -43,7 +43,9 @@ from options_agent.state.journal import (
 # ---------------------------------------------------------------------------
 
 _LEG = Leg(right="put", side="sell", strike=450.0, expiration=date(2026, 7, 18))
-_EXIT_PLAN = ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21)
+_EXIT_PLAN = ExitPlan(
+    profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+)
 _NOW = datetime(2026, 6, 7, 14, 30, tzinfo=UTC)
 _POS_LEG = PositionLeg(
     leg=_LEG, filled_qty=2, avg_fill_price=1.25, status=LegStatus.OPEN

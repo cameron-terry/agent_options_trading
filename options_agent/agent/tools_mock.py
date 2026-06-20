@@ -118,7 +118,9 @@ _MOCK_POSITION = Position(
     marked_at=_AS_OF,
     unrealized_pnl=135.0,
     realized_pnl=None,
-    exit_plan=ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21),
+    exit_plan=ExitPlan(
+        profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+    ),
     status=PositionStatus.OPEN,
     opened_at=datetime(2026, 6, 7, 15, 0, 0, tzinfo=UTC),
     closed_at=None,
@@ -418,7 +420,9 @@ _STUB_PROPOSAL = TradeProposal(
     net_delta=0.13,
     net_theta=9.0,
     net_vega=-0.38,
-    exit_plan=ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21),
+    exit_plan=ExitPlan(
+        profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+    ),
     informed_by=[],
 )
 
