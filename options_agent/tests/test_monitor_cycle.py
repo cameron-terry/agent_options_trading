@@ -441,6 +441,6 @@ def test_outcome_record_written_on_fill_confirmation(
     assert row.event_type == OutcomeEventType.FULL_CLOSE.value
     assert row.contracts_closed == pos.quantity
     # realized_pnl = (-entry_net_amount - fill_price) * qty * 100
-    # = (-(-275.0) - ???) — fill_price comes from net_fill_price on the order.
-    # The key assertion is just that it's not 0.0 (placeholder) and not None.
-    assert isinstance(row.realized_pnl, float)
+    # = (-(-275.0) - 1.05) * 5 * 100 = 136975.0
+    assert row.fill_price == pytest.approx(1.05)
+    assert row.realized_pnl == pytest.approx(136975.0)

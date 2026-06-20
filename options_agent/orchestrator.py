@@ -597,7 +597,7 @@ def run_monitor_cycle(
             )
             errors.append(
                 CycleError(
-                    stage=CycleStage.RECONCILE,
+                    stage=CycleStage.STOP_EVAL,
                     message=str(exc),
                     recoverable=True,
                 )
@@ -668,9 +668,17 @@ def _finalize_closed_positions(
                     continue
 
                 fill_price = closing_order.net_fill_price
-                realized_pnl = (
-                    (-pos.entry_net_amount - (fill_price or 0.0)) * pos.quantity * 100
-                )
+                if fill_price is None:
+                    logger.warning(
+                        "_finalize_closed_positions: closing order %s for "
+                        "position %s has no fill price — deferring OutcomeRecord "
+                        "until fill price is available",
+                        closing_order.id,
+                        pos.id,
+                    )
+                    continue
+
+                realized_pnl = (-pos.entry_net_amount - fill_price) * pos.quantity * 100
                 outcome = OutcomeRecord(
                     id=str(uuid.uuid4()),
                     position_id=pos.id,
@@ -684,8 +692,8 @@ def _finalize_closed_positions(
                 )
                 write_outcome_record(conn, outcome)
                 logger.info(
-                    "_finalize_closed_positions: OutcomeRecord written for position=%s "
-                    "exit_reason=%s realized_pnl=%.2f fill_price=%s",
+                    "_finalize_closed_positions: OutcomeRecord written for "
+                    "position=%s exit_reason=%s realized_pnl=%.2f fill_price=%.4f",
                     pos.id,
                     closing_order.exit_reason,
                     realized_pnl,
