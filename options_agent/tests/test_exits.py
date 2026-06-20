@@ -25,7 +25,12 @@ from options_agent.monitor.exits import (
     check_stop_loss,
     check_time_stop,
 )
-from options_agent.state.crud import get_order, get_position, insert_position
+from options_agent.state.crud import (
+    get_order,
+    get_position,
+    insert_order,
+    insert_position,
+)
 from options_agent.state.db import get_connection
 
 # ---------------------------------------------------------------------------
@@ -1300,3 +1305,362 @@ def test_time_stop_single_leg_position_uses_submit(engine) -> None:
     assert order is not None
     broker.submit.assert_called_once()
     broker.submit_multi_leg.assert_not_called()
+
+
+# ===========================================================================
+# WP-5.4 — Idempotency guard: has_pending_close (Order-table layer)
+# ===========================================================================
+#
+# These tests verify the second idempotency layer: the Order-table guard that
+# catches the desync window where insert_order succeeded but update_position
+# (→ PENDING_CLOSE) did not — e.g., a crash between the two writes.
+#
+# All three evaluators are exercised because the card requires all three to
+# call has_pending_close before submitting.
+# ---------------------------------------------------------------------------
+
+
+def _make_close_order(
+    position_id: str,
+    *,
+    status: OrderStatus = OrderStatus.WORKING,
+    role: OrderRole = OrderRole.CLOSE,
+    order_id: str | None = None,
+) -> Order:
+    """Build a closing Order for use in WP-5.4 tests."""
+    return Order(
+        id=order_id or str(uuid.uuid4()),
+        broker_order_id=str(uuid.uuid4()),
+        position_id=position_id,
+        role=role,
+        status=status,
+        broker_status_raw="new",
+        submitted_at=_NOW,
+        filled_at=None,
+        limit_price=0.15,
+        legs_filled=[],
+        net_fill_price=None,
+        filled_qty=0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Desync scenario: position status is OPEN but a CLOSE order already exists
+# ---------------------------------------------------------------------------
+
+
+def test_stop_loss_order_table_guard_blocks_desync_resubmit(engine) -> None:
+    """Desync: position status is OPEN but a WORKING CLOSE order exists in the DB.
+
+    This simulates a crash between insert_order and update_position on a prior
+    cycle. The position-status layer sees OPEN and would permit a second close.
+    The Order-table guard (has_pending_close) catches the in-flight close and
+    prevents the duplicate.
+    """
+    pos = _make_position(
+        status=PositionStatus.OPEN,  # NOT PENDING_CLOSE — simulating desync
+        unrealized_pnl=-5000.0,  # massively breached
+        exit_plan=_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    existing_close = _make_close_order(pos.id, status=OrderStatus.WORKING)
+
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, existing_close)
+        result = check_stop_loss(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert result is None, (
+        "has_pending_close must block resubmit even when position status is OPEN"
+    )
+    broker.submit_multi_leg.assert_not_called()
+    broker.submit.assert_not_called()
+
+
+def test_profit_target_order_table_guard_blocks_desync_resubmit(engine) -> None:
+    """Desync: position OPEN + WORKING CLOSE order → profit-target returns None."""
+    pos = _make_position(
+        status=PositionStatus.OPEN,
+        unrealized_pnl=5000.0,  # massively profitable
+        est_max_profit=275.0,
+        exit_plan=_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    existing_close = _make_close_order(pos.id, status=OrderStatus.WORKING)
+
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, existing_close)
+        result = check_profit_target(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert result is None
+    broker.submit_multi_leg.assert_not_called()
+    broker.submit.assert_not_called()
+
+
+def test_time_stop_order_table_guard_blocks_desync_resubmit(engine) -> None:
+    """Desync: position OPEN + WORKING CLOSE order → time-stop guard returns None."""
+    pos = _make_position(
+        status=PositionStatus.OPEN,
+        nearest_expiration=_EXPIRY_AT_THRESHOLD,  # DTE=21 → would trigger
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    existing_close = _make_close_order(pos.id, status=OrderStatus.WORKING)
+
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, existing_close)
+        result = check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert result is None
+    broker.submit_multi_leg.assert_not_called()
+    broker.submit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# PARTIALLY_FILLED is the primary case — dedicated tests
+# ---------------------------------------------------------------------------
+
+
+def test_stop_loss_partially_filled_close_blocks_second_submit(engine) -> None:
+    """PARTIALLY_FILLED CLOSE order blocks a new stop-loss close.
+
+    Partial fill is the case where duplication is most likely and harmful:
+    the position still shows open exposure (some contracts haven't closed),
+    so a naive evaluator would see an actionable position and fire again.
+    Stacking a second close on top of the partial doubles the closing quantity.
+    """
+    pos = _make_position(
+        status=PositionStatus.OPEN,  # not yet PENDING_CLOSE (partial, not full fill)
+        unrealized_pnl=-5000.0,
+        exit_plan=_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    partial_close = _make_close_order(pos.id, status=OrderStatus.PARTIALLY_FILLED)
+
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, partial_close)
+        result = check_stop_loss(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert result is None, (
+        "PARTIALLY_FILLED CLOSE order must block a second stop-loss close"
+    )
+    broker.submit_multi_leg.assert_not_called()
+    broker.submit.assert_not_called()
+
+
+def test_profit_target_partially_filled_close_blocks_second_submit(engine) -> None:
+    """PARTIALLY_FILLED CLOSE order blocks a new profit-target close.
+
+    Symmetry with the stop-loss and time-stop PARTIALLY_FILLED tests: all three
+    evaluators must block on a partial close, since has_pending_close is the
+    shared guard. This test verifies profit-target doesn't slip through.
+    """
+    pos = _make_position(
+        status=PositionStatus.OPEN,
+        unrealized_pnl=5000.0,  # massively profitable — would trigger
+        est_max_profit=275.0,
+        exit_plan=_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    partial_close = _make_close_order(pos.id, status=OrderStatus.PARTIALLY_FILLED)
+
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, partial_close)
+        result = check_profit_target(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert result is None, (
+        "PARTIALLY_FILLED CLOSE order must block a second profit-target close"
+    )
+    broker.submit_multi_leg.assert_not_called()
+    broker.submit.assert_not_called()
+
+
+def test_time_stop_partially_filled_close_blocks_second_submit(engine) -> None:
+    """PARTIALLY_FILLED CLOSE order blocks a new time-stop close.
+
+    The DTE condition is monotonic (never self-heals), making time-stop the most
+    acute case for duplication: every subsequent cycle would re-trigger until the
+    position fully fills. A partial close must silence all subsequent cycles.
+    """
+    pos = _make_position(
+        status=PositionStatus.OPEN,
+        nearest_expiration=_EXPIRY_AT_THRESHOLD,
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    partial_close = _make_close_order(pos.id, status=OrderStatus.PARTIALLY_FILLED)
+
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, partial_close)
+        result = check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert result is None, (
+        "PARTIALLY_FILLED CLOSE order must block a second time-stop close"
+    )
+    broker.submit_multi_leg.assert_not_called()
+    broker.submit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# ROLL order blocks a new CLOSE (role in {CLOSE, ROLL})
+# ---------------------------------------------------------------------------
+
+
+def test_stop_loss_working_roll_blocks_close(engine) -> None:
+    """WORKING ROLL order → stop-loss evaluator returns None.
+
+    A roll is closing the existing position exposure; submitting a CLOSE on top
+    of a working ROLL is a double-exit. The guard must catch role=ROLL too.
+    """
+    pos = _make_position(
+        status=PositionStatus.OPEN,
+        unrealized_pnl=-5000.0,
+        exit_plan=_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    roll_order = _make_close_order(
+        pos.id, status=OrderStatus.WORKING, role=OrderRole.ROLL
+    )
+
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, roll_order)
+        result = check_stop_loss(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert result is None, "WORKING ROLL must block a new CLOSE (it's already closing)"
+    broker.submit_multi_leg.assert_not_called()
+    broker.submit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# MarkStaleError fires before has_pending_close (ordering invariant)
+# ---------------------------------------------------------------------------
+
+
+def test_stale_mark_raises_before_order_table_guard_is_consulted(engine) -> None:
+    """Stale mark must raise MarkStaleError even when a pending close exists.
+
+    This asserts the ordering: MarkStaleError check runs before has_pending_close,
+    so a stale Order table is never consulted to decide idempotency. If the mark
+    is stale, reconcile hasn't run, and the Order table may also be stale.
+    """
+    stale_time = _NOW - timedelta(hours=1)
+    pos = _make_position(
+        status=PositionStatus.OPEN,
+        marked_at=stale_time,
+        unrealized_pnl=-5000.0,
+        exit_plan=_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    existing_close = _make_close_order(pos.id, status=OrderStatus.WORKING)
+
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, existing_close)
+        # Must raise MarkStaleError, NOT silently return None from the guard
+        with pytest.raises(MarkStaleError):
+            check_stop_loss(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    broker.submit_multi_leg.assert_not_called()
+    broker.submit.assert_not_called()
+
+
+def test_profit_target_stale_mark_raises_before_order_table_guard(engine) -> None:
+    """Same ordering invariant for check_profit_target."""
+    stale_time = _NOW - timedelta(hours=1)
+    pos = _make_position(
+        status=PositionStatus.OPEN,
+        marked_at=stale_time,
+        unrealized_pnl=5000.0,
+        est_max_profit=275.0,
+        exit_plan=_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    existing_close = _make_close_order(pos.id, status=OrderStatus.WORKING)
+
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, existing_close)
+        with pytest.raises(MarkStaleError):
+            check_profit_target(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    broker.submit_multi_leg.assert_not_called()
+    broker.submit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Double-run: trigger → run cycle again → exactly one close submitted
+# ---------------------------------------------------------------------------
+
+
+def test_double_run_produces_exactly_one_close(engine) -> None:
+    """Running the monitor twice after a stop-loss trigger submits exactly one close.
+
+    First run: threshold breached, close submitted, position → PENDING_CLOSE,
+    Order inserted with WORKING status.
+    Second run: position status is now PENDING_CLOSE (_SKIPPABLE_STATUSES fires)
+    and/or has_pending_close returns True → no second submit.
+
+    Both idempotency layers cooperate; the end state is one closing order.
+    """
+    pos = _make_position(
+        unrealized_pnl=-5000.0,  # massively breached
+        status=PositionStatus.OPEN,
+        exit_plan=_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+
+    # First monitor cycle: stop-loss fires, close is submitted.
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        first_order = check_stop_loss(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+        assert first_order is not None
+        refreshed = get_position(conn, pos.id)
+
+    assert refreshed is not None
+    assert refreshed.status == PositionStatus.PENDING_CLOSE
+
+    # Second monitor cycle: pass the refreshed (PENDING_CLOSE) position.
+    broker_2 = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        second_order = check_stop_loss(refreshed, conn, broker_2, _NOW, _MAX_MARK_AGE)
+
+    assert second_order is None, "Second cycle must not submit a duplicate close"
+    broker_2.submit_multi_leg.assert_not_called()
+    broker_2.submit.assert_not_called()
+
+
+def test_double_run_time_stop_produces_exactly_one_close(engine) -> None:
+    """Running twice after time-stop trigger submits exactly one close.
+
+    The DTE condition is monotonic, making this the most acute duplication risk:
+    every subsequent cycle would re-trigger until the position fills.
+    """
+    pos = _make_position(
+        nearest_expiration=_EXPIRY_AT_THRESHOLD,  # DTE=21, will keep triggering
+        status=PositionStatus.OPEN,
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        first_order = check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+        assert first_order is not None
+        refreshed = get_position(conn, pos.id)
+
+    assert refreshed is not None
+    assert refreshed.status == PositionStatus.PENDING_CLOSE
+
+    broker_2 = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        second_order = check_time_stop(refreshed, conn, broker_2, _NOW, _MAX_MARK_AGE)
+
+    assert second_order is None
+    broker_2.submit_multi_leg.assert_not_called()
+    broker_2.submit.assert_not_called()

@@ -52,7 +52,7 @@ from options_agent.contracts.state import (
     PositionStatus,
 )
 from options_agent.execution.broker import BrokerClient
-from options_agent.state.crud import insert_order, update_position
+from options_agent.state.crud import has_pending_close, insert_order, update_position
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +200,16 @@ def check_stop_loss(
             "before calling exit evaluators."
         )
 
+    # Order-table idempotency guard — catches the desync window where a closing
+    # order was inserted but position status was not yet updated to PENDING_CLOSE.
+    # Runs after MarkStaleError so we never consult a stale Order table.
+    if has_pending_close(conn, pos.id):
+        logger.debug(
+            "check_stop_loss: pending close/roll order exists for %s — skipping",
+            pos.id,
+        )
+        return None
+
     threshold = -(pos.exit_plan.stop_loss_max_loss_fraction * pos.est_max_loss)
     if pos.unrealized_pnl > threshold:
         return None
@@ -315,6 +325,14 @@ def check_profit_target(
             "before calling exit evaluators."
         )
 
+    # Order-table idempotency guard — after MarkStaleError so Order table is fresh.
+    if has_pending_close(conn, pos.id):
+        logger.debug(
+            "check_profit_target: pending close/roll order exists for %s — skipping",
+            pos.id,
+        )
+        return None
+
     threshold = pos.exit_plan.profit_target_pct * pos.est_max_profit
     if pos.unrealized_pnl < threshold:
         return None
@@ -414,6 +432,16 @@ def check_time_stop(
         return None
 
     if pos.status in _SKIPPABLE_STATUSES:
+        return None
+
+    # Order-table idempotency guard. No MarkStaleError precedes this in
+    # check_time_stop (DTE is mark-independent), but the monitor cycle is still
+    # expected to run reconcile at cycle-top, keeping the Order table fresh.
+    if has_pending_close(conn, pos.id):
+        logger.debug(
+            "check_time_stop: pending close/roll order exists for %s — skipping",
+            pos.id,
+        )
         return None
 
     today = now.astimezone(_MARKET_TZ).date()
