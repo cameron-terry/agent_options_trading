@@ -1,4 +1,4 @@
-"""Tests for WP-5.1: stop-loss trigger logic in monitor/exits.py."""
+"""Tests for WP-5.1 (stop-loss), WP-5.2 (profit-target), WP-5.3 (DTE) in exits.py."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from options_agent.monitor.exits import (
     MarkStaleError,
     check_profit_target,
     check_stop_loss,
+    check_time_stop,
 )
 from options_agent.state.crud import get_order, get_position, insert_position
 from options_agent.state.db import get_connection
@@ -68,6 +69,7 @@ def _make_position(
     est_max_profit: float = 275.0,
     asset_class: AssetClass = AssetClass.OPTION_STRATEGY,
     pos_id: str | None = None,
+    nearest_expiration: date = date(2026, 8, 15),
 ) -> Position:
     if legs is None:
         legs = [
@@ -99,7 +101,7 @@ def _make_position(
         status=status,
         opened_at=_FRESH_MARK,
         closed_at=None,
-        nearest_expiration=date(2026, 8, 15),
+        nearest_expiration=nearest_expiration,
         est_max_loss=est_max_loss,
         est_max_profit=est_max_profit,
         opening_order_id="open-ord-001",
@@ -958,6 +960,342 @@ def test_profit_target_single_leg_position_uses_submit(engine) -> None:
     with get_connection(engine) as conn:
         insert_position(conn, single_leg_pos)
         order = check_profit_target(single_leg_pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert order is not None
+    broker.submit.assert_called_once()
+    broker.submit_multi_leg.assert_not_called()
+
+
+# ===========================================================================
+# WP-5.3 — DTE / time-stop trigger logic
+# ===========================================================================
+#
+# _NOW = 2026-06-19 14:00 UTC = 10:00 AM EDT (America/New_York, UTC-4).
+# ET date = June 19, 2026.
+#
+# With time_stop_dte=21:
+#   threshold date = June 19 + 21 = July 10, 2026
+#     (date(2026, 7, 10) - date(2026, 6, 19)).days == 21  ← exactly at threshold
+#   above:  July 11 → DTE=22 → no trigger
+#   below:  July 9  → DTE=20 → triggers
+#   expiry: June 19 → DTE=0  → triggers
+#
+# time_stop_dte is calendar days (not trading days); see check_time_stop docstring.
+
+_DTE_EXIT_PLAN = ExitPlan(
+    profit_target_pct=0.50,
+    stop_loss_max_loss_fraction=0.5,
+    time_stop_dte=21,
+)
+
+# Nearest-expiration dates relative to ET date June 19 2026
+_EXPIRY_AT_THRESHOLD = date(2026, 7, 10)  # DTE=21 → triggers (21 <= 21)
+_EXPIRY_ONE_ABOVE = date(2026, 7, 11)  # DTE=22 → no trigger
+_EXPIRY_ONE_BELOW = date(2026, 7, 9)  # DTE=20 → triggers
+_EXPIRY_TODAY = date(2026, 6, 19)  # DTE=0  → triggers (assignment risk)
+
+
+# ---------------------------------------------------------------------------
+# Core trigger / no-trigger logic
+# ---------------------------------------------------------------------------
+
+
+def test_time_stop_not_triggered_above_threshold(engine) -> None:
+    """DTE one day above threshold → no order submitted, returns None."""
+    pos = _make_position(
+        nearest_expiration=_EXPIRY_ONE_ABOVE,  # DTE=22 > 21
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        result = check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert result is None
+    broker.submit_multi_leg.assert_not_called()
+    broker.submit.assert_not_called()
+
+
+def test_time_stop_triggered_at_threshold(engine) -> None:
+    """DTE exactly at threshold → order submitted, returns Order."""
+    pos = _make_position(
+        nearest_expiration=_EXPIRY_AT_THRESHOLD,  # DTE=21 <= 21
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        order = check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert order is not None
+    assert order.role == OrderRole.CLOSE
+    broker.submit_multi_leg.assert_called_once()
+
+
+def test_time_stop_triggered_below_threshold(engine) -> None:
+    """DTE one day below threshold → order submitted."""
+    pos = _make_position(
+        nearest_expiration=_EXPIRY_ONE_BELOW,  # DTE=20 <= 21
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        order = check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert order is not None
+    broker.submit_multi_leg.assert_called_once()
+
+
+def test_time_stop_triggered_on_expiration_day(engine) -> None:
+    """DTE=0 (expiration day) → order submitted.
+
+    Positions must be closed on their expiration day to avoid assignment risk
+    (the primary reason for a time-stop). DTE=0 must always trigger.
+    """
+    pos = _make_position(
+        nearest_expiration=_EXPIRY_TODAY,  # DTE=0 <= 21
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        order = check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert order is not None, "DTE=0 (expiration day) must always trigger the time-stop"
+    broker.submit_multi_leg.assert_called_once()
+
+
+def test_time_stop_position_transitions_to_pending_close(engine) -> None:
+    """After trigger, position status in DB must be PENDING_CLOSE."""
+    pos = _make_position(
+        nearest_expiration=_EXPIRY_AT_THRESHOLD,
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+        refreshed = get_position(conn, pos.id)
+
+    assert refreshed is not None
+    assert refreshed.status == PositionStatus.PENDING_CLOSE
+
+
+def test_time_stop_order_persisted_in_db(engine) -> None:
+    """The closing Order returned by broker is inserted into the DB."""
+    pos = _make_position(
+        nearest_expiration=_EXPIRY_AT_THRESHOLD,
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        order = check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+        assert order is not None
+        fetched = get_order(conn, order.id)
+
+    assert fetched is not None
+    assert fetched.role == OrderRole.CLOSE
+    assert fetched.position_id == pos.id
+
+
+# ---------------------------------------------------------------------------
+# Multi-leg: nearest_expiration is the minimum across legs
+# ---------------------------------------------------------------------------
+
+
+def test_time_stop_multi_leg_uses_nearest_expiration(engine) -> None:
+    """nearest_expiration (the min) drives DTE; the farther leg does not block trigger.
+
+    Position has two legs: one expiring in 22 days (above threshold) and one
+    expiring in 20 days (below threshold). nearest_expiration = 20-day leg.
+    time_stop_dte=21 → min_dte=20 <= 21 → must trigger.
+    """
+    near_expiry = date(2026, 7, 9)  # DTE=20 from ET June 19 — nearest leg
+    far_expiry = date(2026, 7, 11)  # DTE=22 — farther leg
+    legs = [
+        PositionLeg(
+            leg=Leg(right="put", side="sell", strike=450.0, expiration=far_expiry),
+            filled_qty=5,
+            avg_fill_price=0.55,
+            status=LegStatus.OPEN,
+        ),
+        PositionLeg(
+            leg=Leg(right="put", side="buy", strike=445.0, expiration=near_expiry),
+            filled_qty=5,
+            avg_fill_price=0.0,
+            status=LegStatus.OPEN,
+        ),
+    ]
+    pos = _make_position(
+        legs=legs,
+        nearest_expiration=near_expiry,  # min of the two legs
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        order = check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert order is not None, (
+        "nearest_expiration (min DTE=20) must trigger even when one leg has DTE=22"
+    )
+    broker.submit_multi_leg.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Idempotency — PENDING_CLOSE guard is non-optional for time-stop
+#
+# Unlike price-based exits (where P&L can move back above threshold),
+# the DTE condition is monotonic: once min_dte <= time_stop_dte, it stays
+# true every cycle until the position fills. Without the PENDING_CLOSE guard,
+# each monitor cycle from trigger day onward would re-submit a closing order.
+# ---------------------------------------------------------------------------
+
+
+def test_time_stop_pending_close_prevents_second_submit(engine) -> None:
+    """PENDING_CLOSE → idempotency guard fires, no second close submitted."""
+    pos = _make_position(
+        nearest_expiration=_EXPIRY_AT_THRESHOLD,
+        status=PositionStatus.PENDING_CLOSE,  # already triggered on a prior cycle
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        result = check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert result is None
+    broker.submit_multi_leg.assert_not_called()
+    broker.submit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Guard conditions: skipped without submitting
+# ---------------------------------------------------------------------------
+
+
+def test_time_stop_equity_position_skipped(engine) -> None:
+    """EQUITY asset_class → return None, no broker call."""
+    pos = _make_position(
+        asset_class=AssetClass.EQUITY,
+        nearest_expiration=_EXPIRY_TODAY,  # DTE=0 — would trigger if not guarded
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        result = check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert result is None
+    broker.submit_multi_leg.assert_not_called()
+    broker.submit.assert_not_called()
+
+
+def test_time_stop_no_exit_plan_skipped(engine) -> None:
+    """exit_plan=None → return None, no broker call, log warning."""
+    pos = _make_position(
+        nearest_expiration=_EXPIRY_TODAY,
+        exit_plan=None,
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        with patch("options_agent.monitor.exits.logger") as mock_logger:
+            result = check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+            mock_logger.warning.assert_called_once()
+
+    assert result is None
+    broker.submit_multi_leg.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "status",
+    [PositionStatus.CLOSED, PositionStatus.EXPIRED, PositionStatus.ASSIGNED],
+)
+def test_time_stop_terminal_position_skipped(engine, status: PositionStatus) -> None:
+    """Terminal statuses (CLOSED, EXPIRED, ASSIGNED) → skipped without submitting."""
+    pos = _make_position(
+        nearest_expiration=_EXPIRY_TODAY,  # DTE=0 — would trigger if not guarded
+        status=status,
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        result = check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert result is None
+    broker.submit_multi_leg.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Timezone correctness: today must be America/New_York, not UTC
+# ---------------------------------------------------------------------------
+
+
+def test_time_stop_market_timezone_not_utc(engine) -> None:
+    """today must be derived from America/New_York, not UTC.
+
+    Setup: now = 2026-06-16 02:00 UTC = June 15 22:00 ET (EDT, UTC-4).
+      UTC date:    June 16  →  (July 7 - June 16).days = 21  → would trigger (wrong)
+      ET date:     June 15  →  (July 7 - June 15).days = 22  → no trigger (correct)
+
+    If the implementation uses UTC.date(), it fires a day early. This test
+    asserts no trigger, which only passes with the ET-derived date.
+    """
+    # 02:00 UTC June 16 = 22:00 ET June 15 (summer, EDT = UTC-4)
+    now_utc = datetime(2026, 6, 16, 2, 0, 0, tzinfo=UTC)
+    # July 7 is 22 calendar days from ET June 15 and 21 days from UTC June 16
+    pos = _make_position(
+        nearest_expiration=date(2026, 7, 7),
+        marked_at=now_utc - timedelta(minutes=2),
+        exit_plan=ExitPlan(
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+        ),
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        result = check_time_stop(pos, conn, broker, now_utc, _MAX_MARK_AGE)
+
+    assert result is None, (
+        "Using ET date (June 15) gives DTE=22 > 21, no trigger. "
+        "UTC date (June 16) gives DTE=21 <= 21, a spurious early trigger."
+    )
+    broker.submit_multi_leg.assert_not_called()
+    broker.submit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Single-leg routing
+# ---------------------------------------------------------------------------
+
+
+def test_time_stop_single_leg_position_uses_submit(engine) -> None:
+    """Single-leg position close uses broker.submit(), not submit_multi_leg()."""
+    single_leg_pos = _make_position(
+        legs=[
+            PositionLeg(
+                leg=Leg(
+                    right="put",
+                    side="sell",
+                    strike=450.0,
+                    expiration=_EXPIRY_AT_THRESHOLD,
+                ),
+                filled_qty=5,
+                avg_fill_price=1.50,
+                status=LegStatus.OPEN,
+            )
+        ],
+        nearest_expiration=_EXPIRY_AT_THRESHOLD,  # DTE=21 → triggers
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(single_leg_pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, single_leg_pos)
+        order = check_time_stop(single_leg_pos, conn, broker, _NOW, _MAX_MARK_AGE)
 
     assert order is not None
     broker.submit.assert_called_once()
