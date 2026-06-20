@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from options_agent.agent.prompts import build_system_prompt
 from options_agent.config import Config, PlaybookConfig
+from options_agent.contracts.data import MarketRegime
 from options_agent.risk.limits import Limits
 
 # ---------------------------------------------------------------------------
@@ -178,44 +179,44 @@ def test_iv_band_label_none() -> None:
 
 def test_regime_label_low_vol() -> None:
     pb = PlaybookConfig()
-    assert pb.regime_label(10.0) == "low-vol"
+    assert pb.regime_label(10.0) == MarketRegime.LOW_VOL
 
 
 def test_regime_label_normal() -> None:
     pb = PlaybookConfig()
-    assert pb.regime_label(20.0) == "normal"
+    assert pb.regime_label(20.0) == MarketRegime.NORMAL
 
 
 def test_regime_label_high_vol() -> None:
     pb = PlaybookConfig()
-    assert pb.regime_label(30.0) == "high-vol"
+    assert pb.regime_label(30.0) == MarketRegime.HIGH_VOL
 
 
 def test_regime_label_none() -> None:
     pb = PlaybookConfig()
-    assert pb.regime_label(None) == "unknown"
+    assert pb.regime_label(None) == MarketRegime.UNKNOWN
 
 
 def test_regime_label_at_vix_high_threshold() -> None:
     pb = PlaybookConfig()
     # Exactly at high threshold → still normal (strictly >)
-    assert pb.regime_label(pb.vix_high_vol_threshold) == "normal"
+    assert pb.regime_label(pb.vix_high_vol_threshold) == MarketRegime.NORMAL
 
 
 def test_regime_label_above_vix_high_threshold() -> None:
     pb = PlaybookConfig()
-    assert pb.regime_label(pb.vix_high_vol_threshold + 0.1) == "high-vol"
+    assert pb.regime_label(pb.vix_high_vol_threshold + 0.1) == MarketRegime.HIGH_VOL
 
 
 def test_regime_label_at_vix_low_threshold() -> None:
     pb = PlaybookConfig()
     # Exactly at low threshold → normal (low-vol is strictly <, not ≤)
-    assert pb.regime_label(pb.vix_low_vol_threshold) == "normal"
+    assert pb.regime_label(pb.vix_low_vol_threshold) == MarketRegime.NORMAL
 
 
 def test_regime_label_just_below_vix_low_threshold() -> None:
     pb = PlaybookConfig()
-    assert pb.regime_label(pb.vix_low_vol_threshold - 0.1) == "low-vol"
+    assert pb.regime_label(pb.vix_low_vol_threshold - 0.1) == MarketRegime.LOW_VOL
 
 
 # ---------------------------------------------------------------------------

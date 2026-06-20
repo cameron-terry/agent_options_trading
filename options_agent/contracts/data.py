@@ -1,9 +1,31 @@
 from datetime import date, datetime
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel
 
 from options_agent.contracts.state import Position
+
+
+class MarketRegime(StrEnum):
+    """VIX-based market volatility regime.
+
+    Single source of truth for the regime labels emitted by data/market.py
+    and consumed by the WP-6 playbook. Using str+Enum lets Pydantic accept
+    both the enum member and its string value for backward compatibility.
+
+    Labels use underscores so they are valid Python identifiers and
+    consistent with all other enum values in this codebase.
+
+    Thresholds live in PlaybookConfig (vix_low_vol_threshold,
+    vix_high_vol_threshold) so they are tunable from config without changing
+    the label contract.
+    """
+
+    LOW_VOL = "low_vol"
+    NORMAL = "normal"
+    HIGH_VOL = "high_vol"
+    UNKNOWN = "unknown"
 
 
 class ChainFilterParams(BaseModel):
@@ -179,7 +201,7 @@ class SymbolSnapshot(BaseModel):
     iv_rank: float | None
     iv_percentile: float | None
     historical_vol: float | None
-    regime: str | None
+    regime: MarketRegime | None
     days_to_earnings: int | None
 
 
@@ -203,7 +225,7 @@ class UniverseSnapshot(BaseModel):
 
     symbol_snapshots: dict[str, SymbolSnapshot]
     vix_level: float
-    market_regime: str
+    market_regime: MarketRegime
     macro_events: list[MacroEvent]
     as_of: datetime
 

@@ -1,11 +1,15 @@
 import tomllib
 from datetime import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import exchange_calendars as xcals
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from options_agent.risk.limits import Limits
+
+if TYPE_CHECKING:
+    from options_agent.contracts.data import MarketRegime
 
 
 class PlaybookConfig(BaseModel):
@@ -116,15 +120,17 @@ class PlaybookConfig(BaseModel):
             return "low"
         return "medium"
 
-    def regime_label(self, vix: float | None) -> str:
-        """Advisory VIX regime name for prompt context."""
+    def regime_label(self, vix: float | None) -> "MarketRegime":
+        """Classify VIX level into the shared MarketRegime enum value."""
+        from options_agent.contracts.data import MarketRegime
+
         if vix is None:
-            return "unknown"
+            return MarketRegime.UNKNOWN
         if vix > self.vix_high_vol_threshold:
-            return "high-vol"
+            return MarketRegime.HIGH_VOL
         if vix < self.vix_low_vol_threshold:
-            return "low-vol"
-        return "normal"
+            return MarketRegime.LOW_VOL
+        return MarketRegime.NORMAL
 
 
 class Config(BaseModel):
