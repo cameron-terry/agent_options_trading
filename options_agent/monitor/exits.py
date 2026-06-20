@@ -226,23 +226,37 @@ def check_profit_target(
     Profit-target trigger formula:
         unrealized_pnl >= profit_target_pct * est_max_profit
 
-    Both sides are always positive: profit_target_pct is in (0, 1] and
-    est_max_profit is always the maximum gain the position can produce,
-    regardless of whether it was opened for a credit or a debit. No
-    credit/debit sign adjustment is needed (unlike the stop-loss formula).
+    profit_target_pct is in (0, 1] — enforced by ExitPlan.profit_target_pct's
+    Field(gt=0) constraint, so it can never produce a zero threshold on its own.
+    est_max_profit carries no positivity constraint in the WP-0 contract; a zero
+    or negative value would set threshold=0 and spuriously trigger for any
+    break-even or profitable position. This function guards that explicitly.
+
+    No credit/debit sign adjustment is needed (unlike the stop-loss formula).
+    est_max_profit is always the maximum gain regardless of strategy direction.
 
     Guards (return None without submitting):
       - pos.asset_class != OPTION_STRATEGY  (EQUITY positions skip all exit rules)
       - pos.exit_plan is None               (should never happen for OPTION_STRATEGY)
+      - pos.est_max_profit <= 0             (data quality: avoids spurious trigger)
       - pos.status in _SKIPPABLE_STATUSES   (idempotency: PENDING_CLOSE skips re-submit)
 
-    Raises MarkStaleError if pos.marked_at is older than max_mark_age of now.
+    Raises MarkStaleError if pos.marked_at is strictly older than max_mark_age of
+    now (mark_age > max_mark_age; a position marked at exactly max_mark_age passes).
+    This is consistent with check_stop_loss. WP-5.5/WP-8 must guarantee reconcile
+    ran before calling this function; a stale mark is a surfaced error, not a
+    silent no-op, because the dangerous direction is missing a trigger.
 
     On trigger:
       - Submits a closing order via broker.submit() or broker.submit_multi_leg()
       - Inserts the Order into the DB via conn
       - Transitions pos.status to PENDING_CLOSE in the DB
       - Returns the submitted Order
+
+    insert_order and update_position are both issued on conn. Atomicity depends on
+    the caller: get_connection(engine) wraps the connection in engine.begin(), so
+    both writes commit or roll back together. Callers that pass an unmanaged
+    Connection must wrap in a transaction themselves.
 
     Returns None if the profit-target threshold has not been reached.
     """
@@ -252,6 +266,15 @@ def check_profit_target(
     if pos.exit_plan is None:
         logger.warning(
             "check_profit_target: position %s has no exit_plan; skipping", pos.id
+        )
+        return None
+
+    if pos.est_max_profit <= 0:
+        logger.warning(
+            "check_profit_target: position %s has est_max_profit=%.4f (expected > 0); "
+            "skipping to avoid spurious trigger at break-even",
+            pos.id,
+            pos.est_max_profit,
         )
         return None
 

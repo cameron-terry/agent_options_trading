@@ -709,49 +709,51 @@ def test_profit_target_debit_strategy_triggers_at_pct_of_max_profit(engine) -> N
     )
 
 
-def test_profit_target_cross_strategy_symmetry_same_pct_same_trigger() -> None:
-    """50% profit target triggers identically for credit and debit strategies."""
+def test_profit_target_cross_strategy_symmetry_same_pct_same_trigger(engine) -> None:
+    """50% profit target triggers identically for credit and debit strategies.
+
+    Actually calls check_profit_target to verify the evaluator itself is
+    symmetric, not just the arithmetic.
+    """
     pct = 0.50
     max_profit = 1000.0
     threshold = pct * max_profit  # 500.0
+    exit_plan = ExitPlan(
+        profit_target_pct=pct, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+    )
 
     for entry_net_amount in (-300.0, 300.0):  # credit then debit
         label = "credit" if entry_net_amount < 0 else "debit"
 
-        # At threshold: must trigger
+        # At threshold: evaluator must fire
         pos_at = _make_position(
             entry_net_amount=entry_net_amount,
             est_max_profit=max_profit,
             unrealized_pnl=threshold,
-            exit_plan=ExitPlan(
-                profit_target_pct=pct,
-                stop_loss_max_loss_fraction=0.5,
-                time_stop_dte=21,
-            ),
+            exit_plan=exit_plan,
         )
-        assert pos_at.exit_plan is not None
-        computed_threshold = pos_at.exit_plan.profit_target_pct * pos_at.est_max_profit
-        assert computed_threshold == threshold, (
-            f"{label}: expected threshold {threshold}, got {computed_threshold}"
-        )
-        assert pos_at.unrealized_pnl >= computed_threshold, (
-            f"{label}: pnl={pos_at.unrealized_pnl} should be >= {computed_threshold}"
+        broker_at = _make_broker_mock(pos_at.id)
+        with get_connection(engine) as conn:
+            insert_position(conn, pos_at)
+            order = check_profit_target(pos_at, conn, broker_at, _NOW, _MAX_MARK_AGE)
+        assert order is not None, (
+            f"{label}: evaluator must trigger at threshold pnl={threshold}"
         )
 
-        # Just below threshold: must not trigger
+        # Just below threshold: evaluator must not fire
         pos_below = _make_position(
             entry_net_amount=entry_net_amount,
             est_max_profit=max_profit,
             unrealized_pnl=threshold - 1.0,
-            exit_plan=ExitPlan(
-                profit_target_pct=pct,
-                stop_loss_max_loss_fraction=0.5,
-                time_stop_dte=21,
-            ),
+            exit_plan=exit_plan,
         )
-        assert pos_below.unrealized_pnl < computed_threshold, (
-            f"{label}: P&L below threshold should not trigger"
-        )
+        broker_below = _make_broker_mock(pos_below.id)
+        with get_connection(engine) as conn:
+            insert_position(conn, pos_below)
+            order = check_profit_target(
+                pos_below, conn, broker_below, _NOW, _MAX_MARK_AGE
+            )
+        assert order is None, f"{label}: evaluator must not trigger below threshold"
 
 
 # ---------------------------------------------------------------------------
@@ -791,6 +793,30 @@ def test_profit_target_no_exit_plan_skipped(engine) -> None:
 
     assert result is None
     broker.submit_multi_leg.assert_not_called()
+
+
+def test_profit_target_zero_max_profit_skipped(engine) -> None:
+    """est_max_profit=0 → skip with warning; prevents spurious trigger at break-even.
+
+    TradeProposal.est_max_profit carries no positivity constraint in the WP-0
+    contract. A zero value would make threshold=0.0 and fire for any position
+    with unrealized_pnl >= 0 — i.e., every break-even or profitable position.
+    """
+    pos = _make_position(
+        est_max_profit=0.0,
+        unrealized_pnl=0.0,  # break-even — must NOT trigger
+        exit_plan=_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        with patch("options_agent.monitor.exits.logger") as mock_logger:
+            result = check_profit_target(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+            mock_logger.warning.assert_called_once()
+
+    assert result is None
+    broker.submit_multi_leg.assert_not_called()
+    broker.submit.assert_not_called()
 
 
 def test_profit_target_pending_close_position_skipped(engine) -> None:
