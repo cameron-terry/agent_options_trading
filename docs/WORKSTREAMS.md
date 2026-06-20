@@ -1,7 +1,7 @@
 # WORKSTREAMS — AI Options Trading Agent
 
 > Companion to `options-agent-plan.md`. That doc is the design; this doc is the **work breakdown**.
-> **Last updated:** 2026-06-14
+> **Last updated:** 2026-06-20
 
 ---
 
@@ -276,7 +276,7 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 
 ## WP-5 — Monitor `area:risk` `area:orchestration`
 
-**Owner:** _TBD_ · **Status:** _not started_ · **Can start:** after WP-1 + WP-2 + WP-4 exist
+**Owner:** cameron-terry · **Status:** _complete_ · **Can start:** after WP-1 + WP-2 + WP-4 exist
 
 **Goal.** The fast, deterministic exit loop. No model, no context assembly.
 
@@ -303,9 +303,9 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 - Idempotency (don't double-submit a close).
 
 **Definition of done**
-- [ ] Each exit rule triggers correctly against simulated positions.
-- [ ] Closes route through WP-1; outcomes journaled via WP-2.
-- [ ] Re-entrant safe: running twice doesn't duplicate closing orders.
+- [x] Each exit rule triggers correctly against simulated positions.
+- [x] Closes route through WP-1; outcomes journaled via WP-2.
+- [x] Re-entrant safe: running twice doesn't duplicate closing orders.
 
 ---
 
