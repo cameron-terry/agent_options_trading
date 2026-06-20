@@ -1451,6 +1451,34 @@ def test_stop_loss_partially_filled_close_blocks_second_submit(engine) -> None:
     broker.submit.assert_not_called()
 
 
+def test_profit_target_partially_filled_close_blocks_second_submit(engine) -> None:
+    """PARTIALLY_FILLED CLOSE order blocks a new profit-target close.
+
+    Symmetry with the stop-loss and time-stop PARTIALLY_FILLED tests: all three
+    evaluators must block on a partial close, since has_pending_close is the
+    shared guard. This test verifies profit-target doesn't slip through.
+    """
+    pos = _make_position(
+        status=PositionStatus.OPEN,
+        unrealized_pnl=5000.0,  # massively profitable — would trigger
+        est_max_profit=275.0,
+        exit_plan=_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    partial_close = _make_close_order(pos.id, status=OrderStatus.PARTIALLY_FILLED)
+
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, partial_close)
+        result = check_profit_target(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert result is None, (
+        "PARTIALLY_FILLED CLOSE order must block a second profit-target close"
+    )
+    broker.submit_multi_leg.assert_not_called()
+    broker.submit.assert_not_called()
+
+
 def test_time_stop_partially_filled_close_blocks_second_submit(engine) -> None:
     """PARTIALLY_FILLED CLOSE order blocks a new time-stop close.
 
