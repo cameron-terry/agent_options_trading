@@ -301,7 +301,7 @@ SCENARIO_B = EvalScenario(
     id="B_low_iv_bullish",
     description=(
         "QQQ-only universe: iv_rank=12 (low band, < 25th percentile), bullish "
-        "regime, VIX=12.5 (low-vol), no events, flat portfolio. Agent should "
+        "regime, VIX=12.5 (low_vol), no events, flat portfolio. Agent should "
         "choose a debit spread (buy premium), not sell premium. Without this "
         "scenario, a prompt regression that makes the agent always sell premium "
         "would pass Scenario A."

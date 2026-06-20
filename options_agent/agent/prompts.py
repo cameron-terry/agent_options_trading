@@ -33,11 +33,11 @@ def build_system_prompt(playbook: PlaybookConfig, limits: Limits) -> str:
     # VIX regime table built as a variable to keep source lines within 88 chars.
     vix_rows = "\n".join(
         [
-            f"| < {vix_low:.0f} | low-vol"
+            f"| < {vix_low:.0f} | low_vol"
             " | Calm; premium thin; debit spreads suit directional moves |",
             f"| {vix_low:.0f}–{vix_high:.0f} | normal"
             " | Standard; weigh IV-rank and thesis normally |",
-            f"| > {vix_high:.0f} | high-vol"
+            f"| > {vix_high:.0f} | high_vol"
             " | Elevated fear; caution with directional credit spreads |",
         ]
     )
@@ -112,7 +112,7 @@ def build_system_prompt(playbook: PlaybookConfig, limits: Limits) -> str:
         "\n"
         "Read the VIX level from get_universe_snapshot() and use it as context "
         "for your directional thesis. Named for volatility level, not market "
-        "direction (low-vol ≠ bullish).\n"
+        "direction (low_vol ≠ bullish).\n"
         "\n"
         "| VIX | Regime | Advisory context |\n"
         "|---|---|---|\n"

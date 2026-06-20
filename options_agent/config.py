@@ -29,7 +29,7 @@ class PlaybookConfig(BaseModel):
       None                             → iv_rank unknown; agent must propose NO_ACTION
 
     VIX regime tiers are advisory context for the agent's thesis, not enforced rules.
-    Named for volatility level, not market direction (low-vol ≠ bullish).
+    Named for volatility level, not market direction (low_vol ≠ bullish).
     """
 
     playbook_version: str = "1.0.0"

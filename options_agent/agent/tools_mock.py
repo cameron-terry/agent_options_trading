@@ -541,7 +541,7 @@ def _get_flat_portfolio(_tool_input: dict[str, Any]) -> PortfolioState:
 # ──────────────────────────────────────────────────────────────────────────────
 # Scenario B — QQQ low-IV bullish
 # Universe: QQQ only, iv_rank=12 (12th percentile → low band < 25th threshold)
-# Regime: bullish; VIX=12.5 (low-vol < 15 threshold); no events
+# Regime: bullish; VIX=12.5 (low_vol < 15 threshold); no events
 # Portfolio: flat
 # Expected: strategy in low_iv_strategies (bull_call_spread or bear_put_spread)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -655,7 +655,7 @@ _LOW_IV_BULLISH_UNIVERSE = UniverseSnapshot(
             days_to_earnings=None,
         ),
     },
-    vix_level=12.5,  # low-vol regime (< 15.0 threshold)
+    vix_level=12.5,  # low_vol regime (< 15.0 threshold)
     market_regime=MarketRegime.LOW_VOL,
     macro_events=[],
     as_of=_AS_OF,

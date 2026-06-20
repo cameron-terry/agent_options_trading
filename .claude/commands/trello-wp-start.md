@@ -91,6 +91,20 @@ uv run pytest                # tests
 - Re-run the full sequence from the top until all four pass.
 - Do not proceed to Phase 6 while any gate is red.
 
+### Phase 5.5 — Update feature docs
+
+After CI passes, update `docs/features/` to reflect what landed in this WP:
+
+- **Extending an existing sub-system** (new functions or behaviour added to `data/`, `state/`, `risk/`, etc.): update the matching `docs/features/*.md` — add or revise the relevant section, update the status line and sub-modules table if needed.
+- **New sub-system** (new top-level module or directory with no existing feature doc): create `docs/features/<name>.md` following the style of the other feature docs:
+  - Header block: Module path, credentials required, status (WP number)
+  - Sub-modules table
+  - Usage examples (runnable Python snippets or CLI commands)
+  - Any important invariants or failure modes
+- **New `docs/features/*.md` created**: add a row to the sub-systems table in `README.md`.
+
+Include all doc file changes in the same commit in Phase 6 (or as an immediately following commit on the same branch before the PR is opened).
+
 ### Phase 6 — Open a PR
 
 Once all CI gates are green, commit the work and open a pull request:

@@ -88,8 +88,8 @@ iv_rank_low_threshold  = 0.25   # < this → low band (buy premium); between →
 
 # VIX regime tiers (advisory context only — not enforced by the validator).
 # Named for volatility level, not market direction.
-vix_high_vol_threshold = 25.0   # > this → high-vol
-vix_low_vol_threshold  = 15.0   # < this → low-vol; between → normal
+vix_high_vol_threshold = 25.0   # > this → high_vol
+vix_low_vol_threshold  = 15.0   # < this → low_vol; between → normal
 
 # Strategy sets per IV band.
 # High/low are hard-enforced; medium is permissive (agent picks based on thesis).

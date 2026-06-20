@@ -311,7 +311,7 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 
 ## WP-6 — Agent & Reasoning `area:agent`
 
-**Owner:** _TBD_ · **Status:** _not started_ · **Can start:** immediately (mocks everything else)
+**Owner:** _TBD_ · **Status:** _complete_ · **Can start:** immediately (mocks everything else)
 
 **Goal.** The single LLM call that consumes context and emits a `TradeProposal`. **No execution tool.**
 
@@ -341,10 +341,10 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 - Prompt eval harness (fixed mocked context → expected proposal properties).
 
 **Definition of done**
-- [ ] Given a fixed mocked context, emits a **schema-valid** `TradeProposal`.
-- [ ] `iv_rationale` and `catalyst_check` are always populated and non-trivial.
-- [ ] Strategy is always within the allowed playbook.
-- [ ] Has **no** path to placing an order (verified).
+- [x] Given a fixed mocked context, emits a **schema-valid** `TradeProposal`.
+- [x] `iv_rationale` and `catalyst_check` are always populated and non-trivial.
+- [x] Strategy is always within the allowed playbook.
+- [x] Has **no** path to placing an order (verified).
 
 ---
 
