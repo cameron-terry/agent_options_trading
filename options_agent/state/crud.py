@@ -32,6 +32,7 @@ from options_agent.contracts.state import (
     FillEvent,
     LegFill,
     Order,
+    OrderRole,
     OrderStatus,
     Position,
     PositionStatus,
@@ -54,6 +55,11 @@ _TERMINAL_ORDER_STATUSES = {
     OrderStatus.REJECTED,
     OrderStatus.EXPIRED,
 }
+
+# Roles that represent "this exposure is being closed / already being handled".
+# ROLL is included: a working roll is mechanically closing the position and
+# re-opening a replacement, so submitting a CLOSE on top of it is a double-exit.
+_EXPOSURE_CLOSING_ROLES = frozenset({OrderRole.CLOSE, OrderRole.ROLL})
 
 
 def _ensure_utc(dt: datetime | None) -> datetime | None:
@@ -328,6 +334,42 @@ def list_pending_orders(conn: Connection) -> list[Order]:
         .order_by(orders_table.c.submitted_at)
     ).fetchall()
     return [_row_to_order(r) for r in rows]
+
+
+def has_pending_close(conn: Connection, position_id: str) -> bool:
+    """Return True if any non-terminal CLOSE or ROLL order exists for position_id.
+
+    This is the Order-table layer of idempotency, complementing the position-status
+    layer (_SKIPPABLE_STATUSES in monitor/exits.py). It guards the desync window
+    where a closing order was inserted (insert_order) but the position status was
+    not yet updated to PENDING_CLOSE (update_position) — e.g., a crash between the
+    two writes.
+
+    ROLL is included alongside CLOSE because a working roll is mechanically closing
+    the position; submitting a CLOSE on top of a working ROLL is a double-exit.
+
+    Pending = non-terminal = {PENDING_SUBMIT, WORKING, PARTIALLY_FILLED}.
+    PARTIALLY_FILLED is the most important case: a partial close means the position
+    still shows open exposure but a closing order is actively filling — stacking a
+    second close would double the closing quantity.
+
+    Callers must guarantee reconcile ran before this check (the same freshness
+    contract enforced by MarkStaleError for the P&L-based exit evaluators).
+    For check_time_stop (mark-independent), the monitor cycle is still expected
+    to run reconcile at cycle-top.
+    """
+    terminal_values = [s.value for s in _TERMINAL_ORDER_STATUSES]
+    role_values = [r.value for r in _EXPOSURE_CLOSING_ROLES]
+    row = conn.execute(
+        sa.select(orders_table.c.id)
+        .where(
+            orders_table.c.position_id == position_id,
+            orders_table.c.role.in_(role_values),
+            orders_table.c.status.notin_(terminal_values),
+        )
+        .limit(1)
+    ).first()
+    return row is not None
 
 
 # ---------------------------------------------------------------------------

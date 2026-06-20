@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/monitor/`  
 **Credentials required:** none (exit rule evaluators are pure logic against cached position state)  
-**Status:** in progress (WP-5.1 stop-loss ✓, WP-5.2 profit-target ✓, WP-5.3 DTE ✓; WP-5.4 idempotency, WP-5.5 cycle body pending)
+**Status:** in progress (WP-5.1 stop-loss ✓, WP-5.2 profit-target ✓, WP-5.3 DTE ✓, WP-5.4 idempotency ✓; WP-5.5 cycle body pending)
 
 The fast, deterministic exit loop. No LLM, no context assembly — per-position rule evaluation that runs every 1–5 minutes during market hours. Rules read cached state from the last reconcile cycle; the monitor never makes live broker quote calls for individual positions.
 
@@ -16,9 +16,34 @@ The fast, deterministic exit loop. No LLM, no context assembly — per-position 
 
 **Reconcile-at-cycle-top is mandatory for price-based exits.** `check_stop_loss` and `check_profit_target` read `pos.unrealized_pnl` and `pos.current_mark` from the last-reconciled `Position`. If `pos.marked_at` is older than `max_mark_age`, they raise `MarkStaleError` — a surfaced, alertable error, not a silent no-op. `check_time_stop` does not enforce staleness (DTE is mark-independent), but still benefits from fresh status reads. WP-5.5 / WP-8 must guarantee reconcile runs before any evaluator call.
 
-**Inline `PENDING_CLOSE` guard is the idempotency floor.** Each evaluator checks `pos.status in _SKIPPABLE_STATUSES` before evaluating. This prevents re-submission while a closing order is pending fill. WP-5.4 will formalize `has_pending_close(position_id)`; until then the inline status check is load-bearing.
+**Two-layer idempotency prevents duplicate closing orders.** Each evaluator checks two complementary guards before calling `submit()`:
+
+1. **Position-status layer** (`_SKIPPABLE_STATUSES`): cheap in-memory check. Skips positions in `PENDING_CLOSE`, `CLOSED`, etc. Catches the normal case where position status correctly reflects a prior close.
+
+2. **Order-table layer** (`has_pending_close`): queries the `Order` table for any non-terminal `CLOSE` or `ROLL` order on the position. Catches the desync window where `insert_order` succeeded but `update_position` → `PENDING_CLOSE` did not (e.g., a crash between the two writes). `ROLL` is included because a working roll is mechanically closing the position. `PARTIALLY_FILLED` is in the pending set — stacking a second close on top of a partial-fill close would double the closing quantity.
+
+The two layers resolve disagreement toward caution: if either says a close is in flight, no new close is submitted. The position-status check short-circuits before the Order-table query on the common path.
 
 **EQUITY positions always skip.** All evaluators return `None` immediately if `pos.asset_class != OPTION_STRATEGY`. EQUITY positions (from assignment) have no `exit_plan`.
+
+## Idempotency guard (`has_pending_close`)
+
+**Signature:** `has_pending_close(conn: Connection, position_id: str) -> bool`  
+**Location:** `state/crud.py` (imported by `monitor/exits.py`)
+
+Returns `True` if any non-terminal `CLOSE` or `ROLL` order exists for `position_id` in the `Order` table. Called by all three exit evaluators after the position-status check and (for `check_stop_loss` / `check_profit_target`) after `MarkStaleError` — ensuring a stale Order table is never consulted.
+
+```python
+from options_agent.state.crud import has_pending_close
+
+with get_connection(engine) as conn:
+    if has_pending_close(conn, pos.id):
+        # a closing order is already in flight — skip
+        pass
+```
+
+**Pending statuses:** `PENDING_SUBMIT`, `WORKING`, `PARTIALLY_FILLED`  
+**Closing roles:** `CLOSE`, `ROLL` (defined as `_EXPOSURE_CLOSING_ROLES` in `state/crud.py`)
 
 ## Stop-loss (`check_stop_loss`)
 

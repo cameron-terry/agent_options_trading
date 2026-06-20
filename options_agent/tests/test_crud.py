@@ -22,6 +22,7 @@ from options_agent.contracts.state import (
 from options_agent.state.crud import (
     get_order,
     get_position,
+    has_pending_close,
     insert_order,
     insert_position,
     list_open_positions,
@@ -453,3 +454,161 @@ def test_patch_order_missing_id_raises(engine):
     with pytest.raises(KeyError, match="ord-ghost"):
         with get_connection(engine) as conn:
             patch_order(conn, "ord-ghost", status=OrderStatus.WORKING)
+
+
+# ---------------------------------------------------------------------------
+# has_pending_close — WP-5.4 idempotency guard (Order-table layer)
+# ---------------------------------------------------------------------------
+
+
+def test_has_pending_close_false_when_no_orders(engine) -> None:
+    """No orders at all → has_pending_close returns False."""
+    pos = _pos(id="pos-hpc-empty")
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        assert has_pending_close(conn, "pos-hpc-empty") is False
+
+
+def test_has_pending_close_true_for_pending_submit_close(engine) -> None:
+    """PENDING_SUBMIT CLOSE order → returns True."""
+    pos = _pos(id="pos-hpc-pending")
+    ord_ = _order(
+        id="ord-hpc-pending",
+        position_id="pos-hpc-pending",
+        role=OrderRole.CLOSE,
+        status=OrderStatus.PENDING_SUBMIT,
+    )
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, ord_)
+        assert has_pending_close(conn, "pos-hpc-pending") is True
+
+
+def test_has_pending_close_true_for_working_close(engine) -> None:
+    """WORKING CLOSE order → returns True."""
+    pos = _pos(id="pos-hpc-working")
+    ord_ = _order(
+        id="ord-hpc-working",
+        position_id="pos-hpc-working",
+        role=OrderRole.CLOSE,
+        status=OrderStatus.WORKING,
+        broker_order_id="alpaca-w1",
+    )
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, ord_)
+        assert has_pending_close(conn, "pos-hpc-working") is True
+
+
+def test_has_pending_close_true_for_partially_filled_close(engine) -> None:
+    """PARTIALLY_FILLED CLOSE order → returns True.
+
+    This is the primary case: partial fill means the position still shows open
+    exposure, but a closing order is actively filling. Stacking a second close
+    would double the closing quantity.
+    """
+    pos = _pos(id="pos-hpc-partial")
+    ord_ = _order(
+        id="ord-hpc-partial",
+        position_id="pos-hpc-partial",
+        role=OrderRole.CLOSE,
+        status=OrderStatus.PARTIALLY_FILLED,
+        broker_order_id="alpaca-p1",
+        filled_qty=2,
+    )
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, ord_)
+        assert has_pending_close(conn, "pos-hpc-partial") is True
+
+
+def test_has_pending_close_true_for_working_roll(engine) -> None:
+    """WORKING ROLL order → returns True.
+
+    A roll is mechanically closing the position; submitting a CLOSE on top of a
+    working ROLL is a double-exit.
+    """
+    pos = _pos(id="pos-hpc-roll")
+    ord_ = _order(
+        id="ord-hpc-roll",
+        position_id="pos-hpc-roll",
+        role=OrderRole.ROLL,
+        status=OrderStatus.WORKING,
+        broker_order_id="alpaca-r1",
+    )
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, ord_)
+        assert has_pending_close(conn, "pos-hpc-roll") is True
+
+
+def test_has_pending_close_false_for_filled_close(engine) -> None:
+    """FILLED CLOSE order is terminal → returns False (position should be CLOSED)."""
+    pos = _pos(id="pos-hpc-filled")
+    ord_ = _order(
+        id="ord-hpc-filled",
+        position_id="pos-hpc-filled",
+        role=OrderRole.CLOSE,
+        status=OrderStatus.FILLED,
+        broker_order_id="alpaca-f1",
+        filled_qty=5,
+    )
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, ord_)
+        assert has_pending_close(conn, "pos-hpc-filled") is False
+
+
+def test_has_pending_close_false_for_cancelled_close(engine) -> None:
+    """CANCELLED CLOSE order is terminal → returns False."""
+    pos = _pos(id="pos-hpc-cancelled")
+    ord_ = _order(
+        id="ord-hpc-cancelled",
+        position_id="pos-hpc-cancelled",
+        role=OrderRole.CLOSE,
+        status=OrderStatus.CANCELLED,
+        broker_order_id="alpaca-c1",
+    )
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, ord_)
+        assert has_pending_close(conn, "pos-hpc-cancelled") is False
+
+
+def test_has_pending_close_false_for_open_order_different_role(engine) -> None:
+    """WORKING OPEN order on the same position → returns False.
+
+    Only CLOSE and ROLL roles indicate a pending exit; an OPEN order does not.
+    """
+    pos = _pos(id="pos-hpc-open-role")
+    ord_ = _order(
+        id="ord-hpc-open-role",
+        position_id="pos-hpc-open-role",
+        role=OrderRole.OPEN,
+        status=OrderStatus.WORKING,
+        broker_order_id="alpaca-o1",
+    )
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, ord_)
+        assert has_pending_close(conn, "pos-hpc-open-role") is False
+
+
+def test_has_pending_close_false_for_different_position(engine) -> None:
+    """WORKING CLOSE order on a different position → returns False for the target."""
+    pos_a = _pos(id="pos-hpc-a")
+    pos_b = _pos(id="pos-hpc-b")
+    ord_ = _order(
+        id="ord-hpc-other-pos",
+        position_id="pos-hpc-a",
+        role=OrderRole.CLOSE,
+        status=OrderStatus.WORKING,
+        broker_order_id="alpaca-x1",
+    )
+    with get_connection(engine) as conn:
+        insert_position(conn, pos_a)
+        insert_position(conn, pos_b)
+        insert_order(conn, ord_)
+        # The CLOSE order is for pos-hpc-a, not pos-hpc-b
+        assert has_pending_close(conn, "pos-hpc-b") is False
+        assert has_pending_close(conn, "pos-hpc-a") is True
