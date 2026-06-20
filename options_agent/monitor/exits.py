@@ -1,8 +1,9 @@
-"""Stop-loss exit rule evaluator for WP-5.1.
+"""Exit rule evaluators for WP-5.1 (stop-loss) and WP-5.2 (profit-target).
 
 Public contract
 ---------------
 check_stop_loss(pos, conn, broker, now, max_mark_age) -> Order | None
+check_profit_target(pos, conn, broker, now, max_mark_age) -> Order | None
 
 Callers (WP-5.5 / WP-8) MUST run reconcile before calling this function so
 that pos.marked_at reflects the current cycle. The staleness check on
@@ -191,6 +192,98 @@ def check_stop_loss(
         threshold,
         pos.exit_plan.stop_loss_max_loss_fraction,
         pos.est_max_loss,
+    )
+
+    close_proposal = _close_proposal(pos)
+    limit_price = _closing_limit_price(pos, limit_offset)
+
+    if len(pos.legs) == 1:
+        order = broker.submit(
+            close_proposal, pos.quantity, limit_price, pos.id, role=OrderRole.CLOSE
+        )
+    else:
+        order = broker.submit_multi_leg(
+            close_proposal, pos.quantity, limit_price, pos.id, role=OrderRole.CLOSE
+        )
+
+    updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
+    insert_order(conn, order)
+    update_position(conn, updated_pos)
+
+    return order
+
+
+def check_profit_target(
+    pos: Position,
+    conn: Connection,
+    broker: BrokerClient,
+    now: datetime,
+    max_mark_age: timedelta,
+    limit_offset: float = 0.01,
+) -> Order | None:
+    """Evaluate profit-target for pos; submit and persist a closing order if reached.
+
+    Profit-target trigger formula:
+        unrealized_pnl >= profit_target_pct * est_max_profit
+
+    Both sides are always positive: profit_target_pct is in (0, 1] and
+    est_max_profit is always the maximum gain the position can produce,
+    regardless of whether it was opened for a credit or a debit. No
+    credit/debit sign adjustment is needed (unlike the stop-loss formula).
+
+    Guards (return None without submitting):
+      - pos.asset_class != OPTION_STRATEGY  (EQUITY positions skip all exit rules)
+      - pos.exit_plan is None               (should never happen for OPTION_STRATEGY)
+      - pos.status in _SKIPPABLE_STATUSES   (idempotency: PENDING_CLOSE skips re-submit)
+
+    Raises MarkStaleError if pos.marked_at is older than max_mark_age of now.
+
+    On trigger:
+      - Submits a closing order via broker.submit() or broker.submit_multi_leg()
+      - Inserts the Order into the DB via conn
+      - Transitions pos.status to PENDING_CLOSE in the DB
+      - Returns the submitted Order
+
+    Returns None if the profit-target threshold has not been reached.
+    """
+    if pos.asset_class != AssetClass.OPTION_STRATEGY:
+        return None
+
+    if pos.exit_plan is None:
+        logger.warning(
+            "check_profit_target: position %s has no exit_plan; skipping", pos.id
+        )
+        return None
+
+    if pos.status in _SKIPPABLE_STATUSES:
+        return None
+
+    marked_at_utc = (
+        pos.marked_at
+        if pos.marked_at.tzinfo is not None
+        else pos.marked_at.replace(tzinfo=UTC)
+    )
+    mark_age = now - marked_at_utc
+    if mark_age > max_mark_age:
+        raise MarkStaleError(
+            f"Position {pos.id!r} mark is {mark_age.total_seconds():.0f}s old "
+            f"(max allowed: {max_mark_age.total_seconds():.0f}s). "
+            "WP-5.5/WP-8 must run reconcile at the top of each monitor cycle "
+            "before calling exit evaluators."
+        )
+
+    threshold = pos.exit_plan.profit_target_pct * pos.est_max_profit
+    if pos.unrealized_pnl < threshold:
+        return None
+
+    logger.info(
+        "profit-target triggered: position=%s unrealized_pnl=%.4f threshold=%.4f "
+        "(pct=%.2f est_max_profit=%.4f)",
+        pos.id,
+        pos.unrealized_pnl,
+        threshold,
+        pos.exit_plan.profit_target_pct,
+        pos.est_max_profit,
     )
 
     close_proposal = _close_proposal(pos)

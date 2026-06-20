@@ -67,3 +67,4 @@ uv run pyright
 | Agent tools & mock harness | `options_agent/agent/` | Yes — [docs](docs/features/agent-tools.md) |
 | Observability & safety | `options_agent/obs/` | Yes (SQLite) — [docs](docs/features/observability.md) |
 | Vertical slice | `options_agent/orchestrator.py` | No (needs Alpaca keys) — [docs](docs/features/vertical-slice.md) |
+| Monitor — exit rules | `options_agent/monitor/` | Yes — [docs](docs/features/monitor.md) |
