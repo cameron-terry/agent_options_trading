@@ -360,6 +360,21 @@ def test_equity_position_skipped(engine) -> None:
     broker.submit.assert_not_called()
 
 
+def test_equity_position_logged(engine) -> None:
+    """EQUITY asset_class → log.info emitted so the position is visible in logs."""
+    pos = _make_position(
+        asset_class=AssetClass.EQUITY,
+        unrealized_pnl=-5000.0,
+        exit_plan=_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        with patch("options_agent.monitor.exits.logger") as mock_logger:
+            check_stop_loss(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+            mock_logger.info.assert_called_once()
+
+
 def test_no_exit_plan_skipped(engine) -> None:
     """exit_plan=None → return None, no broker call, log warning."""
     pos = _make_position(
@@ -785,6 +800,21 @@ def test_profit_target_equity_position_skipped(engine) -> None:
     broker.submit.assert_not_called()
 
 
+def test_profit_target_equity_position_logged(engine) -> None:
+    """EQUITY asset_class → log.info emitted so the position is visible in logs."""
+    pos = _make_position(
+        asset_class=AssetClass.EQUITY,
+        unrealized_pnl=5000.0,
+        exit_plan=_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        with patch("options_agent.monitor.exits.logger") as mock_logger:
+            check_profit_target(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+            mock_logger.info.assert_called_once()
+
+
 def test_profit_target_no_exit_plan_skipped(engine) -> None:
     """exit_plan=None → return None, no broker call, log warning."""
     pos = _make_position(
@@ -1196,6 +1226,21 @@ def test_time_stop_equity_position_skipped(engine) -> None:
     assert result is None
     broker.submit_multi_leg.assert_not_called()
     broker.submit.assert_not_called()
+
+
+def test_time_stop_equity_position_logged(engine) -> None:
+    """EQUITY asset_class → log.info emitted so the position is visible in logs."""
+    pos = _make_position(
+        asset_class=AssetClass.EQUITY,
+        nearest_expiration=_EXPIRY_TODAY,  # DTE=0 — would trigger if not guarded
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        with patch("options_agent.monitor.exits.logger") as mock_logger:
+            check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+            mock_logger.info.assert_called_once()
 
 
 def test_time_stop_no_exit_plan_skipped(engine) -> None:
