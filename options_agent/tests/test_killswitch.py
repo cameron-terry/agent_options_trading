@@ -12,6 +12,8 @@ Critical invariants tested explicitly:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 import sqlalchemy as sa
 
@@ -259,39 +261,41 @@ def test_entry_cycle_fail_closed_on_db_error(engine) -> None:
 # Monitor cycle: kill-switch check
 # ---------------------------------------------------------------------------
 
-
-def test_monitor_cycle_raises_not_implemented_under_none(engine) -> None:
-    """Monitor cycle under NONE still raises NotImplementedError (WP-5 stub)."""
-    with pytest.raises(NotImplementedError):
-        run_monitor_cycle(positions=[], config=Config(), engine=engine)
+# Juneteenth 2026 — NYSE closed; lets us test monitor cycle without a broker.
+_MC_CLOSED_NOW = datetime(2026, 6, 19, 18, 0, tzinfo=UTC)
 
 
-def test_monitor_cycle_raises_not_implemented_under_halt(engine) -> None:
-    """Monitor runs normally under HALT (not frozen) — body still not implemented."""
+def test_monitor_cycle_returns_result_under_none(engine) -> None:
+    """Under NONE, monitor returns an empty MonitorResult without error."""
+    result = run_monitor_cycle(Config(), engine=engine, _now=_MC_CLOSED_NOW)
+    assert result.exits_triggered == []
+    assert result.errors == []
+
+
+def test_monitor_cycle_not_blocked_by_halt(engine) -> None:
+    """HALT does not block the monitor cycle — exits still evaluate."""
     with get_connection(engine) as conn:
         set_state(conn, KillSwitchState.HALT, set_by="test", reason="halt test")
 
-    # Under HALT the monitor must NOT short-circuit — it proceeds to evaluate exits.
-    # Since WP-5 is not implemented, we reach NotImplementedError (correct).
-    with pytest.raises(NotImplementedError):
-        run_monitor_cycle(positions=[], config=Config(), engine=engine)
+    # Market is closed so no exits fire, but the cycle must not short-circuit.
+    result = run_monitor_cycle(Config(), engine=engine, _now=_MC_CLOSED_NOW)
+    assert result.errors == []
 
 
-def test_monitor_cycle_raises_not_implemented_under_flatten(engine) -> None:
-    """Monitor proceeds under FLATTEN (closes positions) — body not yet implemented."""
+def test_monitor_cycle_proceeds_under_flatten(engine) -> None:
+    """Monitor proceeds under FLATTEN without raising."""
     with get_connection(engine) as conn:
         set_state(conn, KillSwitchState.FLATTEN, set_by="test", reason="flatten test")
 
-    with pytest.raises(NotImplementedError):
-        run_monitor_cycle(positions=[], config=Config(), engine=engine)
+    result = run_monitor_cycle(Config(), engine=engine, _now=_MC_CLOSED_NOW)
+    assert result.errors == []
 
 
 def test_monitor_cycle_proceeds_on_db_error(engine) -> None:
     """Monitor cycle continues with NONE semantics when kill-switch DB read fails.
 
-    Fail-safe for monitor: normal exit evaluation continues; we never
-    auto-FLATTEN on an unreadable flag.  The monitor reaching NotImplementedError
-    proves it did not short-circuit.
+    Fail-safe: normal exit evaluation continues; we never auto-FLATTEN on an
+    unreadable flag.
     """
     from options_agent import orchestrator as _orch
 
@@ -302,7 +306,7 @@ def test_monitor_cycle_proceeds_on_db_error(engine) -> None:
 
     _orch.get_current_state = _raise
     try:
-        with pytest.raises(NotImplementedError):
-            run_monitor_cycle(positions=[], config=Config(), engine=engine)
+        result = run_monitor_cycle(Config(), engine=engine, _now=_MC_CLOSED_NOW)
+        assert result.errors == []
     finally:
         _orch.get_current_state = original

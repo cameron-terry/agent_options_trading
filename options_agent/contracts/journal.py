@@ -4,7 +4,12 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from options_agent.contracts.results import ValidationRuleId
-from options_agent.contracts.state import ActionTaken, ContextSnapshot, Decision
+from options_agent.contracts.state import (
+    ActionTaken,
+    ContextSnapshot,
+    Decision,
+    ExitReason,
+)
 
 
 class OutcomeEventType(StrEnum):
@@ -41,6 +46,10 @@ class OutcomeRecord(BaseModel):
     realized_pnl: float
     fill_price: float | None = None
     closing_order_id: str | None = None
+    # Which monitor rule closed this position — queryable by WP-7 to attribute
+    # performance by exit trigger. None for pre-WP-5.5 records and non-monitor
+    # closes (expiry, assignment).
+    exit_reason: ExitReason | None = None
 
 
 class JournalRecord(BaseModel):

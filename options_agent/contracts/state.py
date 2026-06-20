@@ -90,6 +90,24 @@ class OrderRole(StrEnum):
     ROLL = "ROLL"
 
 
+class ExitReason(StrEnum):
+    """Why the monitor submitted a closing order for this position.
+
+    Stored on Order and carried through to OutcomeRecord so WP-7 can group
+    closed positions by exit trigger without unpacking log files.
+
+    STOP_LOSS     — unrealized P&L crossed the stop-loss threshold.
+    PROFIT_TARGET — unrealized P&L reached the profit-target percentage.
+    DTE           — days-to-expiration reached the time-stop threshold.
+    FLATTEN       — kill-switch FLATTEN overrode normal exit evaluation.
+    """
+
+    STOP_LOSS = "STOP_LOSS"
+    PROFIT_TARGET = "PROFIT_TARGET"
+    DTE = "DTE"
+    FLATTEN = "FLATTEN"
+
+
 class OrderStatus(StrEnum):
     PENDING_SUBMIT = "PENDING_SUBMIT"
     WORKING = "WORKING"
@@ -206,6 +224,10 @@ class Order(BaseModel):
     legs_filled: list[LegFill]
     net_fill_price: float | None
     filled_qty: int
+    # Set by the monitor cycle when submitting a closing order so the reason
+    # is queryable at OutcomeRecord write time (next cycle after fill confirms).
+    # None for opening orders and for orders sourced from pre-WP-5.5 reconcile.
+    exit_reason: ExitReason | None = None
 
 
 class Decision(BaseModel):

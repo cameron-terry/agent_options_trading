@@ -55,6 +55,7 @@ _ORDERS_COLS = {
     "legs_filled",
     "net_fill_price",
     "filled_qty",
+    "exit_reason",
 }
 
 _JOURNAL_COLS = {
@@ -86,6 +87,7 @@ _OUTCOME_COLS = {
     "realized_pnl",
     "fill_price",
     "closing_order_id",
+    "exit_reason",
 }
 
 
