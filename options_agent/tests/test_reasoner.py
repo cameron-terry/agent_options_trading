@@ -64,7 +64,7 @@ _VALID_PROPOSAL_INPUT: dict[str, Any] = {
     "net_vega": -0.38,
     "exit_plan": {
         "profit_target_pct": 0.50,
-        "stop_loss_mult": 2.0,
+        "stop_loss_max_loss_fraction": 0.5,
         "time_stop_dte": 21,
     },
     "informed_by": [],

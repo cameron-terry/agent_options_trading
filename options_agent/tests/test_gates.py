@@ -98,7 +98,9 @@ def _stub_position(position_id: str) -> Position:
         marked_at=datetime(2024, 3, 15, 19, 0, tzinfo=UTC),
         unrealized_pnl=10.0,
         realized_pnl=None,
-        exit_plan=ExitPlan(profit_target_pct=0.5, stop_loss_mult=2.0, time_stop_dte=21),
+        exit_plan=ExitPlan(
+            profit_target_pct=0.5, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+        ),
         status=PositionStatus.OPEN,
         opened_at=datetime(2024, 3, 15, 15, 0, tzinfo=UTC),
         closed_at=None,

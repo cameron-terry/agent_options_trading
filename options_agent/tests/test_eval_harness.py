@@ -86,7 +86,9 @@ _VALID_PROPOSAL = TradeProposal(
     net_delta=0.13,
     net_theta=9.0,
     net_vega=-0.38,
-    exit_plan=ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21),
+    exit_plan=ExitPlan(
+        profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+    ),
     informed_by=[],
 )
 
@@ -108,7 +110,9 @@ _NO_ACTION_PROPOSAL = TradeProposal(
     net_delta=0.0,
     net_theta=0.0,
     net_vega=0.0,
-    exit_plan=ExitPlan(profit_target_pct=0.5, stop_loss_mult=2.0, time_stop_dte=21),
+    exit_plan=ExitPlan(
+        profit_target_pct=0.5, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+    ),
     informed_by=[],
 )
 

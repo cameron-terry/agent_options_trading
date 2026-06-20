@@ -41,7 +41,9 @@ from options_agent.state.db import get_connection
 _NOW = datetime(2026, 6, 13, 14, 30, tzinfo=UTC)
 _LEG = Leg(right="put", side="sell", strike=450.0, expiration=date(2026, 7, 18))
 _OCC = "SPY260718P00450000"
-_EXIT_PLAN = ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21)
+_EXIT_PLAN = ExitPlan(
+    profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+)
 _PROPOSAL = TradeProposal(
     action="OPEN",
     underlying="SPY",

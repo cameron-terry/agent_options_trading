@@ -26,7 +26,9 @@ from options_agent.contracts import (
 # ---------------------------------------------------------------------------
 
 _LEG = Leg(right="call", side="sell", strike=500.0, expiration=date(2026, 8, 15))
-_EXIT_PLAN = ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21)
+_EXIT_PLAN = ExitPlan(
+    profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+)
 _NOW = datetime(2026, 6, 7, 15, 0, tzinfo=UTC)
 
 

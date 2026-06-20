@@ -32,7 +32,9 @@ from options_agent.risk.sizing import size
 # Shared fixtures
 # ---------------------------------------------------------------------------
 
-_EXIT = ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=21)
+_EXIT = ExitPlan(
+    profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+)
 _EXP = date(2026, 8, 15)
 
 _EQUITY = 100_000.0

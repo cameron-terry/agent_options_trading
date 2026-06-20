@@ -574,7 +574,9 @@ def _make_position(
         marked_at=datetime(2026, 6, 14, 14, 30, tzinfo=UTC),
         unrealized_pnl=70.0,
         realized_pnl=None,
-        exit_plan=ExitPlan(profit_target_pct=0.50, stop_loss_mult=2.0, time_stop_dte=7),
+        exit_plan=ExitPlan(
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=7
+        ),
         status=PositionStatus.OPEN,
         opened_at=datetime(2026, 6, 1, 15, 0, tzinfo=UTC),
         closed_at=None,

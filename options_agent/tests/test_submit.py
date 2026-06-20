@@ -80,7 +80,7 @@ def _proposal(legs: list[Leg] | None = None) -> TradeProposal:
         net_vega=0.2,
         exit_plan=ExitPlan(
             profit_target_pct=0.5,
-            stop_loss_mult=2.0,
+            stop_loss_max_loss_fraction=0.5,
             time_stop_dte=21,
         ),
         informed_by=[],

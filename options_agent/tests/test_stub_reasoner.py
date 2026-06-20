@@ -44,7 +44,7 @@ def test_iv_rationale_and_catalyst_check_non_trivial() -> None:
 def test_exit_plan_sane_nonzero_values() -> None:
     p = stub_reasoner()
     assert p.exit_plan.profit_target_pct > 0
-    assert p.exit_plan.stop_loss_mult > 0
+    assert p.exit_plan.stop_loss_max_loss_fraction > 0
     assert p.exit_plan.time_stop_dte > 0
 
 

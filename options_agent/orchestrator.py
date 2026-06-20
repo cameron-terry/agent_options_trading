@@ -445,8 +445,8 @@ def run_monitor_cycle(
 
     Flow (for each position in positions):
     1. Kill-switch check (this WP — WP-7.1).
-    2. Evaluate stop-loss rule: if unrealized loss >= ExitPlan.stop_loss_mult
-       * credit received, submit a closing order.
+    2. Evaluate stop-loss rule: if unrealized_pnl <=
+       -(ExitPlan.stop_loss_max_loss_fraction * est_max_loss), submit a closing order.
     3. Evaluate profit-target rule: if unrealized profit >=
        ExitPlan.profit_target_pct * est_max_profit, submit a closing order.
     4. Evaluate time-stop rule: if DTE (nearest_expiration - today) <=

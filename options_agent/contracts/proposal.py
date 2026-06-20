@@ -15,7 +15,10 @@ class Leg(BaseModel):
 class ExitPlan(BaseModel):
     # Structural invariants only — policy bounds live in Limits.exit_plan_bounds.
     profit_target_pct: float = Field(gt=0, le=1.0)
-    stop_loss_mult: float = Field(gt=0)
+    # WP-0 amendment (WP-5.1): renamed from stop_loss_mult and redefined as a
+    # fraction of est_max_loss so the formula is uniform across credit and debit
+    # strategies. Semantically in (0, 1]; upper bound enforced by ExitPlanBounds.
+    stop_loss_max_loss_fraction: float = Field(gt=0)
     time_stop_dte: int = Field(ge=0)
 
 

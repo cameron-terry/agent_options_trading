@@ -46,14 +46,15 @@ class ExitPlanDefaults(BaseModel):
 
     Precedence: proposal.exit_plan fields take priority; these fill any gaps.
 
-    stop_loss_mult is applied as: max_loss = mult × abs(entry_net_amount).
-    Using the signed entry_net_amount (negative for credits, positive for
-    debits per the WP-0.3 convention) means this formula covers both
-    credit and debit strategies without a separate field.
+    stop_loss_max_loss_fraction is applied as:
+      trigger when unrealized_pnl <= -(fraction × est_max_loss)
+    Value in (0, 1]: 0.5 means close when 50% of max loss is realised.
+    This formula is uniform across credit and debit strategies.
+    (WP-0 amendment, WP-5.1: renamed from stop_loss_mult.)
     """
 
     profit_target_pct: float = Field(default=0.50, gt=0, le=1.0)
-    stop_loss_mult: float = Field(default=2.0, gt=0)
+    stop_loss_max_loss_fraction: float = Field(default=0.5, gt=0, le=1.0)
     time_stop_dte: int = Field(default=21, ge=0)
 
 
@@ -64,15 +65,15 @@ class ExitPlanBounds(BaseModel):
     These answer "what does policy allow?" — a separately-tunable question.
     All bounds are inclusive. Bump limits_version on any change.
 
-    stop_loss_mult is applied against entry_net_amount (signed: positive for
-    debits, negative for credits) per the WP-0.3 convention. Bounds here apply
-    to the raw multiplier regardless of credit/debit direction.
+    stop_loss_max_loss_fraction bounds apply to the fraction of est_max_loss
+    used as the stop-loss threshold. Bounds are in (0, 1].
+    (WP-0 amendment, WP-5.1: renamed from stop_loss_mult_min/max.)
     """
 
     profit_target_pct_min: float = Field(default=0.25, gt=0, le=1.0)
     profit_target_pct_max: float = Field(default=1.0, gt=0, le=1.0)
-    stop_loss_mult_min: float = Field(default=1.5, gt=0)
-    stop_loss_mult_max: float = Field(default=5.0, gt=0)
+    stop_loss_max_loss_fraction_min: float = Field(default=0.1, gt=0, le=1.0)
+    stop_loss_max_loss_fraction_max: float = Field(default=1.0, gt=0, le=1.0)
     time_stop_dte_min: int = Field(default=7, ge=0)
     time_stop_dte_max: int = Field(default=45, ge=0)
 
@@ -86,11 +87,13 @@ class ExitPlanBounds(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _stop_loss_mult_range_valid(self) -> "ExitPlanBounds":
-        if self.stop_loss_mult_min >= self.stop_loss_mult_max:
+    def _stop_loss_max_loss_fraction_range_valid(self) -> "ExitPlanBounds":
+        if self.stop_loss_max_loss_fraction_min >= self.stop_loss_max_loss_fraction_max:
             raise ValueError(
-                f"stop_loss_mult_min ({self.stop_loss_mult_min}) must be"
-                f" < stop_loss_mult_max ({self.stop_loss_mult_max})"
+                "stop_loss_max_loss_fraction_min"
+                f" ({self.stop_loss_max_loss_fraction_min}) must be <"
+                " stop_loss_max_loss_fraction_max"
+                f" ({self.stop_loss_max_loss_fraction_max})"
             )
         return self
 
