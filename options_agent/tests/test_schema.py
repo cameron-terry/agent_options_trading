@@ -17,7 +17,13 @@ from options_agent.state.db import build_engine, get_connection, metadata
 # Helpers
 # ---------------------------------------------------------------------------
 
-_ALL_TABLES = {"positions", "orders", "journal_records", "outcome_records"}
+_ALL_TABLES = {
+    "positions",
+    "orders",
+    "journal_records",
+    "outcome_records",
+    "alert_delivery_failures",
+}
 
 _POSITIONS_COLS = {
     "id",
@@ -90,6 +96,16 @@ _OUTCOME_COLS = {
     "exit_reason",
 }
 
+_ALERT_DELIVERY_FAILURES_COLS = {
+    "id",
+    "event_type",
+    "severity",
+    "detail",
+    "attempted_at",
+    "attempts",
+    "last_error",
+}
+
 
 @pytest.fixture
 def make_alembic_cfg(monkeypatch: pytest.MonkeyPatch):
@@ -149,6 +165,13 @@ def test_journal_records_columns_complete(mem_engine):
 def test_outcome_records_columns_complete(mem_engine):
     cols = {c["name"] for c in inspect(mem_engine).get_columns("outcome_records")}
     assert cols == _OUTCOME_COLS
+
+
+def test_alert_delivery_failures_columns_complete(mem_engine):
+    cols = {
+        c["name"] for c in inspect(mem_engine).get_columns("alert_delivery_failures")
+    }
+    assert cols == _ALERT_DELIVERY_FAILURES_COLS
 
 
 def test_positions_primary_key(mem_engine):

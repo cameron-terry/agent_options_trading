@@ -1,8 +1,8 @@
 # Observability & Safety
 
 **Module:** `options_agent/obs/`  
-**Credentials required:** none  
-**Status:** kill-switch complete (WP-7.1); alerts and review stubs pending
+**Credentials required:** `DISCORD_WEBHOOK_URL` (alerting only; optional for review/kill-switch)  
+**Status:** kill-switch complete (WP-7.1); alerting complete (WP-7.2); review stub pending
 
 Runtime safety controls and operational visibility into the running agent. The module owns anything that lets an operator observe, pause, or stop the system without touching the core trading logic.
 
@@ -12,8 +12,8 @@ Runtime safety controls and operational visibility into the running agent. The m
 |---|---|
 | `obs/killswitch.py` | Kill-switch core API: state helpers, DB reads/writes |
 | `obs/__main__.py` | Kill-switch CLI: `status`, `set`, `resume`, `history` |
-| `obs/alerts.py` | _(stub)_ Alerting on anomalous cycle outcomes |
-| `obs/review.py` | _(stub)_ Human-in-the-loop review queue |
+| `obs/alerts.py` | Alerting channel integration: Discord webhook, dispatcher, durable failure recording |
+| `obs/review.py` | _(stub)_ Journal analytics: hit rate, P&L attribution, bias detection |
 
 ---
 
@@ -123,3 +123,87 @@ The orchestrator enforces these at the top of each cycle. The core module (`kill
 |---|---|---|
 | Entry | Treat as `HALT` — fail closed | Cannot confirm `NONE`, so refuse new positions |
 | Monitor | Treat as `NONE` — proceed with normal exits | Never auto-FLATTEN on an unreadable flag |
+
+---
+
+## Alerting (WP-7.2)
+
+Non-blocking notification layer that fires on fills, rejections, and kill-switch state changes. The channel is behind an injectable protocol so Discord is the default but swapping to any other backend is a one-class change.
+
+**Key invariant:** alerting is strictly subordinate to trading. A channel failure must never crash or stall a cycle.
+
+### Contracts (`contracts/alerts.py`)
+
+| Type | Description |
+|---|---|
+| `AlertEventType` | `FILL`, `REJECTION`, `KILL_SWITCH_CHANGE`, `ALERT_DELIVERY_FAILED` |
+| `AlertSeverity` | `INFO`, `WARN`, `CRITICAL` |
+| `AlertEvent` | Pydantic model: `event_type`, `severity`, `timestamp`, `symbol?`, `order_id?`, `detail` |
+| `DEFAULT_SEVERITY` | Default severity per event type (fills→INFO, rejections→WARN, kill-switch→CRITICAL) |
+
+### Delivery behaviour
+
+- **Non-blocking:** `dispatch()` enqueues and returns immediately — the cycle thread is never stalled.
+- **Bounded retry:** up to `max_attempts=2` with `retry_delay_s=1.0` backoff for transient webhook blips.
+- **Durable failure recording:** on exhaustion the alert is dropped but the fact of failure is written to `alert_delivery_failures` (queryable by WP-7 review). Logs are the medium alerting exists to not depend on — a log-only failure record defeats the purpose.
+- **Never propagates:** channel failures are always caught inside the worker and never raised into the caller.
+- **Shutdown flush:** `shutdown()` drains the queue before joining the worker thread — a CRITICAL fired just before process exit is not silently lost.
+
+### Python API
+
+```python
+import os
+from options_agent.state.db import build_engine, metadata
+from options_agent.contracts.alerts import AlertEvent, AlertEventType, AlertSeverity
+from options_agent.obs.alerts import AlertDispatcher, DiscordChannel, NullChannel
+
+engine = build_engine("sqlite:///options_agent.db")
+metadata.create_all(engine)
+
+# Production: Discord webhook URL from environment
+channel = DiscordChannel(os.environ["DISCORD_WEBHOOK_URL"])
+
+# Tests / alerts disabled: in-memory fake
+# channel = NullChannel()
+
+with AlertDispatcher(channel, engine) as dispatcher:
+    dispatcher.dispatch(AlertEvent(
+        event_type=AlertEventType.KILL_SWITCH_CHANGE,
+        severity=AlertSeverity.CRITICAL,
+        detail="HALT engaged by operator",
+    ))
+    dispatcher.dispatch(AlertEvent(
+        event_type=AlertEventType.FILL,
+        severity=AlertSeverity.INFO,
+        detail="SPY bull_put_spread filled at credit 1.35",
+        symbol="SPY",
+        order_id="broker-ord-abc123",
+    ))
+# shutdown() called on __exit__; pending alerts flushed before worker stops
+```
+
+### DB schema
+
+`alert_delivery_failures` is **append-only**. One row per exhausted-retry send attempt.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `TEXT` (UUID) | Primary key |
+| `event_type` | `TEXT` | `AlertEventType` value |
+| `severity` | `TEXT` | `AlertSeverity` value |
+| `detail` | `TEXT` | Alert detail string |
+| `attempted_at` | `DATETIME` (tz) | Indexed; UTC timestamp of the last attempt |
+| `attempts` | `INTEGER` | Number of delivery attempts made |
+| `last_error` | `TEXT` | `str(exception)` from the final failed attempt |
+
+Migration: `alembic/versions/006_alert_delivery_failures.py`
+
+### Configuration
+
+Set `DISCORD_WEBHOOK_URL` as an environment variable (same pattern as Alpaca keys — never commit to `config.toml`):
+
+```bash
+export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+```
+
+To run with alerting disabled (e.g., development, CI), inject `NullChannel` instead of `DiscordChannel`. No env var required.

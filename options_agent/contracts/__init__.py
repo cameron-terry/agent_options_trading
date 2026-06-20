@@ -1,4 +1,10 @@
 from options_agent.config import Config, PlaybookConfig
+from options_agent.contracts.alerts import (
+    DEFAULT_SEVERITY,
+    AlertEvent,
+    AlertEventType,
+    AlertSeverity,
+)
 from options_agent.contracts.data import (
     ChainFilterParams,
     EarningsEvent,
@@ -59,6 +65,11 @@ __all__ = [
     # config
     "Config",
     "PlaybookConfig",
+    # alert types
+    "DEFAULT_SEVERITY",
+    "AlertEvent",
+    "AlertEventType",
+    "AlertSeverity",
     # data return types
     "ChainFilterParams",
     "EarningsEvent",

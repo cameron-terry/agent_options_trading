@@ -212,6 +212,31 @@ kill_switch_log_table = Table(
 
 
 # ---------------------------------------------------------------------------
+# alert_delivery_failures — append-only; one row per exhausted-retry send attempt.
+#
+# Written by AlertDispatcher when all retry attempts for an alert are exhausted.
+# The individual alert is dropped (delivery is best-effort), but the fact that
+# delivery failed is durable and queryable so WP-7 review can surface
+# "N undelivered CRITICAL alerts last week" without relying on log lines.
+#
+# event_type/severity stored as String (AlertEventType/AlertSeverity values);
+# no FK to journal_records — delivery failures may originate outside the
+# entry-cycle context (e.g. kill-switch changes fired from the CLI).
+# ---------------------------------------------------------------------------
+alert_delivery_failures_table = Table(
+    "alert_delivery_failures",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("event_type", String, nullable=False),
+    Column("severity", String, nullable=False),
+    Column("detail", String, nullable=False),
+    Column("attempted_at", DateTime(timezone=True), nullable=False, index=True),
+    Column("attempts", Integer, nullable=False),
+    Column("last_error", String, nullable=False),
+)
+
+
+# ---------------------------------------------------------------------------
 # Engine factory
 # ---------------------------------------------------------------------------
 
