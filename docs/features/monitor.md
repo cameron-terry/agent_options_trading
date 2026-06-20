@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/monitor/`  
 **Credentials required:** none (exit rule evaluators are pure logic against cached position state)  
-**Status:** in progress (WP-5.1 stop-loss ✓, WP-5.2 profit-target ✓; WP-5.3 DTE, WP-5.4 idempotency, WP-5.5 cycle body pending)
+**Status:** in progress (WP-5.1 stop-loss ✓, WP-5.2 profit-target ✓, WP-5.3 DTE ✓; WP-5.4 idempotency, WP-5.5 cycle body pending)
 
 The fast, deterministic exit loop. No LLM, no context assembly — per-position rule evaluation that runs every 1–5 minutes during market hours. Rules read cached state from the last reconcile cycle; the monitor never makes live broker quote calls for individual positions.
 
@@ -10,11 +10,11 @@ The fast, deterministic exit loop. No LLM, no context assembly — per-position 
 
 | File | Responsibility |
 |---|---|
-| `exits.py` | Per-position stop-loss and profit-target evaluators; `MarkStaleError` |
+| `exits.py` | Per-position stop-loss, profit-target, and DTE time-stop evaluators; `MarkStaleError` |
 
 ## Design invariants
 
-**Reconcile-at-cycle-top is mandatory.** All exit evaluators read `pos.unrealized_pnl` and `pos.current_mark` from the last-reconciled `Position`. If `pos.marked_at` is older than `max_mark_age` (the acceptable staleness window), evaluators raise `MarkStaleError` — a surfaced, alertable error, not a silent no-op. WP-5.5 / WP-8 must guarantee reconcile runs before any evaluator.
+**Reconcile-at-cycle-top is mandatory for price-based exits.** `check_stop_loss` and `check_profit_target` read `pos.unrealized_pnl` and `pos.current_mark` from the last-reconciled `Position`. If `pos.marked_at` is older than `max_mark_age`, they raise `MarkStaleError` — a surfaced, alertable error, not a silent no-op. `check_time_stop` does not enforce staleness (DTE is mark-independent), but still benefits from fresh status reads. WP-5.5 / WP-8 must guarantee reconcile runs before any evaluator call.
 
 **Inline `PENDING_CLOSE` guard is the idempotency floor.** Each evaluator checks `pos.status in _SKIPPABLE_STATUSES` before evaluating. This prevents re-submission while a closing order is pending fill. WP-5.4 will formalize `has_pending_close(position_id)`; until then the inline status check is load-bearing.
 
@@ -69,11 +69,38 @@ if order is not None:
     print(f"Profit-target fired: order {order.id}")
 ```
 
+## DTE time-stop (`check_time_stop`)
+
+**Trigger formula:** `(pos.nearest_expiration - today_ET).days <= time_stop_dte`
+
+`nearest_expiration` is a denormalized field set at position-open time (the minimum expiration across all legs). `today` is derived from `now` converted to `America/New_York` — not UTC — because UTC rolls to the next calendar day at ~7–8 pm ET, which would compute DTE as one day too few for several hours each evening and fire the time-stop a full day early.
+
+`time_stop_dte` is **calendar days** (not trading days), consistent with how `ExitPlan` emits it (e.g., the standard 21-DTE close means 21 calendar days to expiration).
+
+**Monotonic re-trigger.** Unlike price-based exits, the DTE condition only tightens: once `min_dte <= time_stop_dte`, it stays true every cycle until fill. The `PENDING_CLOSE` guard in `_SKIPPABLE_STATUSES` is therefore non-optional — without it, every monitor cycle from the trigger day onward would re-submit a closing order.
+
+**Roll caveat.** `nearest_expiration` is denormalized at open time. If rolling is ever implemented, it must be recomputed on the roll or this evaluator will read a stale expiration date.
+
+```python
+from datetime import UTC, datetime, timedelta
+from options_agent.monitor.exits import check_time_stop
+
+now = datetime.now(UTC)
+max_mark_age = timedelta(minutes=10)  # accepted for API uniformity; not enforced here
+
+order = check_time_stop(pos, conn, broker, now, max_mark_age)
+
+if order is not None:
+    # DTE threshold breached: closing order submitted, pos.status → PENDING_CLOSE
+    print(f"Time-stop fired: order {order.id}")
+```
+
 ## Evaluator ordering in a cycle
 
-Both `check_stop_loss` and `check_profit_target` check `pos.status` at entry. When the monitor loop calls them sequentially for the same position:
+All three evaluators check `pos.status in _SKIPPABLE_STATUSES` at entry. When the monitor loop calls them sequentially for the same position:
 
-- P&L cannot simultaneously be at stop-loss (negative) and profit-target (positive), so both cannot fire on P&L grounds.
-- If either fires and sets `PENDING_CLOSE`, the other sees that status and bails — ordering is robust regardless of which runs first.
+- P&L cannot simultaneously be at stop-loss (negative) and profit-target (positive), so those two cannot fire on P&L grounds on the same cycle.
+- If any evaluator fires and sets `PENDING_CLOSE`, the subsequent evaluators see that status and bail — ordering is robust regardless of which runs first.
+- The DTE evaluator is independent of mark price, so it can fire in the same cycle as a price-based evaluator is blocked by staleness. The `PENDING_CLOSE` guard handles that case cleanly.
 
-The freshness check (`MarkStaleError`) applies to each evaluator independently. WP-5.5 should surface this once per position per cycle, not per evaluator call.
+The `MarkStaleError` check applies only to `check_stop_loss` and `check_profit_target`. WP-5.5 should surface it once per position per cycle, not per evaluator call.

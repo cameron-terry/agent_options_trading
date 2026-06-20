@@ -1,15 +1,19 @@
-"""Exit rule evaluators for WP-5.1 (stop-loss) and WP-5.2 (profit-target).
+"""Exit rule evaluators for WP-5.1 (stop-loss), WP-5.2 (profit-target), WP-5.3 (DTE).
 
 Public contract
 ---------------
 check_stop_loss(pos, conn, broker, now, max_mark_age) -> Order | None
 check_profit_target(pos, conn, broker, now, max_mark_age) -> Order | None
+check_time_stop(pos, conn, broker, now, max_mark_age) -> Order | None
 
-Callers (WP-5.5 / WP-8) MUST run reconcile before calling this function so
-that pos.marked_at reflects the current cycle. The staleness check on
-marked_at makes that ordering a hard, checked precondition rather than a
-silent assumption: a stale mark raises MarkStaleError instead of silently
-evaluating to "no trigger" (the dangerous direction).
+All three share the same (pos, conn, broker, now, max_mark_age, limit_offset)
+signature so WP-5.5 / WP-8 can call them uniformly through one interface.
+
+Callers (WP-5.5 / WP-8) MUST run reconcile before calling this module so
+that pos.marked_at reflects the current cycle. check_stop_loss and
+check_profit_target enforce this via MarkStaleError. check_time_stop is
+mark-independent (DTE is calendar arithmetic) and does not raise MarkStaleError,
+but still benefits from fresh reconcile state for accurate status reads.
 
 Stop-loss formula (WP-0 amendment, WP-5.1)
 -------------------------------------------
@@ -18,12 +22,24 @@ Stop-loss formula (WP-0 amendment, WP-5.1)
 This formula is uniform across credit and debit strategies because est_max_loss
 is always positive and always represents the maximum the position can lose,
 regardless of whether it was opened for a credit or a debit.
+
+DTE formula (WP-5.3)
+---------------------
+  min_dte = (pos.nearest_expiration - today_ET).days
+  trigger when: min_dte <= exit_plan.time_stop_dte
+
+today is derived from now in America/New_York (market time). UTC rolls to the
+next calendar day at ~7–8 pm ET; using UTC.date() would compute DTE as one day
+too few from that point, firing the time-stop a full day early.
+time_stop_dte is calendar days (not trading days) — consistent with how
+ExitPlan emits it (e.g., the WP-0 default of 21 DTE means 21 calendar days).
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.engine import Connection
 
@@ -39,6 +55,8 @@ from options_agent.execution.broker import BrokerClient
 from options_agent.state.crud import insert_order, update_position
 
 logger = logging.getLogger(__name__)
+
+_MARKET_TZ = ZoneInfo("America/New_York")
 
 _SKIPPABLE_STATUSES = frozenset(
     {
@@ -67,7 +85,9 @@ class MarkStaleError(Exception):
     """
 
 
-def _close_proposal(pos: Position) -> TradeProposal:
+def _close_proposal(
+    pos: Position, thesis: str = "Monitor exit trigger"
+) -> TradeProposal:
     """Build a closing TradeProposal from pos by reversing all leg sides."""
     assert pos.exit_plan is not None  # caller must guard before calling
     reversed_legs = [
@@ -85,7 +105,7 @@ def _close_proposal(pos: Position) -> TradeProposal:
         underlying=pos.underlying,
         strategy=pos.strategy,
         legs=reversed_legs,
-        thesis="Monitor stop-loss trigger",
+        thesis=thesis,
         iv_rationale="n/a",
         catalyst_check="n/a",
         conviction=1.0,
@@ -194,7 +214,7 @@ def check_stop_loss(
         pos.est_max_loss,
     )
 
-    close_proposal = _close_proposal(pos)
+    close_proposal = _close_proposal(pos, thesis="Monitor stop-loss trigger")
     limit_price = _closing_limit_price(pos, limit_offset)
 
     if len(pos.legs) == 1:
@@ -309,7 +329,110 @@ def check_profit_target(
         pos.est_max_profit,
     )
 
-    close_proposal = _close_proposal(pos)
+    close_proposal = _close_proposal(pos, thesis="Monitor profit-target trigger")
+    limit_price = _closing_limit_price(pos, limit_offset)
+
+    if len(pos.legs) == 1:
+        order = broker.submit(
+            close_proposal, pos.quantity, limit_price, pos.id, role=OrderRole.CLOSE
+        )
+    else:
+        order = broker.submit_multi_leg(
+            close_proposal, pos.quantity, limit_price, pos.id, role=OrderRole.CLOSE
+        )
+
+    updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
+    insert_order(conn, order)
+    update_position(conn, updated_pos)
+
+    return order
+
+
+def check_time_stop(
+    pos: Position,
+    conn: Connection,
+    broker: BrokerClient,
+    now: datetime,
+    max_mark_age: timedelta,
+    limit_offset: float = 0.01,
+) -> Order | None:
+    """Evaluate DTE time-stop for pos; submit and persist a closing order if triggered.
+
+    DTE trigger formula:
+        min_dte = (pos.nearest_expiration - today_ET).days
+        trigger when: min_dte <= exit_plan.time_stop_dte
+
+    today is derived from now converted to America/New_York (market time), NOT
+    UTC: UTC rolls to the next calendar day at ~7–8 pm ET, which would compute
+    DTE as one day too few for several hours each evening, firing the time-stop
+    a full day early and corrupting every position's DTE schedule. WP-5.5 / WP-8
+    must pass a UTC-aware now; this function handles the market-timezone
+    conversion internally.
+
+    time_stop_dte is calendar days (not trading days). The WP-0 default of 21
+    DTE means 21 calendar days to expiration — consistent with how ExitPlan emits
+    it.
+
+    max_mark_age is accepted for API uniformity with check_stop_loss and
+    check_profit_target (WP-5.5 can call all three through the same signature);
+    it is deliberately not enforced here because the DTE rule is mark-independent
+    (no unrealized_pnl or current_mark is read).
+
+    The DTE condition is monotonic and permanent once met (DTE only decreases),
+    so the PENDING_CLOSE guard in _SKIPPABLE_STATUSES is non-optional. Without
+    it, every subsequent monitor cycle from the trigger day until fill would
+    re-submit a closing order. This is more acute than for the price-based exits
+    because the condition never self-heals.
+
+    IMPORTANT — nearest_expiration sync on rolls: pos.nearest_expiration is
+    denormalised at position-open time. If rolling is ever implemented (WP-5 /
+    WP-8), nearest_expiration must be recomputed on the roll; otherwise this
+    evaluator reads a stale expiration date and computes incorrect DTE.
+
+    Guards (return None without submitting):
+      - pos.asset_class != OPTION_STRATEGY
+      - pos.exit_plan is None
+      - pos.status in _SKIPPABLE_STATUSES
+
+    On trigger:
+      - Submits a closing order via broker.submit() or broker.submit_multi_leg()
+      - Inserts the Order into the DB via conn
+      - Transitions pos.status to PENDING_CLOSE in the DB
+      - Returns the submitted Order
+
+    Returns None if min_dte > exit_plan.time_stop_dte.
+
+    now must be UTC-aware.
+    """
+    if pos.asset_class != AssetClass.OPTION_STRATEGY:
+        return None
+
+    if pos.exit_plan is None:
+        logger.warning(
+            "check_time_stop: position %s has no exit_plan; skipping", pos.id
+        )
+        return None
+
+    if pos.status in _SKIPPABLE_STATUSES:
+        return None
+
+    today = now.astimezone(_MARKET_TZ).date()
+    min_dte = (pos.nearest_expiration - today).days
+
+    if min_dte > pos.exit_plan.time_stop_dte:
+        return None
+
+    logger.info(
+        "time-stop triggered: position=%s min_dte=%d threshold=%d "
+        "(nearest_expiration=%s today_ET=%s)",
+        pos.id,
+        min_dte,
+        pos.exit_plan.time_stop_dte,
+        pos.nearest_expiration,
+        today,
+    )
+
+    close_proposal = _close_proposal(pos, thesis="Monitor time-stop trigger")
     limit_price = _closing_limit_price(pos, limit_offset)
 
     if len(pos.legs) == 1:
