@@ -81,6 +81,8 @@ orders_table = Table(
     Column("legs_filled", JSON, nullable=False),  # list[LegFill]
     Column("net_fill_price", Float, nullable=True),
     Column("filled_qty", Integer, nullable=False),
+    # WP-5.5: ExitReason enum value; NULL for opening orders and pre-WP-5.5 records.
+    Column("exit_reason", String, nullable=True),
 )
 
 # ---------------------------------------------------------------------------
@@ -182,6 +184,8 @@ outcome_records_table = Table(
     Column("realized_pnl", Float, nullable=False),
     Column("fill_price", Float, nullable=True),
     Column("closing_order_id", String, nullable=True),
+    # WP-5.5: ExitReason enum value; NULL for pre-WP-5.5 records and non-monitor closes.
+    Column("exit_reason", String, nullable=True),
 )
 
 

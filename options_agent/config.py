@@ -205,6 +205,12 @@ class Config(BaseModel):
     # multi-tool exploration runs or produces long rationale fields.
     max_tokens: int = Field(default=4096, ge=1, le=65536)
 
+    # Monitor cycle — mark-staleness window.
+    # Max acceptable age of pos.marked_at before exits.py raises MarkStaleError.
+    # Default = 10 min = 2× the maximum 5-min monitor cadence (WP-8).
+    # If the monitor cadence changes, keep this >= 2× that interval.
+    monitor_max_mark_age_minutes: int = Field(default=10, ge=1, le=60)
+
     # Risk limits (nested)
     limits: Limits = Field(default_factory=Limits)
 

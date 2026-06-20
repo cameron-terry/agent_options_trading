@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/monitor/`  
 **Credentials required:** none (exit rule evaluators are pure logic against cached position state)  
-**Status:** in progress (WP-5.1 stop-loss ✓, WP-5.2 profit-target ✓, WP-5.3 DTE ✓, WP-5.4 idempotency ✓, WP-5.6 equity guards ✓; WP-5.5 cycle body pending)
+**Status:** in progress (WP-5.1 stop-loss ✓, WP-5.2 profit-target ✓, WP-5.3 DTE ✓, WP-5.4 idempotency ✓, WP-5.5 cycle body ✓, WP-5.6 equity guards ✓)
 
 The fast, deterministic exit loop. No LLM, no context assembly — per-position rule evaluation that runs every 1–5 minutes during market hours. Rules read cached state from the last reconcile cycle; the monitor never makes live broker quote calls for individual positions.
 
@@ -128,4 +128,66 @@ All three evaluators check `pos.status in _SKIPPABLE_STATUSES` at entry. When th
 - If any evaluator fires and sets `PENDING_CLOSE`, the subsequent evaluators see that status and bail — ordering is robust regardless of which runs first.
 - The DTE evaluator is independent of mark price, so it can fire in the same cycle as a price-based evaluator is blocked by staleness. The `PENDING_CLOSE` guard handles that case cleanly.
 
-The `MarkStaleError` check applies only to `check_stop_loss` and `check_profit_target`. WP-5.5 should surface it once per position per cycle, not per evaluator call.
+The `MarkStaleError` check applies only to `check_stop_loss` and `check_profit_target`. WP-5.5 surfaces it once per position per cycle, not per evaluator call — the error is caught in the monitor loop, recorded to `MonitorResult.errors`, and the cycle continues to the next position.
+
+## Monitor cycle (`run_monitor_cycle`)
+
+**Location:** `options_agent/orchestrator.py`  
+**Signature:** `run_monitor_cycle(config, *, broker=None, engine=None, _now=None) -> MonitorResult`
+
+Wires all exit evaluators into a full cycle. Call sequence:
+
+1. **Kill-switch check** — reads `KillSwitchState` from DB. Fail-safe: if the read fails, proceeds with `NONE` semantics (never auto-FLATTENs on an unreadable flag).
+2. **Market open pre-flight** — returns an empty `MonitorResult` if the exchange is closed.
+3. **Reconcile** — calls `_reconcile(broker, conn, _clock=now)` to refresh position marks and detect fills from the previous cycle. The `StateDiff` returned here is used in step 6.
+4. **Position snapshot** — reads fresh positions from DB post-reconcile via `list_open_positions`.
+5. **Exit evaluation loop** — for each position:
+   - **FLATTEN mode**: calls `flatten_position`; bypasses all rule thresholds and the mark-staleness check.
+   - **Normal mode**: evaluates stop-loss → profit-target → DTE; first rule that fires submits a closing order and skips the rest.
+   - `MarkStaleError` → recorded in `MonitorResult.errors`, loop continues.
+6. **Finalize** — writes `OutcomeRecord` for each position in `StateDiff.closed_positions` (positions that transitioned `PENDING_CLOSE → CLOSED` during step 3's reconcile).
+
+**Kill-switch semantics:**
+
+| State | Monitor behaviour |
+|---|---|
+| `NONE` | Normal exit evaluation |
+| `HALT` | Same as `NONE` — exits still fire (entries are blocked by the entry cycle) |
+| `FLATTEN` | All open `OPTION_STRATEGY` positions closed immediately; rules bypassed |
+
+**Test clock override:** `_now` is a test-only parameter (same pattern as `reconcile`'s `_clock`). Production callers must not pass it. Tests use it to inject a market-hours timestamp so the market-open gate passes without mocking the exchange calendar.
+
+### Deferred outcome journaling
+
+`OutcomeRecord` is **not** written when a closing order is submitted. It is written in the finalize step (step 6) of a later cycle, after reconcile confirms the fill, using the real `net_fill_price` from the filled `Order`. This prevents `realized_pnl=0.0` from being stored as a permanent record.
+
+Propagation chain:
+1. Exit evaluator tags `Order.exit_reason` at submit time (e.g., `ExitReason.STOP_LOSS`).
+2. `_finalize_closed_positions` reads `exit_reason` from the filled `Order` via `get_closing_order`.
+3. `OutcomeRecord.exit_reason` is written with the same value, enabling `GROUP BY exit_reason` queries in WP-7.
+
+### `ExitReason` enum
+
+```python
+from options_agent.contracts.state import ExitReason
+
+ExitReason.STOP_LOSS      # stop-loss threshold breached
+ExitReason.PROFIT_TARGET  # profit-target threshold reached
+ExitReason.DTE            # DTE time-stop triggered
+ExitReason.FLATTEN        # kill-switch FLATTEN — emergency close
+```
+
+Stored as a `VARCHAR NULL` column on both `orders` and `outcome_records` (Alembic migration 005). `NULL` for entry/open orders.
+
+## FLATTEN (`flatten_position`)
+
+**Signature:** `flatten_position(pos, conn, broker, now, *, limit_offset=0.01) -> Order | None`
+
+Submits a closing order under kill-switch FLATTEN mode. Guards:
+- `pos.asset_class != OPTION_STRATEGY` → returns `None` (logged).
+- `pos.exit_plan is None` → returns `None`.
+- `pos.status in _SKIPPABLE_STATUSES` → returns `None` (already closing or closed).
+
+Intentionally bypasses `MarkStaleError` — acting on a stale mark is correct under an emergency close; refusing would defeat the purpose of the kill-switch.
+
+Returns the submitted `Order` with `exit_reason=ExitReason.FLATTEN`, or `None` if any guard fires.

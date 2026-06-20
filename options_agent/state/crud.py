@@ -141,6 +141,9 @@ def _order_to_row(order: Order) -> dict[str, Any]:
         ),
         "net_fill_price": order.net_fill_price,
         "filled_qty": order.filled_qty,
+        "exit_reason": order.exit_reason.value
+        if order.exit_reason is not None
+        else None,
     }
 
 
@@ -370,6 +373,32 @@ def has_pending_close(conn: Connection, position_id: str) -> bool:
         .limit(1)
     ).first()
     return row is not None
+
+
+def get_closing_order(conn: Connection, position_id: str) -> Order | None:
+    """Return the most recently filled CLOSE order for position_id, or None.
+
+    Used by the monitor cycle finalize step to retrieve the actual fill price
+    and exit_reason when writing OutcomeRecords for newly-closed positions.
+
+    Returns the FILLED CLOSE order with the latest filled_at timestamp. If
+    multiple filled CLOSE orders exist (e.g., partial closes), returns the
+    most recent — the one whose fill completed the close.
+
+    Returns None if no filled CLOSE order exists (e.g., position was closed by
+    expiry or assignment, which do not produce a CLOSE order).
+    """
+    row = conn.execute(
+        sa.select(orders_table)
+        .where(
+            orders_table.c.position_id == position_id,
+            orders_table.c.role == OrderRole.CLOSE.value,
+            orders_table.c.status == OrderStatus.FILLED.value,
+        )
+        .order_by(orders_table.c.filled_at.desc())
+        .limit(1)
+    ).first()
+    return _row_to_order(row) if row is not None else None
 
 
 # ---------------------------------------------------------------------------

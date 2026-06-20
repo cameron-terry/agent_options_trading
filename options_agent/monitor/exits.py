@@ -46,6 +46,7 @@ from sqlalchemy.engine import Connection
 from options_agent.contracts.proposal import Leg, TradeProposal
 from options_agent.contracts.state import (
     AssetClass,
+    ExitReason,
     Order,
     OrderRole,
     Position,
@@ -242,6 +243,7 @@ def check_stop_loss(
             close_proposal, pos.quantity, limit_price, pos.id, role=OrderRole.CLOSE
         )
 
+    order = order.model_copy(update={"exit_reason": ExitReason.STOP_LOSS})
     updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
     insert_order(conn, order)
     update_position(conn, updated_pos)
@@ -371,6 +373,7 @@ def check_profit_target(
             close_proposal, pos.quantity, limit_price, pos.id, role=OrderRole.CLOSE
         )
 
+    order = order.model_copy(update={"exit_reason": ExitReason.PROFIT_TARGET})
     updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
     insert_order(conn, order)
     update_position(conn, updated_pos)
@@ -490,6 +493,82 @@ def check_time_stop(
             close_proposal, pos.quantity, limit_price, pos.id, role=OrderRole.CLOSE
         )
 
+    order = order.model_copy(update={"exit_reason": ExitReason.DTE})
+    updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
+    insert_order(conn, order)
+    update_position(conn, updated_pos)
+
+    return order
+
+
+def flatten_position(
+    pos: Position,
+    conn: Connection,
+    broker: BrokerClient,
+    now: datetime,
+    limit_offset: float = 0.01,
+) -> Order | None:
+    """Submit a closing order for pos under kill-switch FLATTEN mode.
+
+    FLATTEN bypasses all exit-rule thresholds (stop-loss, profit-target, DTE)
+    and the mark-staleness check. The operator has decided to close everything
+    immediately — acting on stale marks is correct here; refusing to close
+    because the mark is stale inverts the safety intent of FLATTEN.
+
+    Guards (return None without submitting):
+      - pos.asset_class != OPTION_STRATEGY  (EQUITY disposition belongs to WP-8)
+      - pos.exit_plan is None               (no close proposal can be built)
+      - pos.status in _SKIPPABLE_STATUSES   (already closing/closed — idempotent)
+
+    On trigger:
+      - Submits a closing order via broker.submit() or broker.submit_multi_leg()
+      - Tags the Order with ExitReason.FLATTEN
+      - Inserts the Order into the DB via conn
+      - Transitions pos.status to PENDING_CLOSE in the DB
+      - Returns the submitted Order
+
+    now is accepted for API consistency (e.g., limit price derivation from
+    current_mark) but is NOT used for a staleness check.
+    """
+    if pos.asset_class != AssetClass.OPTION_STRATEGY:
+        logger.info(
+            "flatten_position: skipping equity position %s (asset_class=%s); "
+            "disposition belongs to WP-8",
+            pos.id,
+            pos.asset_class,
+        )
+        return None
+
+    if pos.exit_plan is None:
+        logger.warning(
+            "flatten_position: position %s has no exit_plan; cannot build close "
+            "proposal — skipping",
+            pos.id,
+        )
+        return None
+
+    if pos.status in _SKIPPABLE_STATUSES:
+        return None
+
+    logger.info(
+        "flatten_position: FLATTEN close submitted for position=%s strategy=%s",
+        pos.id,
+        pos.strategy,
+    )
+
+    close_proposal = _close_proposal(pos, thesis="Kill-switch FLATTEN close")
+    limit_price = _closing_limit_price(pos, limit_offset)
+
+    if len(pos.legs) == 1:
+        order = broker.submit(
+            close_proposal, pos.quantity, limit_price, pos.id, role=OrderRole.CLOSE
+        )
+    else:
+        order = broker.submit_multi_leg(
+            close_proposal, pos.quantity, limit_price, pos.id, role=OrderRole.CLOSE
+        )
+
+    order = order.model_copy(update={"exit_reason": ExitReason.FLATTEN})
     updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
     insert_order(conn, order)
     update_position(conn, updated_pos)

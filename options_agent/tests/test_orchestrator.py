@@ -280,13 +280,33 @@ def test_monitor_result_round_trip() -> None:
 
 
 # ---------------------------------------------------------------------------
-# run_monitor_cycle still raises NotImplementedError (WP-8)
+# run_monitor_cycle — market-closed no-op (does not require a broker)
 # ---------------------------------------------------------------------------
 
+# Juneteenth (2026-06-19) is an exchange holiday; NYSE is closed.
+_MARKET_CLOSED_NOW = datetime(2026, 6, 19, 18, 0, tzinfo=UTC)
 
-def test_run_monitor_cycle_raises_not_implemented(engine) -> None:
-    with pytest.raises(NotImplementedError):
-        run_monitor_cycle(positions=[], config=Config(), engine=engine)
+
+def test_run_monitor_cycle_market_closed_returns_empty(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Market-closed: returns empty MonitorResult without evaluating positions."""
+    monkeypatch.setenv("ALPACA_API_KEY", "key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
+    with patch(
+        "options_agent.execution.broker.TradingClient",
+        return_value=MagicMock(),
+    ):
+        broker = BrokerClient(Config())
+
+    result = run_monitor_cycle(
+        Config(), broker=broker, engine=engine, _now=_MARKET_CLOSED_NOW
+    )
+
+    assert result.positions_evaluated == 0
+    assert result.exits_triggered == []
+    assert result.orders_submitted == []
+    assert result.errors == []
 
 
 # ---------------------------------------------------------------------------

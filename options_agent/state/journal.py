@@ -219,6 +219,9 @@ def _outcome_record_to_row(record: OutcomeRecord) -> dict[str, Any]:
         "realized_pnl": record.realized_pnl,
         "fill_price": record.fill_price,
         "closing_order_id": record.closing_order_id,
+        "exit_reason": record.exit_reason.value
+        if record.exit_reason is not None
+        else None,
     }
 
 

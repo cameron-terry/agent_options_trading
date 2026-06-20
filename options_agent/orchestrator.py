@@ -2,14 +2,19 @@ import hashlib
 import json
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+import exchange_calendars as xcals
 from sqlalchemy.engine import Engine
 
 from options_agent.agent.stub_reasoner import stub_reasoner
 from options_agent.config import Config
 from options_agent.contracts.data import PortfolioState
-from options_agent.contracts.journal import JournalRecord
+from options_agent.contracts.journal import (
+    JournalRecord,
+    OutcomeEventType,
+    OutcomeRecord,
+)
 from options_agent.contracts.orchestrator import (
     CycleError,
     CycleResult,
@@ -31,12 +36,25 @@ from options_agent.contracts.state import (
 )
 from options_agent.execution.broker import BrokerClient
 from options_agent.execution.reconcile import reconcile as _reconcile
+from options_agent.monitor.exits import (
+    MarkStaleError,
+    check_profit_target,
+    check_stop_loss,
+    check_time_stop,
+    flatten_position,
+)
 from options_agent.obs.killswitch import get_current_state, is_flatten, is_halted
+from options_agent.risk.gates import market_is_open
 from options_agent.risk.sizing import size as _size
 from options_agent.risk.validator import validate_structural
-from options_agent.state.crud import insert_order, insert_position
+from options_agent.state.crud import (
+    get_closing_order,
+    insert_order,
+    insert_position,
+    list_open_positions,
+)
 from options_agent.state.db import build_engine, get_connection
-from options_agent.state.journal import write_journal_record
+from options_agent.state.journal import write_journal_record, write_outcome_record
 
 logger = logging.getLogger(__name__)
 
@@ -434,56 +452,63 @@ def run_entry_cycle(
 
 
 def run_monitor_cycle(
-    positions: list[Position],
     config: Config,
     *,
+    broker: BrokerClient | None = None,
     engine: Engine | None = None,
+    _now: datetime | None = None,
 ) -> MonitorResult:
-    """Run one monitor cycle over the supplied open positions.
+    """Run one monitor cycle: reconcile state, then evaluate exit rules.
 
-    WP-5/WP-8 fills in the body.
+    WP-5.5 implementation.
 
-    Flow (for each position in positions):
-    1. Kill-switch check (this WP — WP-7.1).
-    2. Evaluate stop-loss rule: if unrealized_pnl <=
-       -(ExitPlan.stop_loss_max_loss_fraction * est_max_loss), submit a closing order.
-    3. Evaluate profit-target rule: if unrealized profit >=
-       ExitPlan.profit_target_pct * est_max_profit, submit a closing order.
-    4. Evaluate time-stop rule: if DTE (nearest_expiration - today) <=
-       ExitPlan.time_stop_dte, submit a closing order.
-    5. If any rule fires, submit a closing order via execution/broker.py and
-       journal the exit decision (which rule fired, order submitted).
-    6. Collect per-position errors into MonitorResult.errors.
+    Sequence:
+    1. Kill-switch check.
+    2. Market open pre-flight — no-op (returns empty MonitorResult) when closed.
+    3. Reconcile state via broker to refresh position marks and detect fills.
+    4. Read all open positions from DB (fresh after reconcile).
+    5. For each position:
+       - FLATTEN mode: submit close immediately, bypassing rule evaluation.
+       - Normal mode: evaluate stop-loss → profit-target → DTE in order;
+         first rule that triggers submits a close and skips the remainder.
+    6. Finalize: write OutcomeRecords for positions that transitioned
+       PENDING_CLOSE → CLOSED during step 3's reconcile.
+    7. Return MonitorResult.
 
-    Kill-switch semantics (distinct from entry cycle):
-        NONE    — normal exit evaluation (stop/target/DTE per WP-5).
-        HALT    — monitor runs normally; existing positions are still managed
-                  to their planned exits. HALT does NOT freeze the monitor —
-                  an unmanaged position under HALT defeats the purpose of a halt.
-        FLATTEN — monitor submits closing orders for ALL open positions,
-                  overriding normal stop/target logic. WP-5 receives
-                  flatten_mode=True to activate this distinct code path.
+    Kill-switch semantics:
+        NONE    — normal exit evaluation.
+        HALT    — monitor runs normally (unmanaged positions under HALT defeats
+                  the purpose of a halt); entries are blocked by entry cycle.
+        FLATTEN — all open OPTION_STRATEGY positions closed immediately,
+                  bypassing stop/target/DTE checks. EQUITY disposition is
+                  WP-8's responsibility.
 
     Fail-safe on kill-switch read error:
-        Proceed with NONE semantics (normal exit evaluation).
-        Never auto-FLATTEN on an unreadable flag — FLATTEN must be an explicit
-        operator decision, not an inference from a broken DB connection.
+        Proceed with NONE semantics. Never auto-FLATTEN on an unreadable flag;
+        FLATTEN is an explicit operator decision, not an inference from a broken
+        DB connection.
 
-    This function never touches the LLM and has no opinion on entries.
-
-    Per-position error contract:
-        One position failing to evaluate must NOT stop the others from having
-        their stops checked. Errors are collected into MonitorResult.errors
-        and the loop continues. The caller decides whether to alert.
+    Per-position error isolation:
+        One failing position (MarkStaleError, broker error, etc.) records to
+        MonitorResult.errors and the loop continues — other positions still
+        have their exits checked. The caller decides whether to alert.
 
     Idempotency:
-        Running twice on the same positions must not submit duplicate closing
-        orders. WP-8 must check for existing WORKING/PENDING_SUBMIT orders
-        on a position before submitting a new close.
+        Running twice must not submit duplicate closing orders. exits.py guards
+        this via both _SKIPPABLE_STATUSES (position status check) and
+        has_pending_close (Order table check), so re-runs after a trigger are safe.
 
-    The caller (WP-8 / scheduler) is responsible for fetching open positions
-    from state and passing them here. This function does not read the DB
-    except for the kill-switch state.
+    Outcome journaling:
+        OutcomeRecords are NOT written at close-submit time because the fill has
+        not occurred yet. They are written in the finalize step (step 6) for
+        positions that reconcile confirmed as CLOSED this cycle, using the
+        actual fill price from the filled Order. Positions triggered in this
+        cycle will get their OutcomeRecord on the next (or a later) cycle when
+        their closing order fills.
+
+    _now is a test-only clock override (same pattern as reconcile's _clock).
+    Production callers must not pass it. Use it in tests to inject a
+    market-hours timestamp so the market_is_open gate passes without mocking.
     """
     if engine is None:
         engine = build_engine(config.db_url)
@@ -501,19 +526,186 @@ def run_monitor_cycle(
         )
         _ks_state = KillSwitchState.NONE
 
-    # flatten_mode signals WP-5 to close all positions rather than evaluate rules.
-    # Under HALT, flatten_mode is False — exits still fire per normal stop/target logic.
+    # Under HALT, flatten_mode is False — exits still evaluate normally.
     _flatten_mode = is_flatten(_ks_state)
+
+    # ── Step 2: CLOCK + MARKET OPEN ─────────────────────────────────────────
+    now = _now if _now is not None else datetime.now(UTC)
+
+    _calendar = xcals.get_calendar(config.exchange_calendar)
+    _market_open, _market_reason = market_is_open(now, _calendar)
+    if not _market_open:
+        logger.info("run_monitor_cycle: SKIP (market closed) — %s", _market_reason)
+        return MonitorResult(
+            positions_evaluated=0,
+            exits_triggered=[],
+            orders_submitted=[],
+            errors=[],
+        )
+
     logger.debug(
-        "run_monitor_cycle: kill_switch=%s flatten_mode=%s positions=%d",
+        "run_monitor_cycle: kill_switch=%s flatten_mode=%s",
         _ks_state,
         _flatten_mode,
-        len(positions),
     )
 
-    # WP-5/WP-8 fills in the monitor exit body here.
-    # Receives: positions, config, engine, flatten_mode=_flatten_mode
-    raise NotImplementedError
+    # ── Step 3: BROKER + RECONCILE ──────────────────────────────────────────
+    # Reconcile refreshes position marks and detects fills from the previous
+    # cycle. The state_diff returned here is used in step 6 to finalize
+    # OutcomeRecords for positions whose closing orders filled this cycle.
+    if broker is None:
+        broker = BrokerClient(config)
+
+    with get_connection(engine) as _rec_conn:
+        state_diff = _reconcile(broker, _rec_conn, _clock=now)
+
+    # ── Step 4: FRESH POSITIONS ──────────────────────────────────────────────
+    # Re-read after reconcile so marks are current. The positions parameter was
+    # dropped from this function (WP-5.5 amendment to the WP-0.7 signature)
+    # because keeping a silently-overridden parameter is worse than an honest
+    # API: callers that passed a list thinking it was acted on were wrong.
+    with get_connection(engine) as _pos_conn:
+        open_positions = list_open_positions(_pos_conn)
+
+    # ── Step 5: EXIT EVALUATION LOOP ────────────────────────────────────────
+    max_mark_age = timedelta(minutes=config.monitor_max_mark_age_minutes)
+    exits_triggered: list[str] = []
+    orders_submitted: list[str] = []
+    errors: list[CycleError] = []
+
+    for pos in open_positions:
+        try:
+            with get_connection(engine) as conn:
+                if _flatten_mode:
+                    order = flatten_position(pos, conn, broker, now)
+                else:
+                    order = (
+                        check_stop_loss(pos, conn, broker, now, max_mark_age)
+                        or check_profit_target(pos, conn, broker, now, max_mark_age)
+                        or check_time_stop(pos, conn, broker, now, max_mark_age)
+                    )
+
+                if order is not None:
+                    exits_triggered.append(pos.id)
+                    orders_submitted.append(order.id)
+        except MarkStaleError as exc:
+            logger.error(
+                "run_monitor_cycle: mark stale for position %s — %s (run reconcile "
+                "at cycle-top to fix; this position was skipped this cycle)",
+                pos.id,
+                exc,
+            )
+            errors.append(
+                CycleError(
+                    stage=CycleStage.STOP_EVAL,
+                    message=str(exc),
+                    recoverable=True,
+                )
+            )
+        except Exception as exc:
+            logger.error(
+                "run_monitor_cycle: unexpected error evaluating position %s — %s",
+                pos.id,
+                exc,
+            )
+            errors.append(
+                CycleError(
+                    stage=CycleStage.STOP_EVAL,
+                    message=f"Position {pos.id}: {exc}",
+                    recoverable=True,
+                )
+            )
+
+    # ── Step 6: FINALIZE — write OutcomeRecords for fills detected this cycle ─
+    # These are positions whose closing orders filled during step 3's reconcile.
+    # We write the OutcomeRecord NOW (not at trigger time) so realized_pnl uses
+    # the actual fill price, not a placeholder. The exit_reason is carried on
+    # the closing Order written at trigger time.
+    _finalize_closed_positions(engine, now, state_diff.closed_positions)
+
+    return MonitorResult(
+        positions_evaluated=len(open_positions),
+        exits_triggered=exits_triggered,
+        orders_submitted=orders_submitted,
+        errors=errors,
+    )
+
+
+def _finalize_closed_positions(
+    engine: Engine,
+    now: datetime,
+    closed_positions: list[Position],
+) -> None:
+    """Write OutcomeRecords for positions that reconcile confirmed as CLOSED.
+
+    Called at the end of run_monitor_cycle with StateDiff.closed_positions —
+    the list of positions that transitioned PENDING_CLOSE → CLOSED during this
+    cycle's reconcile pass.
+
+    Matches each closed position to its filled closing Order (role=CLOSE,
+    status=FILLED) to retrieve the actual fill price and exit_reason. The
+    realized_pnl is computed from entry_net_amount and the fill price using
+    the sign convention: realized_pnl = (-entry_net_amount - fill_price) *
+    quantity * 100.
+
+    Positions with no matching closing Order (e.g. expirations handled by
+    WP-1.5 reconcile) are skipped — their OutcomeRecords are written by the
+    expiry/assignment path.
+    """
+    if not closed_positions:
+        return
+
+    for pos in closed_positions:
+        try:
+            with get_connection(engine) as conn:
+                closing_order = get_closing_order(conn, pos.id)
+                if closing_order is None:
+                    logger.debug(
+                        "_finalize_closed_positions: no closing order for "
+                        "position %s — skipping OutcomeRecord",
+                        pos.id,
+                    )
+                    continue
+
+                fill_price = closing_order.net_fill_price
+                if fill_price is None:
+                    logger.warning(
+                        "_finalize_closed_positions: closing order %s for "
+                        "position %s has no fill price — deferring OutcomeRecord "
+                        "until fill price is available",
+                        closing_order.id,
+                        pos.id,
+                    )
+                    continue
+
+                realized_pnl = (-pos.entry_net_amount - fill_price) * pos.quantity * 100
+                outcome = OutcomeRecord(
+                    id=str(uuid.uuid4()),
+                    position_id=pos.id,
+                    event_type=OutcomeEventType.FULL_CLOSE,
+                    recorded_at=now,
+                    contracts_closed=pos.quantity,
+                    realized_pnl=realized_pnl,
+                    fill_price=fill_price,
+                    closing_order_id=closing_order.id,
+                    exit_reason=closing_order.exit_reason,
+                )
+                write_outcome_record(conn, outcome)
+                logger.info(
+                    "_finalize_closed_positions: OutcomeRecord written for "
+                    "position=%s exit_reason=%s realized_pnl=%.2f fill_price=%.4f",
+                    pos.id,
+                    closing_order.exit_reason,
+                    realized_pnl,
+                    fill_price,
+                )
+        except Exception as exc:
+            logger.error(
+                "_finalize_closed_positions: failed to write OutcomeRecord for "
+                "position %s — %s (non-fatal; position is already CLOSED in DB)",
+                pos.id,
+                exc,
+            )
 
 
 __all__ = [
