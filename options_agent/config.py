@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 import exchange_calendars as xcals
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from options_agent.contracts.data import MarketRegime
 from options_agent.risk.limits import Limits
 
 if TYPE_CHECKING:
