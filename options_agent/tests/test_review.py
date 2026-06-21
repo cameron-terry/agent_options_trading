@@ -158,9 +158,7 @@ def _jr(
     _CYCLE_COUNTER[0] += 1
     cid = cycle_id or f"cycle-{_CYCLE_COUNTER[0]:04d}"
     rejection_rule_ids = (
-        [ValidationRuleId.MAX_LOSS_CAP]
-        if action_taken == ActionTaken.REJECTED
-        else []
+        [ValidationRuleId.MAX_LOSS_CAP] if action_taken == ActionTaken.REJECTED else []
     )
     return JournalRecord(
         cycle_id=cid,
@@ -353,6 +351,42 @@ def test_hit_rate_partial_then_full_close_sums_pnl() -> None:
     assert report.overall.trade_count == 1
     assert report.overall.hit_count == 1
     assert report.overall.total_pnl == pytest.approx(40.0)
+
+
+# ---------------------------------------------------------------------------
+# hit_rate_by_strategy — CLOSED/ROLLED records sharing a position_id must not
+# overwrite the opening OPENED record in _build_position_map
+# ---------------------------------------------------------------------------
+
+
+def test_hit_rate_closed_record_does_not_shadow_opening_record() -> None:
+    # p12 was opened (bull_put_spread / SPY) by r_open, then closed by an agent
+    # CLOSE cycle r_close (which also carries position_ids=["p12"] but has
+    # strategy=None, underlying=None). If _build_position_map includes non-OPENED
+    # records, r_close overwrites r_open and the position is attributed to
+    # "_unknown". The fix (filter to OPENED only) preserves the opening metadata.
+    r_open = _jr(
+        action_taken=ActionTaken.OPENED,
+        position_ids=["p12"],
+        strategy="bull_put_spread",
+        underlying="SPY",
+    )
+    r_close = _jr(
+        action_taken=ActionTaken.CLOSED,
+        position_ids=["p12"],
+    )
+    o = _outcome("p12", 175.0)
+
+    report = hit_rate_by_strategy([r_open, r_close], [o])
+
+    # Must be attributed to bull_put_spread, not "_unknown"
+    assert "bull_put_spread" in report.by_strategy
+    assert "_unknown" not in report.by_strategy
+    assert report.by_strategy["bull_put_spread"].trade_count == 1
+    assert report.by_strategy["bull_put_spread"].total_pnl == pytest.approx(175.0)
+
+    # Closing cycle should not create a second trade entry
+    assert report.overall.trade_count == 1
 
 
 # ---------------------------------------------------------------------------

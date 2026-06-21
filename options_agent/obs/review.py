@@ -50,9 +50,6 @@ _TERMINAL = frozenset(
     {OutcomeEventType.FULL_CLOSE, OutcomeEventType.EXPIRED, OutcomeEventType.ASSIGNED}
 )
 
-# action_taken values where the LLM was NOT called (short-circuited before it)
-_GATED = frozenset({ActionTaken.NO_ACTION_GATED})
-
 # action_taken values where the LLM was called but returned no specific proposal
 _NO_PROPOSAL = frozenset({ActionTaken.NO_ACTION_GATED, ActionTaken.NO_ACTION_AGENT})
 
@@ -157,9 +154,20 @@ def _apply_filters(
 
 
 def _build_position_map(records: Sequence[JournalRecord]) -> dict[str, JournalRecord]:
-    """Map each position_id → its opening JournalRecord."""
+    """Map each position_id → its opening JournalRecord.
+
+    Only OPENED records are considered. CLOSED and ROLLED JournalRecords also
+    carry position_ids (they reference the position being closed/rolled), but
+    they have strategy=None and underlying=None. Including them would silently
+    overwrite the opening record in the map, collapsing all P&L attribution for
+    that position into "_unknown". Filtering to OPENED is safe because the
+    opening record is always written first and is the source of the strategy /
+    underlying metadata we need.
+    """
     pos_map: dict[str, JournalRecord] = {}
     for record in records:
+        if record.action_taken != ActionTaken.OPENED:
+            continue
         for pid in record.position_ids:
             pos_map[pid] = record
     return pos_map
@@ -367,19 +375,27 @@ def cycle_funnel(
     (before enough journal data exists for meaningful hit rates), the funnel
     is the primary diagnostic.
 
+    JournalRecords are written exclusively by the entry cycle (run_entry_cycle).
+    Monitor-driven closes (run_monitor_cycle) write OutcomeRecords but never
+    JournalRecords. CLOSED and ROLLED JournalRecords therefore represent
+    agent-driven close/roll proposals — they are correctly counted under
+    "proposed" because the LLM was called and returned a specific action.
+
     Stage definitions:
-      total            All cycles in the window.
+      total            All entry-cycle records in the window.
       gated            NO_ACTION_GATED — short-circuited before the LLM call.
       reasoned         total - gated — LLM was called.
       no_action_agent  LLM returned action=NO_ACTION.
-      proposed         reasoned - no_action_agent — agent returned a specific proposal.
+      proposed         reasoned - no_action_agent — agent returned a specific
+                       proposal (OPENED, CLOSED, ROLLED, REJECTED, SIZED_TO_ZERO,
+                       or EXECUTION_FAILED).
       rejected         Proposal failed deterministic validation.
       sized_to_zero    Passed validation but sizing returned 0 contracts.
       execution_failed Passed validation+sizing but broker rejected the order.
       opened           Position successfully opened.
 
     Args:
-        records: All JournalRecords (any action_taken).
+        records: All JournalRecords (entry-cycle records only — see note above).
         since:   Filter to records with timestamp >= since.
     """
     filtered = (
