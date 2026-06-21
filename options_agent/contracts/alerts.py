@@ -32,6 +32,7 @@ class AlertEventType(StrEnum):
     FILL = "FILL"
     REJECTION = "REJECTION"
     KILL_SWITCH_CHANGE = "KILL_SWITCH_CHANGE"
+    STATE_INTEGRITY = "STATE_INTEGRITY"
 
 
 class AlertSeverity(StrEnum):
