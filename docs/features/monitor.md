@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/monitor/`  
 **Credentials required:** none (exit rule evaluators are pure logic against cached position state)  
-**Status:** in progress (WP-5.1 stop-loss ✓, WP-5.2 profit-target ✓, WP-5.3 DTE ✓, WP-5.4 idempotency ✓, WP-5.5 cycle body ✓, WP-5.6 equity guards ✓)
+**Status:** in progress (WP-5.1 stop-loss ✓, WP-5.2 profit-target ✓, WP-5.3 DTE ✓, WP-5.4 idempotency ✓, WP-5.5 cycle body ✓, WP-5.6 equity guards ✓, WP-8.3 alert dispatch + assignment handling ✓)
 
 The fast, deterministic exit loop. No LLM, no context assembly — per-position rule evaluation that runs every 1–5 minutes during market hours. Rules read cached state from the last reconcile cycle; the monitor never makes live broker quote calls for individual positions.
 
@@ -133,19 +133,21 @@ The `MarkStaleError` check applies only to `check_stop_loss` and `check_profit_t
 ## Monitor cycle (`run_monitor_cycle`)
 
 **Location:** `options_agent/orchestrator.py`  
-**Signature:** `run_monitor_cycle(config, *, broker=None, engine=None, _now=None) -> MonitorResult`
+**Signature:** `run_monitor_cycle(config, *, broker=None, engine=None, dispatcher=None, _now=None) -> MonitorResult`
 
 Wires all exit evaluators into a full cycle. Call sequence:
 
 1. **Kill-switch check** — reads `KillSwitchState` from DB. Fail-safe: if the read fails, proceeds with `NONE` semantics (never auto-FLATTENs on an unreadable flag).
 2. **Market open pre-flight** — returns an empty `MonitorResult` if the exchange is closed.
-3. **Reconcile** — calls `_reconcile(broker, conn, _clock=now)` to refresh position marks and detect fills from the previous cycle. The `StateDiff` returned here is used in step 6.
+3. **Reconcile** — calls `_reconcile(broker, conn, _clock=now)` to refresh position marks and detect fills from the previous cycle. The `StateDiff` returned here is used in steps 3a and 6.
+3a. **Assignment handling** — if `StateDiff.assigned_positions` is non-empty, calls `_dispose_assignment()`: engages `HALT`, dispatches a `KILL_SWITCH_CHANGE` CRITICAL alert, and journals a gated record. The cycle **does not return** — monitor continues managing the remaining options book. (WP-7.1: HALT blocks new entries, not the monitor.)
 4. **Position snapshot** — reads fresh positions from DB post-reconcile via `list_open_positions`.
 5. **Exit evaluation loop** — for each position:
    - **FLATTEN mode**: calls `flatten_position`; bypasses all rule thresholds and the mark-staleness check.
    - **Normal mode**: evaluates stop-loss → profit-target → DTE; first rule that fires submits a closing order and skips the rest.
+   - When a closing order is submitted, dispatches an `EXIT_SUBMITTED` (INFO) alert — early signal that an exit is in flight.
    - `MarkStaleError` → recorded in `MonitorResult.errors`, loop continues.
-6. **Finalize** — writes `OutcomeRecord` for each position in `StateDiff.closed_positions` (positions that transitioned `PENDING_CLOSE → CLOSED` during step 3's reconcile).
+6. **Finalize** — writes `OutcomeRecord` for each position in `StateDiff.closed_positions` (positions that transitioned `PENDING_CLOSE → CLOSED` during step 3's reconcile). After writing the `OutcomeRecord`, dispatches a `FILL` (INFO) alert with the confirmed `realized_pnl` and `fill_price`.
 
 **Kill-switch semantics:**
 
@@ -157,6 +159,29 @@ Wires all exit evaluators into a full cycle. Call sequence:
 
 **Test clock override:** `_now` is a test-only parameter (same pattern as `reconcile`'s `_clock`). Production callers must not pass it. Tests use it to inject a market-hours timestamp so the market-open gate passes without mocking the exchange calendar.
 
+### Alert dispatch (`dispatcher`)
+
+`dispatcher` accepts an `AlertDispatcher | None`. Pass `None` (or omit) to suppress alerting (e.g., in unit tests that don't need alert verification). Pass a real `AlertDispatcher` wrapping a `DiscordChannel` or `NullChannel` in production or integration tests.
+
+Two distinct alert events are dispatched per position lifecycle:
+
+| Event | When | Severity | Detail |
+|---|---|---|---|
+| `EXIT_SUBMITTED` | Closing order sent to broker (order may be WORKING) | INFO | exit reason, symbol, position ID, broker order ID |
+| `FILL` | `_finalize_closed_positions` confirms CLOSED with known realized P&L | INFO | exit reason, symbol, position ID, realized_pnl, fill_price |
+
+These are never both fired in the same cycle for the same position — `EXIT_SUBMITTED` fires when submit succeeds; `FILL` fires in a later cycle when reconcile returns that position in `StateDiff.closed_positions`.
+
+### Assignment handling
+
+Option assignments are detected during reconcile via `StateDiff.assigned_positions: list[AssignmentEvent]`. When one or more assignments are detected, `run_monitor_cycle` calls `_dispose_assignment()`, which:
+
+1. Writes `KillSwitchState.HALT` to the DB (so the next entry cycle refuses to open new positions).
+2. Dispatches a `KILL_SWITCH_CHANGE` CRITICAL alert with assignment count and reason.
+3. Journals a gated record (`ActionTaken.NO_ACTION_GATED`) for audit purposes.
+
+The monitor cycle then **continues** — it does not return early. HALT semantics (WP-7.1) block new entries, not the monitor loop. The existing options book is still managed: stops are evaluated, fills are confirmed, and outcomes are journaled for all remaining positions.
+
 ### Deferred outcome journaling
 
 `OutcomeRecord` is **not** written when a closing order is submitted. It is written in the finalize step (step 6) of a later cycle, after reconcile confirms the fill, using the real `net_fill_price` from the filled `Order`. This prevents `realized_pnl=0.0` from being stored as a permanent record.
@@ -165,6 +190,7 @@ Propagation chain:
 1. Exit evaluator tags `Order.exit_reason` at submit time (e.g., `ExitReason.STOP_LOSS`).
 2. `_finalize_closed_positions` reads `exit_reason` from the filled `Order` via `get_closing_order`.
 3. `OutcomeRecord.exit_reason` is written with the same value, enabling `GROUP BY exit_reason` queries in WP-7.
+4. After the DB write, a `FILL` alert is dispatched with `realized_pnl` and `fill_price` from the same `OutcomeRecord`.
 
 ### `ExitReason` enum
 
