@@ -159,6 +159,7 @@ def test_alert_event_optional_fields_default_to_none() -> None:
 
 
 def test_default_severity_mapping() -> None:
+    assert DEFAULT_SEVERITY[AlertEventType.EXIT_SUBMITTED] == AlertSeverity.INFO
     assert DEFAULT_SEVERITY[AlertEventType.FILL] == AlertSeverity.INFO
     assert DEFAULT_SEVERITY[AlertEventType.REJECTION] == AlertSeverity.WARN
     assert DEFAULT_SEVERITY[AlertEventType.KILL_SWITCH_CHANGE] == AlertSeverity.CRITICAL

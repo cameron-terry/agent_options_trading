@@ -27,6 +27,7 @@ from options_agent.contracts.orchestrator import (
 from options_agent.contracts.state import (
     ActionTaken,
     AssetClass,
+    AssignmentEvent,
     ContextSnapshot,
     Decision,
     KillSwitchState,
@@ -141,33 +142,40 @@ def _journal_gated(
 
 
 def _dispose_assignment(
-    assigned_positions: list,
+    assigned_positions: list[AssignmentEvent],
     *,
     engine: Engine,
     cycle_id: str,
     now: datetime,
     config: Config,
     dispatcher: AlertDispatcher | None,
+    set_by: str = "orchestrator",
 ) -> None:
     """Policy: HALT + CRITICAL on option assignment.
 
     An equity position from assignment is categorically outside the system's
     model — no equity order path exists and the exposure cannot be sized or
-    managed. HALT immediately and emit a CRITICAL alert. The monitor cycle
-    continues to manage existing options positions.
+    managed. HALT immediately and emit a CRITICAL alert.
 
-    This is a hardcoded policy function to enable a clean future swap when
-    an equity order path is available.
+    For the entry cycle the caller returns immediately after this call.
+    For the monitor cycle the caller continues managing the options book —
+    HALT stops new entries but the monitor must keep evaluating existing
+    options exits under HALT (WP-7.1 HALT semantics).
+
+    A NO_ACTION_GATED JournalRecord is written so WP-7 can cross-reference
+    the halt event via cycle_id. The equity Position rows themselves are
+    written by the WP-1.5 reconcile path and carry the full assignment detail
+    (assigned_qty, assignment_price, closed_option_position_id).
     """
     with get_connection(engine) as _halt_conn:
         set_state(
             _halt_conn,
             KillSwitchState.HALT,
-            set_by="orchestrator.run_entry_cycle",
+            set_by=set_by,
             reason=(
                 f"cycle {cycle_id}: {len(assigned_positions)} option assignment(s) "
-                "detected; equity position(s) outside system model — human review"
-                " required"
+                "detected; equity position(s) outside system model — human review "
+                "required"
             ),
         )
     detail = (
@@ -184,8 +192,8 @@ def _dispose_assignment(
     )
     _journal_gated(engine, cycle_id, now, config, _gated_context_snapshot(config, now))
     logger.critical(
-        "cycle %s: ASSIGNMENT_HALT — %d assignment(s); HALT engaged. %s",
-        cycle_id,
+        "%s ASSIGNMENT_HALT — %d assignment(s); HALT engaged. %s",
+        set_by,
         len(assigned_positions),
         detail,
     )
@@ -441,6 +449,7 @@ def run_entry_cycle(
             now=now,
             config=config,
             dispatcher=dispatcher,
+            set_by="orchestrator.run_entry_cycle",
         )
         return CycleResult(
             cycle_id=cycle_id,
@@ -871,24 +880,36 @@ def run_monitor_cycle(
     *,
     broker: BrokerClient | None = None,
     engine: Engine | None = None,
+    dispatcher: AlertDispatcher | None = None,
     _now: datetime | None = None,
 ) -> MonitorResult:
     """Run one monitor cycle: reconcile state, then evaluate exit rules.
 
-    WP-5.5 implementation.
+    WP-8.3 — adds alert dispatch (EXIT_SUBMITTED, FILL) and assignment handling
+    atop the WP-5.5 core implementation.
 
     Sequence:
     1. Kill-switch check.
     2. Market open pre-flight — no-op (returns empty MonitorResult) when closed.
     3. Reconcile state via broker to refresh position marks and detect fills.
+       3a. Assignments: HALT + CRITICAL; monitor continues managing options book.
     4. Read all open positions from DB (fresh after reconcile).
     5. For each position:
        - FLATTEN mode: submit close immediately, bypassing rule evaluation.
        - Normal mode: evaluate stop-loss → profit-target → DTE in order;
          first rule that triggers submits a close and skips the remainder.
-    6. Finalize: write OutcomeRecords for positions that transitioned
-       PENDING_CLOSE → CLOSED during step 3's reconcile.
+       - On trigger: dispatch EXIT_SUBMITTED alert (early signal; order is WORKING).
+    6. Finalize: write OutcomeRecords for positions confirmed CLOSED this cycle;
+       dispatch FILL alert with realized_pnl for each confirmed close.
     7. Return MonitorResult.
+
+    Alert semantics:
+        EXIT_SUBMITTED — fires at close-order-submit time. The order may still be
+            WORKING. This is the early operator signal that an exit was triggered.
+        FILL — fires in the finalize step when reconcile confirms the position is
+            CLOSED and realized_pnl is computed from the actual fill price. Never
+            fire two FILLs for the same close; EXIT_SUBMITTED and FILL are distinct
+            events at distinct moments.
 
     Kill-switch semantics:
         NONE    — normal exit evaluation.
@@ -897,6 +918,13 @@ def run_monitor_cycle(
         FLATTEN — all open OPTION_STRATEGY positions closed immediately,
                   bypassing stop/target/DTE checks. EQUITY disposition is
                   WP-8's responsibility.
+
+    Assignment handling:
+        If reconcile detects option assignments, HALT + CRITICAL alert via
+        _dispose_assignment(). Unlike the entry cycle, the monitor does NOT return
+        early — it continues evaluating remaining options positions, because HALT
+        stops new entries but the monitor must keep managing the existing book
+        (WP-7.1 semantics). The entry cycle will short-circuit on HALT next run.
 
     Fail-safe on kill-switch read error:
         Proceed with NONE semantics. Never auto-FLATTEN on an unreadable flag;
@@ -927,6 +955,8 @@ def run_monitor_cycle(
     """
     if engine is None:
         engine = build_engine(config.db_url)
+
+    cycle_id = str(uuid.uuid4())
 
     # ── Step 1: KILL_SWITCH ──────────────────────────────────────────────────
     # Fail-safe: if the DB read fails, proceed with normal exit logic (NONE).
@@ -974,6 +1004,22 @@ def run_monitor_cycle(
     with get_connection(engine) as _rec_conn:
         state_diff = _reconcile(broker, _rec_conn, _clock=now)
 
+    # ── Step 3a: ASSIGNMENT HANDLING ─────────────────────────────────────────
+    # Assignment detected → HALT + CRITICAL, but monitor continues managing
+    # the options book. HALT stops new entries (entry cycle short-circuits on it);
+    # the monitor must keep evaluating existing positions under HALT (WP-7.1).
+    if state_diff.assigned_positions:
+        _dispose_assignment(
+            state_diff.assigned_positions,
+            engine=engine,
+            cycle_id=cycle_id,
+            now=now,
+            config=config,
+            dispatcher=dispatcher,
+            set_by="orchestrator.run_monitor_cycle",
+        )
+        # Do NOT return here — monitor continues with remaining options positions.
+
     # ── Step 4: FRESH POSITIONS ──────────────────────────────────────────────
     # Re-read after reconcile so marks are current. The positions parameter was
     # dropped from this function (WP-5.5 amendment to the WP-0.7 signature)
@@ -1003,6 +1049,23 @@ def run_monitor_cycle(
                 if order is not None:
                     exits_triggered.append(pos.id)
                     orders_submitted.append(order.id)
+                    # EXIT_SUBMITTED fires at close-order-submit time. The order
+                    # may still be WORKING; FILL fires later (step 6) once the
+                    # fill is confirmed and realized_pnl is known.
+                    _dispatch(
+                        dispatcher,
+                        AlertEvent(
+                            event_type=AlertEventType.EXIT_SUBMITTED,
+                            severity=AlertSeverity.INFO,
+                            symbol=pos.underlying,
+                            order_id=order.broker_order_id,
+                            detail=(
+                                f"Exit close submitted: {order.exit_reason} on "
+                                f"{pos.underlying} position={pos.id} "
+                                f"broker_id={order.broker_order_id}"
+                            ),
+                        ),
+                    )
         except MarkStaleError as exc:
             logger.error(
                 "run_monitor_cycle: mark stale for position %s — %s (run reconcile "
@@ -1035,8 +1098,9 @@ def run_monitor_cycle(
     # These are positions whose closing orders filled during step 3's reconcile.
     # We write the OutcomeRecord NOW (not at trigger time) so realized_pnl uses
     # the actual fill price, not a placeholder. The exit_reason is carried on
-    # the closing Order written at trigger time.
-    _finalize_closed_positions(engine, now, state_diff.closed_positions)
+    # the closing Order written at trigger time. FILL alert fires here — at the
+    # moment the position is confirmed CLOSED with known realized_pnl.
+    _finalize_closed_positions(engine, now, state_diff.closed_positions, dispatcher)
 
     return MonitorResult(
         positions_evaluated=len(open_positions),
@@ -1050,8 +1114,9 @@ def _finalize_closed_positions(
     engine: Engine,
     now: datetime,
     closed_positions: list[Position],
+    dispatcher: AlertDispatcher | None = None,
 ) -> None:
-    """Write OutcomeRecords for positions that reconcile confirmed as CLOSED.
+    """Write OutcomeRecords and dispatch FILL alerts for confirmed closes.
 
     Called at the end of run_monitor_cycle with StateDiff.closed_positions —
     the list of positions that transitioned PENDING_CLOSE → CLOSED during this
@@ -1062,6 +1127,11 @@ def _finalize_closed_positions(
     realized_pnl is computed from entry_net_amount and the fill price using
     the sign convention: realized_pnl = (-entry_net_amount - fill_price) *
     quantity * 100.
+
+    FILL alert is dispatched here — not at close-order-submit time — because
+    this is the moment the position is confirmed CLOSED and realized_pnl is
+    known from the actual fill price. EXIT_SUBMITTED fires at submit time;
+    FILL fires here. Never two FILLs for the same close.
 
     Positions with no matching closing Order (e.g. expirations handled by
     WP-1.5 reconcile) are skipped — their OutcomeRecords are written by the
@@ -1113,6 +1183,21 @@ def _finalize_closed_positions(
                     closing_order.exit_reason,
                     realized_pnl,
                     fill_price,
+                )
+                _dispatch(
+                    dispatcher,
+                    AlertEvent(
+                        event_type=AlertEventType.FILL,
+                        severity=AlertSeverity.INFO,
+                        symbol=pos.underlying,
+                        order_id=closing_order.broker_order_id,
+                        detail=(
+                            f"Position closed: {closing_order.exit_reason} on "
+                            f"{pos.underlying} position={pos.id} "
+                            f"realized_pnl={realized_pnl:.2f} "
+                            f"fill_price={fill_price:.4f}"
+                        ),
+                    ),
                 )
         except Exception as exc:
             logger.error(

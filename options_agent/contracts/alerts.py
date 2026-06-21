@@ -20,10 +20,17 @@ class AlertEventType(StrEnum):
     """What triggered the alert.
 
     ENTRY_SUBMITTED    — order sent to broker (working, not yet confirmed filled).
-    FILL               — a position leg was confirmed filled by the broker.
+    EXIT_SUBMITTED     — a closing order was sent to the broker (may be WORKING).
+    FILL               — a position was confirmed closed by the broker
+                         (fill confirmed, realized_pnl known).
     REJECTION          — a TradeProposal was rejected by the validator.
     KILL_SWITCH_CHANGE — kill-switch state changed (HALT, FLATTEN, or NONE resume).
     STATE_INTEGRITY    — reconcile detected an anomaly (orphan, unmatched-local, etc).
+
+    EXIT_SUBMITTED fires at close-order-submit time so the operator has an early
+    signal that an exit was triggered. FILL fires in _finalize_closed_positions()
+    once reconcile confirms CLOSED and realized_pnl is available — two distinct
+    events, two distinct moments. Never fire two FILLs for the same close.
 
     Delivery failures are recorded as rows in alert_delivery_failures (DB),
     not as AlertEvents dispatched through the channel — dispatching would be
@@ -32,6 +39,7 @@ class AlertEventType(StrEnum):
     """
 
     ENTRY_SUBMITTED = "ENTRY_SUBMITTED"
+    EXIT_SUBMITTED = "EXIT_SUBMITTED"
     FILL = "FILL"
     REJECTION = "REJECTION"
     KILL_SWITCH_CHANGE = "KILL_SWITCH_CHANGE"
@@ -53,6 +61,7 @@ class AlertSeverity(StrEnum):
 
 DEFAULT_SEVERITY: dict[AlertEventType, AlertSeverity] = {
     AlertEventType.ENTRY_SUBMITTED: AlertSeverity.INFO,
+    AlertEventType.EXIT_SUBMITTED: AlertSeverity.INFO,
     AlertEventType.FILL: AlertSeverity.INFO,
     AlertEventType.REJECTION: AlertSeverity.WARN,
     AlertEventType.KILL_SWITCH_CHANGE: AlertSeverity.CRITICAL,
