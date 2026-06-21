@@ -183,12 +183,34 @@ def test_list_history_limit(engine) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_entry_cycle_none_proceeds(engine) -> None:
-    """No kill switch armed → cycle proceeds normally."""
-    # Table is empty → NONE → cycle runs (stub reasoner will validate/size)
+def test_entry_cycle_none_proceeds(engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No kill switch armed → cycle proceeds past kill-switch check."""
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock, patch
+
+    from options_agent.execution.broker import BrokerClient
+
+    monkeypatch.setenv("ALPACA_API_KEY", "key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
+    _tc = "options_agent.execution.broker.TradingClient"
+    with patch(_tc, return_value=MagicMock()):
+        broker = BrokerClient(Config())
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_all_positions = MagicMock(return_value=[])
+    broker.get_account_activities = MagicMock(return_value=[])
+
+    from options_agent.agent.stub_reasoner import stub_reasoner
+
+    # Tuesday 2026-06-16 at 14:30 UTC — NYSE open, outside blackout windows.
+    _market_hours = datetime(2026, 6, 16, 14, 30, tzinfo=UTC)
     config = Config(limits=Limits(allowed_strategies=frozenset()))
-    result = run_entry_cycle(config, engine=engine)
-    # Empty allowed_strategies → REJECTED (not NO_ACTION_GATED)
+
+    with patch("options_agent.orchestrator.reason", return_value=stub_reasoner()):
+        result = run_entry_cycle(
+            config, broker=broker, engine=engine, _now=_market_hours
+        )
+
+    # Empty allowed_strategies → REJECTED (not NO_ACTION_GATED).
     assert result.action_taken == ActionTaken.REJECTED
     assert result.short_circuit_reason is None
 

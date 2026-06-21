@@ -7,9 +7,11 @@ from datetime import UTC, datetime, timedelta
 import exchange_calendars as xcals
 from sqlalchemy.engine import Engine
 
-from options_agent.agent.stub_reasoner import stub_reasoner
+from options_agent.agent.reasoner import ReasonerError, reason
+from options_agent.agent.tools_mock import MOCK_TOOL_IMPLS, ToolImpl
 from options_agent.config import Config
-from options_agent.contracts.data import PortfolioState
+from options_agent.context.assembler import assemble_context, to_context_snapshot
+from options_agent.contracts.alerts import AlertEvent, AlertEventType, AlertSeverity
 from options_agent.contracts.journal import (
     JournalRecord,
     OutcomeEventType,
@@ -29,6 +31,7 @@ from options_agent.contracts.state import (
     Decision,
     KillSwitchState,
     LegStatus,
+    OrderRole,
     OrderStatus,
     Position,
     PositionLeg,
@@ -43,8 +46,19 @@ from options_agent.monitor.exits import (
     check_time_stop,
     flatten_position,
 )
-from options_agent.obs.killswitch import get_current_state, is_flatten, is_halted
-from options_agent.risk.gates import market_is_open
+from options_agent.obs.alerts import AlertDispatcher
+from options_agent.obs.killswitch import (
+    get_current_state,
+    is_flatten,
+    is_halted,
+    set_state,
+)
+from options_agent.risk.gates import (
+    has_buying_power,
+    market_is_open,
+    under_position_cap,
+    within_blackout_window,
+)
 from options_agent.risk.sizing import size as _size
 from options_agent.risk.validator import validate_structural
 from options_agent.state.crud import (
@@ -52,29 +66,16 @@ from options_agent.state.crud import (
     insert_order,
     insert_position,
     list_open_positions,
+    list_pending_orders,
 )
 from options_agent.state.db import build_engine, get_connection
 from options_agent.state.journal import write_journal_record, write_outcome_record
 
 logger = logging.getLogger(__name__)
 
-# WP-0.5 slice constants -----------------------------------------------------
-# _SLICE_LIMIT_PRICE removed: limit price is now config.slice_limit_price so
-# the smoke test (WP-0.5.3) can pass -0.01 to guarantee a paper fill without
-# adding a test-only parameter to the production signature.
-# Sign convention: negative = net credit received. Matches:
-#   - Alpaca mleg limit_price (build_multi_leg_request: sell legs contribute −mid)
-#   - WP-0.3 Position.entry_net_amount (negative = credit received)
-#   - compute_multi_leg_limit_price sign semantics
-_SLICE_PROMPT_VERSION: str = "stub-0.5.2"
-_SLICE_MODEL_ID: str = "stub"
 
-
-def _stub_context_snapshot(now: datetime) -> ContextSnapshot:
-    """Minimal context snapshot for the WP-0.5.2 stub slice.
-
-    The real assembler (WP-6) populates assembled_context with live market data.
-    """
+def _gated_context_snapshot(config: Config, now: datetime) -> ContextSnapshot:
+    """Minimal ContextSnapshot for cycles that short-circuit before assembly."""
     raw: dict = {}
     context_hash = hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()[
         :16
@@ -82,9 +83,111 @@ def _stub_context_snapshot(now: datetime) -> ContextSnapshot:
     return ContextSnapshot(
         assembled_context=raw,
         context_hash=context_hash,
-        model_id=_SLICE_MODEL_ID,
-        prompt_version=_SLICE_PROMPT_VERSION,
+        model_id=config.model_id,
+        prompt_version=config.playbook.playbook_version,
         assembled_at=now,
+    )
+
+
+def _dispatch(dispatcher: AlertDispatcher | None, event: AlertEvent) -> None:
+    """Null-safe dispatch: enqueues if dispatcher active, silently skips otherwise."""
+    if dispatcher is not None:
+        dispatcher.dispatch(event)
+
+
+def _build_tool_impls(config: Config) -> dict[str, ToolImpl]:
+    """Return the tool implementation map for the current run mode.
+
+    WP-8.5 swaps MOCK_TOOL_IMPLS for real WP-3 impls when alpaca_paper=False.
+    Paper guard ensures MOCK_TOOL_IMPLS is only used on paper accounts.
+    """
+    if not config.alpaca_paper:
+        raise RuntimeError(
+            "Real WP-3 tool implementations not yet wired (WP-8.5). "
+            "alpaca_paper must be True to use MOCK_TOOL_IMPLS."
+        )
+    logger.info(
+        "Using MOCK_TOOL_IMPLS (alpaca_paper=True; WP-3 swap deferred to WP-8.5)"
+    )
+    return MOCK_TOOL_IMPLS
+
+
+def _journal_gated(
+    engine: Engine,
+    cycle_id: str,
+    now: datetime,
+    config: Config,
+    context_snapshot: ContextSnapshot,
+) -> None:
+    """Write a NO_ACTION_GATED JournalRecord for a short-circuited cycle."""
+    decision = Decision(
+        proposal=None,
+        validation_result=None,
+        sizing_result=None,
+        action_taken=ActionTaken.NO_ACTION_GATED,
+    )
+    journal_record = JournalRecord(
+        cycle_id=cycle_id,
+        timestamp=now,
+        action_taken=ActionTaken.NO_ACTION_GATED,
+        decision=decision,
+        context_snapshot=context_snapshot,
+        limits_version=config.limits.limits_version,
+        prompt_version=config.playbook.playbook_version,
+        model_id=config.model_id,
+    )
+    with get_connection(engine) as conn:
+        write_journal_record(conn, journal_record)
+
+
+def _dispose_assignment(
+    assigned_positions: list,
+    *,
+    engine: Engine,
+    cycle_id: str,
+    now: datetime,
+    config: Config,
+    dispatcher: AlertDispatcher | None,
+) -> None:
+    """Policy: HALT + CRITICAL on option assignment.
+
+    An equity position from assignment is categorically outside the system's
+    model — no equity order path exists and the exposure cannot be sized or
+    managed. HALT immediately and emit a CRITICAL alert. The monitor cycle
+    continues to manage existing options positions.
+
+    This is a hardcoded policy function to enable a clean future swap when
+    an equity order path is available.
+    """
+    with get_connection(engine) as _halt_conn:
+        set_state(
+            _halt_conn,
+            KillSwitchState.HALT,
+            set_by="orchestrator.run_entry_cycle",
+            reason=(
+                f"cycle {cycle_id}: {len(assigned_positions)} option assignment(s) "
+                "detected; equity position(s) outside system model — human review"
+                " required"
+            ),
+        )
+    detail = (
+        f"HALT engaged: {len(assigned_positions)} option assignment(s) created "
+        "equity position(s) the system cannot model. Manual liquidation required."
+    )
+    _dispatch(
+        dispatcher,
+        AlertEvent(
+            event_type=AlertEventType.KILL_SWITCH_CHANGE,
+            severity=AlertSeverity.CRITICAL,
+            detail=detail,
+        ),
+    )
+    _journal_gated(engine, cycle_id, now, config, _gated_context_snapshot(config, now))
+    logger.critical(
+        "cycle %s: ASSIGNMENT_HALT — %d assignment(s); HALT engaged. %s",
+        cycle_id,
+        len(assigned_positions),
+        detail,
     )
 
 
@@ -93,63 +196,37 @@ def run_entry_cycle(
     *,
     broker: BrokerClient | None = None,
     engine: Engine | None = None,
+    dispatcher: AlertDispatcher | None = None,
+    _now: datetime | None = None,
 ) -> CycleResult:
-    """Run the WP-0.5.2 vertical-slice entry pipeline.
+    """Run the WP-8.2 entry cycle pipeline.
 
-    WP-0.5.2 SLICE — manually-invoked, paper-only, unguarded.
-    No kill-switch check, no pre-flight gates, no context assembly.
-    WP-8 replaces this body with the full 9-step flow.
+    Full 10-step flow replacing the WP-0.5.2 stub body:
+    1.  KILL_SWITCH   — bail on HALT/FLATTEN before any broker calls
+    2.  RECONCILE     — broker.reconcile() → StateDiff (broker is source of truth)
+    3.  STATE_INTEGRITY — act on StateDiff anomalies before gates:
+        3a. WORKING OPEN orders → cancel each at cycle-top;
+            fill-race → proceed (real position, reconcile handles it);
+            cancel-failure → skip entry this cycle (WORKING_CANCEL_FAILED)
+        3b. unmatched_local → HALT + CRITICAL (client_order_id gap; can't resolve)
+        3c. orphans → WARN alert + skip entry this cycle (ORPHAN_UNRESOLVED)
+        3d. assigned_positions → HALT + CRITICAL (equity not modeled; ASSIGNMENT_HALT)
+    4.  TEMPORAL GATES — market_is_open → within_blackout_window (cheap; no portfolio)
+    5.  ASSEMBLE      — context/assembler.py with stub tool_impls (WP-3 swap: WP-8.5)
+    6.  PORTFOLIO GATES — has_buying_power → under_position_cap (uses bundle.portfolio)
+    7.  REASON        — agent/reasoner.py; catch ReasonerError → CycleError(REASON)
+    8.  VALIDATE      — risk/validator.py; rejection journals + REJECTION alert
+    9.  SIZE          — risk/sizing.py; uses bundle.portfolio
+    10. EXECUTE       — broker.submit_multi_leg(); fill alert on success; JOURNAL
 
-    Pipeline: stub_reasoner → validate_structural → size → submit_multi_leg
-              → reconcile → write_journal_record.
-
-    Optional DI parameters (broker, engine) are built from config when absent.
-    Broker is constructed lazily — only if validation passes and sizing proceeds,
-    so test paths that trigger an early return never need live credentials.
-
-    9-step flow:
-    1. KILL_SWITCH — read kill-switch flag first. If HALT, return immediately
-       with action_taken=NO_ACTION_GATED,
-       short_circuit_reason=ShortCircuitReason.KILL_SWITCH_HALT.
-       If FLATTEN, short-circuit with KILL_SWITCH_FLATTEN.
-    2. RECONCILE — pull live account/positions/orders from Alpaca; diff
-       against local DB; detect fills, expirations, assignments since the
-       last run. Broker is source of truth for fills; DB for intent.
-    3. GATES — pre-flight checks (market open, blackout windows, buying
-       power, max open positions). If any gate fails, return immediately
-       with action_taken=NO_ACTION_GATED and the matching ShortCircuitReason:
-       MARKET_CLOSED, BLACKOUT_WINDOW, NO_BUYING_POWER, MAX_POSITIONS.
-       If the action space is empty after gates, return with
-       short_circuit_reason=EMPTY_ACTION_SPACE. These short-circuits avoid
-       paying for an LLM call when there is nothing to do.
-    4. ASSEMBLE — build the compact context bundle: portfolio state + net
-       Greeks, then per-symbol: price, regime, IV rank, earnings-proximity
-       flag, and a pre-filtered chain.
-    5. REASON — single LLM call (agent/reasoner.py). Agent reads context
-       via read-only tools and returns a TradeProposal. It cannot place
-       orders.
-    6. VALIDATE — deterministic proposal validation (risk/validator.py)
-       returns a ValidationResult.
-    7. SIZE — conviction + risk budget -> SizingResult (risk/sizing.py).
-    8. EXECUTE — submit limit order at mid-or-better; record broker order ID.
-    9. JOURNAL — write JournalRecord regardless of outcome, including
-       NO_ACTION and REJECTED cycles. This step must not be skipped under
-       any error path.
-
-    Return contract:
-        Returns a CycleResult for the immediate caller (scheduler / WP-8).
-        The return value does NOT replace the journal. A JournalRecord is
-        always written as a side-effect in step 9.
-        journal_record_id on the result is the FK into that durable record.
-
-    Error handling contract:
-        Expected operational failures (data fetch timeout, broker rejection,
-        tool error) must be caught and encoded in CycleResult.error so the
-        scheduler can react and the loop continues. recoverable=True when the
-        next cycle may succeed without intervention; False otherwise.
-        Infrastructure failures that prevent journalling (DB unreachable,
-        config corrupt) must raise — the loop should halt, not silently
-        continue without recording.
+    Optional DI parameters:
+        broker:     BrokerClient — built from config when absent. Required for
+                    reconcile (step 2), so it is never lazily constructed.
+        engine:     SQLAlchemy Engine — built from config.db_url when absent.
+        dispatcher: AlertDispatcher — None silently suppresses all alerts.
+                    Inject a NullChannel-backed dispatcher in tests.
+        _now:       datetime — test-only clock override (same pattern as
+                    run_monitor_cycle). Production callers must not pass it.
 
     Short-circuit invariant:
         short_circuit_reason is not None implies
@@ -158,14 +235,20 @@ def run_entry_cycle(
     if engine is None:
         engine = build_engine(config.db_url)
 
-    now = datetime.now(UTC)
+    now = _now if _now is not None else datetime.now(UTC)
     cycle_id = str(uuid.uuid4())
+    _calendar = xcals.get_calendar(config.exchange_calendar)
+    _prompt_version = config.playbook.playbook_version
+    _model_id = config.model_id
+
+    if dispatcher is None:
+        logger.debug("cycle %s: no AlertDispatcher — alerts suppressed", cycle_id)
+    else:
+        logger.debug("cycle %s: alerting active", cycle_id)
 
     # ── Step 1: KILL_SWITCH ──────────────────────────────────────────────────
     # Fail-safe: if the DB read fails we cannot confirm the switch is NONE,
     # so we fail closed — treat as HALT and block the entry cycle.
-    # Infrastructure failures that prevent reading the safety lever must halt,
-    # not silently allow trading to continue.
     try:
         with get_connection(engine) as _ks_conn:
             _ks_state = get_current_state(_ks_conn)
@@ -195,18 +278,334 @@ def run_entry_cycle(
             short_circuit_reason=_sc_reason,
         )
 
-    # ── Step 2 (stub): REASON ───────────────────────────────────────────────
-    # WP-8 expands this to the full 9-step flow. Steps below retain their
-    # original numbers from the WP-0.5 stub until WP-8 wires them correctly.
-    proposal = stub_reasoner()
+    # ── Step 2: RECONCILE ────────────────────────────────────────────────────
+    if broker is None:
+        broker = BrokerClient(config)
+
+    with get_connection(engine) as _rec_conn:
+        state_diff = _reconcile(broker, _rec_conn, _clock=now)
+
     logger.info(
-        "cycle %s: stub_reasoner emitted %s on %s",
+        "cycle %s: reconcile — %d filled, %d orphans, %d unmatched-local, %d assigned",
         cycle_id,
+        len(state_diff.newly_filled),
+        len(state_diff.orphans),
+        len(state_diff.unmatched_local),
+        len(state_diff.assigned_positions),
+    )
+    # FILL source 1-of-2: prior-cycle orders whose fill was confirmed this pass.
+    # Same-cycle confirmed fills come from step 10's inner _reconcile (source 2-of-2).
+    for _filled_order in state_diff.newly_filled:
+        _dispatch(
+            dispatcher,
+            AlertEvent(
+                event_type=AlertEventType.FILL,
+                severity=AlertSeverity.INFO,
+                order_id=_filled_order.broker_order_id,
+                detail=(
+                    "Prior-cycle fill confirmed "
+                    f"broker_id={_filled_order.broker_order_id}"
+                ),
+            ),
+        )
+
+    # ── Step 3: STATE_INTEGRITY ──────────────────────────────────────────────
+    # 3a. WORKING OPEN orders — stale entries from a previous cycle that didn't
+    #     fill. Cancel them before placing a new entry to avoid double exposure.
+    #     Fill-race: cancel returns FILLED → a real position exists; reconcile
+    #     already applied it; proceed to entry (system now has a position but that
+    #     is correct). Cancel-failure: can't determine broker state → skip entry.
+    with get_connection(engine) as _wc_conn:
+        _pending = list_pending_orders(_wc_conn)
+    _working_open = [
+        o
+        for o in _pending
+        if o.role == OrderRole.OPEN and o.status == OrderStatus.WORKING
+    ]
+    if _working_open:
+        _cancel_failed = False
+        for _wo in _working_open:
+            try:
+                _cancelled = broker.cancel(_wo)
+                if _cancelled.status == OrderStatus.FILLED:
+                    logger.info(
+                        "cycle %s: working-order cancel race-filled broker_id=%s "
+                        "— fill counted by reconcile; proceeding",
+                        cycle_id,
+                        _wo.broker_order_id,
+                    )
+                else:
+                    logger.info(
+                        "cycle %s: cancelled stale WORKING order broker_id=%s",
+                        cycle_id,
+                        _wo.broker_order_id,
+                    )
+            except Exception as _exc:
+                logger.error(
+                    "cycle %s: cancel failed for WORKING order broker_id=%s — %s; "
+                    "skipping entry this cycle (WORKING_CANCEL_FAILED)",
+                    cycle_id,
+                    _wo.broker_order_id,
+                    _exc,
+                )
+                _cancel_failed = True
+
+        if _cancel_failed:
+            _ctx = _gated_context_snapshot(config, now)
+            _journal_gated(engine, cycle_id, now, config, _ctx)
+            return CycleResult(
+                cycle_id=cycle_id,
+                action_taken=ActionTaken.NO_ACTION_GATED,
+                short_circuit_reason=ShortCircuitReason.WORKING_CANCEL_FAILED,
+                journal_record_id=cycle_id,
+            )
+
+    # 3b. Unmatched-local: PENDING_SUBMIT orders with no broker_order_id.
+    #     Without client_order_id on Order (known gap — future WP-0 amendment),
+    #     we cannot determine if the submit reached the broker. HALT to avoid
+    #     trading on a false picture of positions.
+    if state_diff.unmatched_local:
+        logger.critical(
+            "cycle %s: %d unmatched-local order(s) — HALT (split-brain risk; "
+            "client_order_id gap prevents resolution; WP-0 amendment required)",
+            cycle_id,
+            len(state_diff.unmatched_local),
+        )
+        with get_connection(engine) as _halt_conn:
+            set_state(
+                _halt_conn,
+                KillSwitchState.HALT,
+                set_by="orchestrator.run_entry_cycle",
+                reason=(
+                    f"cycle {cycle_id}: {len(state_diff.unmatched_local)} "
+                    "unmatched-local PENDING_SUBMIT order(s) — possible split-brain"
+                ),
+            )
+        _dispatch(
+            dispatcher,
+            AlertEvent(
+                event_type=AlertEventType.KILL_SWITCH_CHANGE,
+                severity=AlertSeverity.CRITICAL,
+                detail=(
+                    f"HALT: {len(state_diff.unmatched_local)} unmatched-local"
+                    " order(s). Broker state unknown. Human review required."
+                ),
+            ),
+        )
+        _ctx = _gated_context_snapshot(config, now)
+        _journal_gated(engine, cycle_id, now, config, _ctx)
+        return CycleResult(
+            cycle_id=cycle_id,
+            action_taken=ActionTaken.NO_ACTION_GATED,
+            short_circuit_reason=ShortCircuitReason.STATE_INTEGRITY,
+            journal_record_id=cycle_id,
+        )
+
+    # 3c. Orphans: broker has orders with no matching local record.
+    #     Unknown exposure — we don't know what they are. Do NOT auto-cancel
+    #     (may be legitimate closing orders from a prior run). Skip entry.
+    if state_diff.orphans:
+        logger.warning(
+            "cycle %s: %d orphan order(s) at broker — skipping entry this cycle; "
+            "do not auto-cancel (may be legitimate close)",
+            cycle_id,
+            len(state_diff.orphans),
+        )
+        _dispatch(
+            dispatcher,
+            AlertEvent(
+                event_type=AlertEventType.STATE_INTEGRITY,
+                severity=AlertSeverity.WARN,
+                detail=(
+                    f"{len(state_diff.orphans)} orphan order(s) at broker with no "
+                    "local record; entry skipped this cycle."
+                ),
+            ),
+        )
+        _ctx = _gated_context_snapshot(config, now)
+        _journal_gated(engine, cycle_id, now, config, _ctx)
+        return CycleResult(
+            cycle_id=cycle_id,
+            action_taken=ActionTaken.NO_ACTION_GATED,
+            short_circuit_reason=ShortCircuitReason.ORPHAN_UNRESOLVED,
+            journal_record_id=cycle_id,
+        )
+
+    # 3d. Assignments: option assigned into equity. Equity is outside the
+    #     system's model. HALT immediately; monitor continues managing options.
+    if state_diff.assigned_positions:
+        _dispose_assignment(
+            state_diff.assigned_positions,
+            engine=engine,
+            cycle_id=cycle_id,
+            now=now,
+            config=config,
+            dispatcher=dispatcher,
+        )
+        return CycleResult(
+            cycle_id=cycle_id,
+            action_taken=ActionTaken.NO_ACTION_GATED,
+            short_circuit_reason=ShortCircuitReason.ASSIGNMENT_HALT,
+            journal_record_id=cycle_id,
+        )
+
+    # ── Step 4: TEMPORAL GATES ───────────────────────────────────────────────
+    _market_open, _market_reason = market_is_open(now, _calendar)
+    if not _market_open:
+        logger.info("cycle %s: MARKET_CLOSED — %s", cycle_id, _market_reason)
+        return CycleResult(
+            cycle_id=cycle_id,
+            action_taken=ActionTaken.NO_ACTION_GATED,
+            short_circuit_reason=ShortCircuitReason.MARKET_CLOSED,
+        )
+
+    _in_window, _blackout_reason = within_blackout_window(
+        now,
+        _calendar,
+        config.session_open_blackout_minutes,
+        config.session_close_blackout_minutes,
+    )
+    if not _in_window:
+        logger.info("cycle %s: BLACKOUT_WINDOW — %s", cycle_id, _blackout_reason)
+        return CycleResult(
+            cycle_id=cycle_id,
+            action_taken=ActionTaken.NO_ACTION_GATED,
+            short_circuit_reason=ShortCircuitReason.BLACKOUT_WINDOW,
+        )
+
+    # ── Step 5: ASSEMBLE ─────────────────────────────────────────────────────
+    # MOCK_TOOL_IMPLS (WP-6.1) for paper; real WP-3 impls swapped in WP-8.5.
+    _tool_impls = _build_tool_impls(config)
+    bundle = assemble_context(
+        _tool_impls,
+        model_id=_model_id,
+        prompt_version=_prompt_version,
+        limits_version=config.limits.limits_version,
+    )
+    context_snapshot = to_context_snapshot(bundle)
+    logger.info(
+        "cycle %s: assembled context hash=%s symbols=%d excluded=%d",
+        cycle_id,
+        bundle.context_hash,
+        len(bundle.universe.symbol_snapshots),
+        len(bundle.excluded),
+    )
+
+    # ── Step 6: PORTFOLIO GATES ──────────────────────────────────────────────
+    # Portfolio state from the assembled bundle — avoids a redundant broker call.
+    _portfolio = bundle.portfolio
+
+    _has_power, _power_reason = has_buying_power(_portfolio, config.limits)
+    if not _has_power:
+        logger.info("cycle %s: NO_BUYING_POWER — %s", cycle_id, _power_reason)
+        _journal_gated(engine, cycle_id, now, config, context_snapshot)
+        return CycleResult(
+            cycle_id=cycle_id,
+            action_taken=ActionTaken.NO_ACTION_GATED,
+            short_circuit_reason=ShortCircuitReason.NO_BUYING_POWER,
+            journal_record_id=cycle_id,
+        )
+
+    _under_cap, _cap_reason = under_position_cap(_portfolio, config.limits)
+    if not _under_cap:
+        logger.info("cycle %s: MAX_POSITIONS — %s", cycle_id, _cap_reason)
+        _journal_gated(engine, cycle_id, now, config, context_snapshot)
+        return CycleResult(
+            cycle_id=cycle_id,
+            action_taken=ActionTaken.NO_ACTION_GATED,
+            short_circuit_reason=ShortCircuitReason.MAX_POSITIONS,
+            journal_record_id=cycle_id,
+        )
+
+    if not bundle.universe.symbol_snapshots:
+        logger.info("cycle %s: EMPTY_ACTION_SPACE — no symbols in universe", cycle_id)
+        _journal_gated(engine, cycle_id, now, config, context_snapshot)
+        return CycleResult(
+            cycle_id=cycle_id,
+            action_taken=ActionTaken.NO_ACTION_GATED,
+            short_circuit_reason=ShortCircuitReason.EMPTY_ACTION_SPACE,
+            journal_record_id=cycle_id,
+        )
+
+    # ── Step 7: REASON ───────────────────────────────────────────────────────
+    try:
+        proposal = reason(
+            context_snapshot,
+            _tool_impls,
+            playbook=config.playbook,
+            limits=config.limits,
+            model_id=_model_id,
+            max_schema_retries=config.max_schema_retries,
+            max_turns=config.max_reasoning_turns,
+        )
+    except ReasonerError as exc:
+        logger.error("cycle %s: REASON failed — %s", cycle_id, exc)
+        cycle_error = CycleError(
+            stage=CycleStage.REASON,
+            message=str(exc),
+            recoverable=True,
+        )
+        decision = Decision(
+            proposal=None,
+            validation_result=None,
+            sizing_result=None,
+            action_taken=ActionTaken.NO_ACTION_GATED,
+        )
+        journal_record = JournalRecord(
+            cycle_id=cycle_id,
+            timestamp=now,
+            action_taken=ActionTaken.NO_ACTION_GATED,
+            decision=decision,
+            context_snapshot=context_snapshot,
+            limits_version=config.limits.limits_version,
+            prompt_version=_prompt_version,
+            model_id=_model_id,
+        )
+        with get_connection(engine) as conn:
+            write_journal_record(conn, journal_record)
+        return CycleResult(
+            cycle_id=cycle_id,
+            action_taken=ActionTaken.NO_ACTION_GATED,
+            error=cycle_error,
+            journal_record_id=cycle_id,
+        )
+
+    logger.info(
+        "cycle %s: reasoner returned action=%s strategy=%s underlying=%s",
+        cycle_id,
+        proposal.action,
         proposal.strategy,
         proposal.underlying,
     )
 
-    # ── Step 2: VALIDATE ────────────────────────────────────────────────────
+    if proposal.action == "NO_ACTION":
+        decision = Decision(
+            proposal=proposal,
+            validation_result=None,
+            sizing_result=None,
+            action_taken=ActionTaken.NO_ACTION_AGENT,
+        )
+        journal_record = JournalRecord(
+            cycle_id=cycle_id,
+            timestamp=now,
+            action_taken=ActionTaken.NO_ACTION_AGENT,
+            decision=decision,
+            context_snapshot=context_snapshot,
+            limits_version=config.limits.limits_version,
+            prompt_version=_prompt_version,
+            model_id=_model_id,
+        )
+        with get_connection(engine) as conn:
+            write_journal_record(conn, journal_record)
+        logger.info("cycle %s: NO_ACTION_AGENT; journal written", cycle_id)
+        return CycleResult(
+            cycle_id=cycle_id,
+            action_taken=ActionTaken.NO_ACTION_AGENT,
+            proposal=proposal,
+            journal_record_id=cycle_id,
+        )
+
+    # ── Step 8: VALIDATE ─────────────────────────────────────────────────────
     validation = validate_structural(proposal, config.limits)
     logger.info(
         "cycle %s: validation %s",
@@ -218,6 +617,18 @@ def run_entry_cycle(
 
     if not validation.passed:
         rejection_ids = [r.rule_id for r in validation.reasons]
+        _dispatch(
+            dispatcher,
+            AlertEvent(
+                event_type=AlertEventType.REJECTION,
+                severity=AlertSeverity.WARN,
+                symbol=proposal.underlying,
+                detail=(
+                    f"Proposal rejected: {rejection_ids}. "
+                    f"strategy={proposal.strategy} underlying={proposal.underlying}"
+                ),
+            ),
+        )
         decision = Decision(
             proposal=proposal,
             validation_result=validation,
@@ -229,11 +640,11 @@ def run_entry_cycle(
             timestamp=now,
             action_taken=ActionTaken.REJECTED,
             decision=decision,
-            context_snapshot=_stub_context_snapshot(now),
+            context_snapshot=context_snapshot,
             rejection_rule_ids=rejection_ids,
             limits_version=config.limits.limits_version,
-            prompt_version=_SLICE_PROMPT_VERSION,
-            model_id=_SLICE_MODEL_ID,
+            prompt_version=_prompt_version,
+            model_id=_model_id,
             strategy=proposal.strategy,
             underlying=proposal.underlying,
             conviction=proposal.conviction,
@@ -249,28 +660,8 @@ def run_entry_cycle(
             journal_record_id=cycle_id,
         )
 
-    # ── Step 3: SIZE ────────────────────────────────────────────────────────
-    # Broker constructed lazily so validation-failure tests need no credentials.
-    if broker is None:
-        broker = BrokerClient(config)
-
-    account = broker.get_account()
-    portfolio_state = PortfolioState(
-        positions=[],
-        # slice: Greeks unused by size(); do NOT read them off this object.
-        account_equity=float(account.equity or "0"),
-        buying_power=float(account.buying_power or "0"),
-        options_buying_power=float(account.options_buying_power or "0"),
-        unrealized_pnl=0.0,
-        realized_pnl_today=0.0,
-        approval_level=int(account.options_approved_level or 0),
-        net_dollar_delta=0.0,
-        net_dollar_gamma=0.0,
-        net_dollar_theta=0.0,
-        net_dollar_vega=0.0,
-    )
-
-    sizing = _size(proposal, portfolio_state, config.limits)
+    # ── Step 9: SIZE ─────────────────────────────────────────────────────────
+    sizing = _size(proposal, _portfolio, config.limits)
     logger.info(
         "cycle %s: sized to %d contracts (capped=%s binding=%s)",
         cycle_id,
@@ -291,10 +682,10 @@ def run_entry_cycle(
             timestamp=now,
             action_taken=ActionTaken.SIZED_TO_ZERO,
             decision=decision,
-            context_snapshot=_stub_context_snapshot(now),
+            context_snapshot=context_snapshot,
             limits_version=config.limits.limits_version,
-            prompt_version=_SLICE_PROMPT_VERSION,
-            model_id=_SLICE_MODEL_ID,
+            prompt_version=_prompt_version,
+            model_id=_model_id,
             strategy=proposal.strategy,
             underlying=proposal.underlying,
             conviction=proposal.conviction,
@@ -311,7 +702,7 @@ def run_entry_cycle(
             journal_record_id=cycle_id,
         )
 
-    # ── Step 4: EXECUTE ─────────────────────────────────────────────────────
+    # ── Step 10: EXECUTE + JOURNAL ───────────────────────────────────────────
     limit_price = config.slice_limit_price
     position_id = str(uuid.uuid4())
     order = broker.submit_multi_leg(
@@ -325,9 +716,6 @@ def run_entry_cycle(
     )
 
     if order.status == OrderStatus.REJECTED:
-        # Broker rejected the order synchronously — no Position is persisted.
-        # action_taken = EXECUTION_FAILED distinguishes broker rejection (post-sizing)
-        # from validation rejection (pre-sizing), per the WP-0.4 ActionTaken contract.
         cycle_error = CycleError(
             stage=CycleStage.EXECUTE,
             message=(
@@ -347,10 +735,10 @@ def run_entry_cycle(
             timestamp=now,
             action_taken=ActionTaken.EXECUTION_FAILED,
             decision=decision,
-            context_snapshot=_stub_context_snapshot(now),
+            context_snapshot=context_snapshot,
             limits_version=config.limits.limits_version,
-            prompt_version=_SLICE_PROMPT_VERSION,
-            model_id=_SLICE_MODEL_ID,
+            prompt_version=_prompt_version,
+            model_id=_model_id,
             strategy=proposal.strategy,
             underlying=proposal.underlying,
             conviction=proposal.conviction,
@@ -372,9 +760,7 @@ def run_entry_cycle(
             journal_record_id=cycle_id,
         )
 
-    # ── Steps 5–7: PERSIST, RECONCILE, JOURNAL ──────────────────────────────
-    # Insert Position first (PENDING_OPEN), then Order, to satisfy the FK
-    # constraint (orders.position_id → positions.id).
+    # Insert Position (PENDING_OPEN) then Order, to satisfy FK constraint.
     # order.id is only known after submit returns; it becomes opening_order_id.
     position = Position(
         id=position_id,
@@ -387,7 +773,6 @@ def run_entry_cycle(
             for leg in proposal.legs
         ],
         quantity=sizing.contracts,
-        # entry_net_amount = intended limit price; negative = credit received (WP-0.3).
         entry_net_amount=limit_price,
         current_mark=limit_price,
         marked_at=now,
@@ -417,25 +802,55 @@ def run_entry_cycle(
         timestamp=now,
         action_taken=ActionTaken.OPENED,
         decision=decision,
-        context_snapshot=_stub_context_snapshot(now),
+        context_snapshot=context_snapshot,
         position_ids=[position_id],
         order_ids=[order.id],
         limits_version=config.limits.limits_version,
-        prompt_version=_SLICE_PROMPT_VERSION,
-        model_id=_SLICE_MODEL_ID,
+        prompt_version=_prompt_version,
+        model_id=_model_id,
         strategy=proposal.strategy,
         underlying=proposal.underlying,
         net_delta_at_open=proposal.net_delta,
         conviction=proposal.conviction,
     )
 
+    _dispatch(
+        dispatcher,
+        AlertEvent(
+            event_type=AlertEventType.ENTRY_SUBMITTED,
+            severity=AlertSeverity.INFO,
+            symbol=proposal.underlying,
+            order_id=order.broker_order_id,
+            detail=(
+                f"Entry submitted: {proposal.strategy} on {proposal.underlying} "
+                f"broker_id={order.broker_order_id}"
+            ),
+        ),
+    )
+
     with get_connection(engine) as conn:
         insert_position(conn, position)
         insert_order(conn, order)
         # reconcile() detects fills and transitions Position: PENDING_OPEN → OPEN.
-        _reconcile(broker, conn)
+        state_diff_post = _reconcile(broker, conn, _clock=now)
         write_journal_record(conn, journal_record)
 
+    # FILL source 2-of-2: same-cycle order confirmed by the inner _reconcile above.
+    # Prior-cycle fills are dispatched from step 2's reconcile (source 1-of-2).
+    for _filled_order in state_diff_post.newly_filled:
+        _dispatch(
+            dispatcher,
+            AlertEvent(
+                event_type=AlertEventType.FILL,
+                severity=AlertSeverity.INFO,
+                symbol=proposal.underlying,
+                order_id=_filled_order.broker_order_id,
+                detail=(
+                    f"Fill confirmed: {proposal.strategy} on {proposal.underlying} "
+                    f"broker_id={_filled_order.broker_order_id}"
+                ),
+            ),
+        )
     logger.info(
         "cycle %s: OPENED broker_order_id=%s; journal written",
         cycle_id,
