@@ -204,9 +204,11 @@ class Limits(BaseModel):
     # Event proximity (entry gate only — does not affect open positions)
     event_blackout_days: int = Field(default=5, ge=0)
 
-    # Bias detection (WP-7.4): minimum closed-position count per metric cell before
-    # reporting a signal. Cells below this floor return NaN / "insufficient_data" so
-    # noise is never surfaced as a confident claim. Tune upward once trade count grows.
+    # Bias detection (WP-7.4 / PR #70): minimum closed-position count per metric cell
+    # before reporting a signal. Cells below this floor return NaN / "insufficient_data"
+    # so noise is never surfaced as a confident claim. Tune up as trade count grows.
+    # WP-0 amendment (A4-1): kept in Limits (not obs config) — already imported by
+    # obs/review.py, consistent with event_blackout_days placement.
     bias_min_sample_size: int = Field(default=10, ge=1)
 
     # Buying power floor (pre-flight gate; reads options_buying_power)

@@ -97,7 +97,11 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 | A1-1 | `stop_loss_mult` → `stop_loss_max_loss_fraction` — fraction of `est_max_loss` in `(0, 1]`; formula uniform across credit and debit strategies | `contracts/proposal.py` (`ExitPlan`) | #59 (WP-5.1) | WP-6 (confirmed clean 2026-06-20), WP-4 |
 | A1-2 | `ExitReason` enum added (`STOP_LOSS`, `PROFIT_TARGET`, `DTE`, `FLATTEN`) — stored as `VARCHAR NULL` on `orders` and `outcome_records` (migration 005); written in finalize step after fill confirmation | `contracts/state.py`, `contracts/journal.py` | #65 (WP-5.5) | WP-7 (implicit sign-off via usage in #69, #70) |
 | A1-3 | `monitor_max_mark_age_minutes` added to `Config` — configurable staleness window for `MarkStaleError`; default tracks `2 × monitor_interval_minutes` | `config.py` (`Config`) | #65 (WP-5.5) | WP-5 |
-| A2-1 | `contracts/alerts.py` (new file) — `AlertEventType`, `AlertSeverity`, `AlertEvent`; all three exported from `contracts/__init__.py` | `contracts/alerts.py` | #68 (WP-7.2) | WP-7 (dispatches), WP-8 (constructs in entry + monitor cycles) |
+| A2-1 | `contracts/alerts.py` (new file) — `AlertEventType` (`FILL`, `REJECTION`, `KILL_SWITCH_CHANGE`), `AlertSeverity`, `AlertEvent` (Pydantic model with `event_type`, `severity`, `timestamp`, `symbol`, `order_id`, `detail`), `DEFAULT_SEVERITY`; all exported from `contracts/__init__.py` | `contracts/alerts.py` | #68 (WP-7.2) | WP-7 (dispatches), WP-8 (constructs in entry + monitor cycles) |
+| A2-2 | `AlertEventType` extended: `ENTRY_SUBMITTED` (order submitted to broker, not yet filled), `STATE_INTEGRITY` (reconcile anomaly detected) | `contracts/alerts.py` | #72 (WP-8.2) | WP-8 |
+| A2-3 | `AlertEventType` extended: `EXIT_SUBMITTED` (closing order sent to broker — fires at submit time; `FILL` fires later when reconcile confirms close and `realized_pnl` is available; the two are distinct moments) | `contracts/alerts.py` | #73 (WP-8.3) | WP-8 |
+| A2-4 | `AlertEventType` extended: `SCHEDULER_SKIP` (scheduler cadence skip, e.g. market closed or cycle already running) | `contracts/alerts.py` | #74 (WP-8.4) | WP-8 |
+| A4-1 | `bias_min_sample_size: int = 10` added to `Limits`; `limits_version` bumped to `0.3.0` — bias analysis minimum sample threshold; kept in `Limits` rather than a separate obs config (WP-4.A1 Option A: `Limits` already imported by `obs/review.py`, consistent with `event_blackout_days`) | `risk/limits.py` | #70 (WP-7.4) | WP-7 (`obs/review.py`) |
 
 ---
 
