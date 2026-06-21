@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/obs/`  
 **Credentials required:** `DISCORD_WEBHOOK_URL` (alerting only; optional for review/kill-switch)  
-**Status:** kill-switch complete (WP-7.1); alerting complete (WP-7.2); review metrics complete (WP-7.3)
+**Status:** kill-switch complete (WP-7.1); alerting complete (WP-7.2); review metrics complete (WP-7.3); bias detection complete (WP-7.4)
 
 Runtime safety controls and operational visibility into the running agent. The module owns anything that lets an operator observe, pause, or stop the system without touching the core trading logic.
 
@@ -11,9 +11,9 @@ Runtime safety controls and operational visibility into the running agent. The m
 | File | Responsibility |
 |---|---|
 | `obs/killswitch.py` | Kill-switch core API: state helpers, DB reads/writes |
-| `obs/__main__.py` | Observability CLI: kill-switch commands + `review` |
+| `obs/__main__.py` | Observability CLI: kill-switch commands + `review` + `bias` |
 | `obs/alerts.py` | Alerting channel integration: Discord webhook, dispatcher, durable failure recording |
-| `obs/review.py` | Journal analytics: hit rate, P&L attribution, cycle funnel |
+| `obs/review.py` | Journal analytics: hit rate, P&L attribution, cycle funnel, bias detection |
 
 ---
 
@@ -293,3 +293,77 @@ print(funnel.opened, funnel.gated)
 ### Forward note
 
 The current hit definition (`realized_pnl > 0`) is the v1 baseline. A richer metric — "captured ≥N% of `est_max_profit`" — is the natural next refinement once `est_max_profit` is stored on `OutcomeRecord`. That is a small WP-0 amendment; track it there rather than here.
+
+---
+
+## Bias / failure-mode detection (WP-7.4)
+
+`detect_bias()` in `obs/review.py` is the measurement layer the design doc identifies as the prerequisite for any future multi-agent challenger. The challenger should only be added when the journal shows a *specific, measured failure mode*, not a hunch.
+
+### Design invariants
+
+**Evidence, never action.** `BiasReport` carries measurements and their uncertainty. It has no `halt_recommended` field or any other action-recommendation field. Statistical inference on a small, confounded sample is a hypothesis generator — a human step between "evidence" and "HALT" is a safety feature, not a gap.
+
+**"Insufficient data" is the default verdict.** Every numeric claim ships with `sample_size` and a `sufficient` flag. Cells below `Limits.bias_min_sample_size` (default 10) return `NaN` and `sufficient=False`. During the paper-trading warm-up, most cells will be insufficient — this is correct output, not a malfunction.
+
+**Skew ≠ bias.** A bullish delta lean in a sustained uptrend may be the agent reading the regime correctly. The report names the lean; the human decides whether it is pathological.
+
+**Event-proximity uses the same definition as the entry gate.** The `earnings_within_dte` flag is baked in at write time using `Limits.event_blackout_days`, so "near catalyst" in the report means exactly the same thing as "near earnings" in the validator. There is no second proximity definition.
+
+### Two metrics
+
+**(a) Delta skew (proposal-side):** mean `net_delta_at_open` across all OPENED proposals vs. the market-neutral baseline of 0.0. Accumulates faster than outcome metrics — no closed positions required. Classified as "bullish" / "bearish" / "neutral" / "insufficient_data".
+
+**(b) Direction win rates (outcome-side):** realized hit rate for bullish vs. bearish proposals (direction determined by `net_delta_at_open > 0`). More confounded; cells will mostly be insufficient early. Regime segmentation is deferred — `JournalRecord` carries no denormalized regime field yet.
+
+Plus an **event-proximity cohort**: compares fully-closed trades opened with `earnings_within_dte=True` (near catalyst) against the baseline. Measures the "opened near earnings, killed by IV crush" failure mode.
+
+### Configuration
+
+`Limits.bias_min_sample_size` (default 10) controls the per-cell sample floor. Added in `limits_version = "0.3.0"`.
+
+### CLI
+
+```bash
+# All-time bias report (uses Limits.bias_min_sample_size from config)
+python -m options_agent.obs bias
+
+# Filter to a time window
+python -m options_agent.obs bias --since 2026-06-01
+
+# Filter to a specific prompt version
+python -m options_agent.obs bias --prompt-version v2.0.0
+```
+
+Output: three rich tables — delta skew, direction win rates, event-proximity cohort.
+
+### Python API
+
+```python
+from options_agent.state.db import build_engine, get_connection, metadata
+from options_agent.state.journal import query_journal, query_outcome_records
+from options_agent.obs.review import detect_bias
+
+engine = build_engine("sqlite:///options_agent.db")
+with get_connection(engine) as conn:
+    records = query_journal(conn)
+    position_ids = [pid for r in records for pid in r.position_ids]
+    outcomes = query_outcome_records(conn, position_ids=position_ids or None)
+
+report = detect_bias(records, outcomes, min_sample_size=10)
+
+# Delta skew
+print(report.delta_skew.direction, report.delta_skew.mean_net_delta)
+
+# Direction split
+for direction, stats in report.by_direction.items():
+    if stats.sufficient:
+        print(direction, stats.hit_rate, stats.expectancy)
+
+# Event proximity
+ep = report.event_proximity
+if ep.near_catalyst.sufficient:
+    print("Near-catalyst expectancy:", ep.near_catalyst.expectancy)
+if ep.baseline.sufficient:
+    print("Baseline expectancy:", ep.baseline.expectancy)
+```
