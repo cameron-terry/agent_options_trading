@@ -44,6 +44,7 @@ class AlertEventType(StrEnum):
     REJECTION = "REJECTION"
     KILL_SWITCH_CHANGE = "KILL_SWITCH_CHANGE"
     STATE_INTEGRITY = "STATE_INTEGRITY"
+    SCHEDULER_SKIP = "SCHEDULER_SKIP"
 
 
 class AlertSeverity(StrEnum):
@@ -66,6 +67,7 @@ DEFAULT_SEVERITY: dict[AlertEventType, AlertSeverity] = {
     AlertEventType.REJECTION: AlertSeverity.WARN,
     AlertEventType.KILL_SWITCH_CHANGE: AlertSeverity.CRITICAL,
     AlertEventType.STATE_INTEGRITY: AlertSeverity.WARN,
+    AlertEventType.SCHEDULER_SKIP: AlertSeverity.WARN,
 }
 
 

@@ -56,7 +56,7 @@ uv run pyright
 
 ## Entry point
 
-`python -m options_agent` is not yet wired (WP-8 — orchestration). The sub-systems below are individually complete and testable:
+`python -m options_agent [--config path/to/config.toml]` starts the full scheduler. Alpaca paper credentials required.
 
 | Sub-system | Module | Runnable without credentials |
 |---|---|---|
@@ -66,5 +66,6 @@ uv run pyright
 | Broker & execution | `options_agent/execution/` | No (needs Alpaca keys) — [docs](docs/features/broker-execution.md) |
 | Agent tools & mock harness | `options_agent/agent/` | Yes — [docs](docs/features/agent-tools.md) |
 | Observability & safety | `options_agent/obs/` | Yes (SQLite) — [docs](docs/features/observability.md) |
-| Vertical slice | `options_agent/orchestrator.py` | No (needs Alpaca keys) — [docs](docs/features/vertical-slice.md) |
+| Orchestration & scheduling | `options_agent/orchestrator.py`, `options_agent/scheduler.py` | No (needs Alpaca keys) — [docs](docs/features/orchestrator.md) |
 | Monitor — exit rules | `options_agent/monitor/` | Yes — [docs](docs/features/monitor.md) |
+| Vertical slice | `options_agent/orchestrator.py` | No (needs Alpaca keys) — [docs](docs/features/vertical-slice.md) |
