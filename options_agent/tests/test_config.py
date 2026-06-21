@@ -67,7 +67,7 @@ def test_exit_plan_round_trip() -> None:
 
 def test_limits_defaults() -> None:
     limits = Limits()
-    assert limits.limits_version == "0.2.0"
+    assert limits.limits_version == "0.3.0"
     assert limits.max_loss_per_trade_pct == 0.01
     assert limits.max_open_positions == 5
     assert limits.max_dollar_delta_pct == 0.20
@@ -77,6 +77,7 @@ def test_limits_defaults() -> None:
     assert limits.max_sector_concentration_pct is None
     assert limits.event_blackout_days == 5
     assert limits.min_buying_power_pct == 0.10
+    assert limits.bias_min_sample_size == 10
     assert isinstance(limits.chain_filter, ChainFilterLimits)
     assert isinstance(limits.exit_plan_defaults, ExitPlanDefaults)
 

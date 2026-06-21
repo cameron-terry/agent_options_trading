@@ -1,12 +1,14 @@
-"""Journal analytics: hit rate, P&L attribution, cycle funnel (WP-7.3).
+"""Journal analytics: hit rate, P&L attribution, cycle funnel (WP-7.3);
+bias and failure-mode detection (WP-7.4).
 
-Three pure functions — no DB calls, no live-data dependencies:
+Pure functions — no DB calls, no live-data dependencies:
 
     hit_rate_by_strategy(records, outcomes, *, since, prompt_version)
     pnl_attribution(records, outcomes, *, since, prompt_version)
     cycle_funnel(records, *, since)
+    detect_bias(records, outcomes, *, since, prompt_version, min_sample_size)
 
-All three operate on pre-fetched JournalRecord and OutcomeRecord objects
+All four operate on pre-fetched JournalRecord and OutcomeRecord objects
 (fetched by the caller via state.journal query functions). They are
 deterministic, fixture-testable, and safe to call from any context.
 
@@ -26,6 +28,21 @@ still-open positions are reported separately in open_summary.
 Funnel: kept separate from hit rate. It counts all cycles by action_taken
 and is the primary diagnostic during warm-up (when the agent is gated or
 inactive more often than it opens positions).
+
+Bias detection (WP-7.4): detect_bias() surfaces two metrics —
+  (a) delta skew: mean net_delta_at_open of all OPENED proposals vs. the
+      market-neutral baseline of 0.0. Proposal-side; no outcome data needed.
+  (b) direction win rates: realized hit rate for bullish vs. bearish
+      proposals. Outcome-side; more confounded; slices thin.
+  Plus an event-proximity cohort comparison using the earnings_within_dte
+  flag written at open time (consistent with the validator's entry gate).
+
+"Insufficient data" is the expected default verdict for most of the
+paper-trading warm-up period. Every claim ships with sample size. The
+function never recommends or triggers actions — it surfaces evidence.
+
+Skew vs. bias note: a bullish delta lean in a bull market may be correct.
+The report names the lean; the human decides if it is pathological.
 """
 
 from __future__ import annotations
@@ -427,4 +444,268 @@ def cycle_funnel(
         sized_to_zero=sized_to_zero,
         execution_failed=execution_failed,
         opened=opened,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bias / failure-mode detection (WP-7.4)
+# ---------------------------------------------------------------------------
+
+# Proposals with |mean_net_delta| <= this are classified "neutral".
+# Prevents labelling near-zero delta as directional on statistical noise.
+_DELTA_NEUTRAL_BAND: float = 0.05
+
+
+@dataclass
+class DeltaSkewStats:
+    """(a) Proposal-side: net delta lean of all OPENED proposals.
+
+    Accumulates faster than outcome-side metrics because it requires no
+    closed positions — only the proposal record itself.
+
+    Interpret direction against market context. A bullish lean in a sustained
+    uptrend may be the agent reading the regime correctly, not a defect.
+    """
+
+    sample_size: int
+    mean_net_delta: float  # NaN when not sufficient
+    sufficient: bool
+    # "bullish" | "bearish" | "neutral" | "insufficient_data"
+    direction: str
+
+
+@dataclass
+class DirectionWinRateStats:
+    """Win-rate + P&L stats for one directional bucket (bullish/bearish).
+
+    Used for both (b) direction-split outcome analysis and the two cohorts
+    in event_proximity (near_catalyst / baseline).
+
+    All rate/average fields are NaN when sufficient=False. total_pnl is
+    always set (simple sum; no statistical threshold).
+    """
+
+    direction: str
+    sample_size: int
+    sufficient: bool
+    hit_rate: float  # NaN if not sufficient
+    avg_win: float  # NaN if not sufficient or no wins
+    avg_loss: float  # NaN if not sufficient or no losses
+    expectancy: float  # NaN if not sufficient
+    total_pnl: float
+
+
+@dataclass
+class EventProximityStats:
+    """Catalyst-proximity cohort vs. baseline.
+
+    near_catalyst: fully-closed positions opened with earnings_within_dte=True.
+    baseline: all other fully-closed positions (earnings_within_dte=False|None).
+
+    The flag is baked in at write time by the validator using the same
+    event_blackout_days threshold, so "near catalyst" here means exactly
+    the same thing as "near earnings" in the entry gate.
+    """
+
+    near_catalyst: DirectionWinRateStats
+    baseline: DirectionWinRateStats
+
+
+@dataclass
+class BiasReport:
+    """Output of detect_bias() — pattern detection on small samples.
+
+    Primary purpose: provide the measured evidence needed to justify (or
+    reject) future architectural changes like a multi-agent challenger.
+
+    Design constraints (enforced by omission):
+    - No halt_recommended field. Statistical inference on a small, confounded
+      sample is a hypothesis generator, not a control signal. The human step
+      between "evidence" and "HALT" is a safety feature.
+    - No regime segmentation. JournalRecord has no denormalized regime field;
+      extracting it from context_snapshot.assembled_context would be fragile.
+      Deferred pending a regime_at_open field addition.
+
+    "Insufficient data" is the correct, expected verdict for most of the
+    paper-trading warm-up. Do not interpret it as a malfunction.
+    """
+
+    min_sample_size: int
+    window_start: datetime | None
+    delta_skew: DeltaSkewStats
+    # keyed "bullish" and "bearish"
+    by_direction: dict[str, DirectionWinRateStats]
+    event_proximity: EventProximityStats
+
+
+def _compute_direction_stats(
+    direction: str, pnls: list[float], min_sample_size: int
+) -> DirectionWinRateStats:
+    """Build DirectionWinRateStats from per-position total realized P&Ls.
+
+    Returns NaN fields and sufficient=False when len(pnls) < min_sample_size.
+    total_pnl is always the raw sum regardless of sufficiency.
+    """
+    n = len(pnls)
+    sufficient = n >= min_sample_size
+    total = sum(pnls) if pnls else 0.0
+
+    if not sufficient:
+        nan = math.nan
+        return DirectionWinRateStats(
+            direction=direction,
+            sample_size=n,
+            sufficient=False,
+            hit_rate=nan,
+            avg_win=nan,
+            avg_loss=nan,
+            expectancy=nan,
+            total_pnl=total,
+        )
+
+    hits = [p for p in pnls if p > 0]
+    misses = [p for p in pnls if p <= 0]
+    hit_rate = len(hits) / n
+    miss_rate = 1.0 - hit_rate
+    avg_win = sum(hits) / len(hits) if hits else math.nan
+    avg_loss = sum(misses) / len(misses) if misses else math.nan
+
+    if hits and misses:
+        expectancy = avg_win * hit_rate + avg_loss * miss_rate
+    elif hits:
+        expectancy = avg_win
+    else:
+        expectancy = avg_loss
+
+    return DirectionWinRateStats(
+        direction=direction,
+        sample_size=n,
+        sufficient=True,
+        hit_rate=hit_rate,
+        avg_win=avg_win,
+        avg_loss=avg_loss,
+        expectancy=expectancy,
+        total_pnl=total,
+    )
+
+
+def detect_bias(
+    records: Sequence[JournalRecord],
+    outcomes: Sequence[OutcomeRecord],
+    *,
+    since: datetime | None = None,
+    prompt_version: str | None = None,
+    min_sample_size: int = 10,
+) -> BiasReport:
+    """Directional-bias detection and event-proximity loss analysis.
+
+    Two metrics:
+      (a) Delta skew (proposal-side): mean net_delta_at_open of all OPENED
+          proposals vs. the market-neutral baseline of 0.0. Does not require
+          closed positions; accumulates signal faster than outcome metrics.
+      (b) Direction win rates (outcome-side): realized hit rate for bullish
+          vs. bearish proposals. Confounded by market regime; segmented cells
+          will mostly return "insufficient_data" early in the paper run.
+
+    Plus an event-proximity cohort analysis using earnings_within_dte, which
+    is written at open time using the same event_blackout_days threshold as
+    the validator entry gate.
+
+    Every numeric claim ships with sample_size and a sufficient flag. Claims
+    with fewer samples than min_sample_size return NaN and sufficient=False.
+    "Insufficient data" is the expected normal output during warm-up.
+
+    This function surfaces evidence — it never recommends or triggers actions.
+    Skew direction is not inherently a defect; interpret against market context.
+
+    Args:
+        records:          All JournalRecords (any action_taken).
+        outcomes:         All OutcomeRecords for the positions to analyze.
+        since:            Filter to records with timestamp >= since.
+        prompt_version:   Filter to a specific prompt version.
+        min_sample_size:  Closed-position count floor per metric cell.
+                          Source: Limits.bias_min_sample_size (caller's
+                          responsibility to pass it through).
+    """
+    filtered = _apply_filters(records, since=since, prompt_version=prompt_version)
+    pos_map = _build_position_map(filtered)
+    closed_trades, _ = _split_outcomes(outcomes, pos_map)
+
+    # (a) Delta skew — proposal-side; OPENED records with net_delta_at_open set
+    opened_with_delta = [
+        r
+        for r in filtered
+        if r.action_taken == ActionTaken.OPENED and r.net_delta_at_open is not None
+    ]
+    delta_values: list[float] = [
+        r.net_delta_at_open  # type: ignore[misc]
+        for r in opened_with_delta
+    ]
+    delta_n = len(delta_values)
+    delta_sufficient = delta_n >= min_sample_size
+
+    if delta_sufficient:
+        mean_net_delta = sum(delta_values) / delta_n
+        if mean_net_delta > _DELTA_NEUTRAL_BAND:
+            skew_dir = "bullish"
+        elif mean_net_delta < -_DELTA_NEUTRAL_BAND:
+            skew_dir = "bearish"
+        else:
+            skew_dir = "neutral"
+    else:
+        mean_net_delta = math.nan
+        skew_dir = "insufficient_data"
+
+    delta_skew = DeltaSkewStats(
+        sample_size=delta_n,
+        mean_net_delta=mean_net_delta,
+        sufficient=delta_sufficient,
+        direction=skew_dir,
+    )
+
+    # (b) Direction win rates — closed positions only
+    # Apply the same neutral band as delta_skew so a delta-neutral proposal
+    # (e.g., balanced iron condor at exactly 0.0) is not silently binned into
+    # "bearish". Proposals within the band are skipped — direction is ambiguous.
+    direction_pnls: dict[str, list[float]] = {"bullish": [], "bearish": []}
+    for _pid, (jr, pos_outcomes) in closed_trades.items():
+        delta = jr.net_delta_at_open
+        if delta is None:
+            continue
+        if delta > _DELTA_NEUTRAL_BAND:
+            d = "bullish"
+        elif delta < -_DELTA_NEUTRAL_BAND:
+            d = "bearish"
+        else:
+            continue  # delta-neutral: skip rather than misclassify
+        direction_pnls[d].append(sum(o.realized_pnl for o in pos_outcomes))
+
+    by_direction = {
+        d: _compute_direction_stats(d, pnls, min_sample_size)
+        for d, pnls in direction_pnls.items()
+    }
+
+    # Event-proximity cohort — segment by earnings_within_dte flag
+    near_pnls: list[float] = []
+    base_pnls: list[float] = []
+    for _pid, (jr, pos_outcomes) in closed_trades.items():
+        total_pnl = sum(o.realized_pnl for o in pos_outcomes)
+        if jr.earnings_within_dte is True:
+            near_pnls.append(total_pnl)
+        else:
+            base_pnls.append(total_pnl)
+
+    event_proximity = EventProximityStats(
+        near_catalyst=_compute_direction_stats(
+            "near_catalyst", near_pnls, min_sample_size
+        ),
+        baseline=_compute_direction_stats("baseline", base_pnls, min_sample_size),
+    )
+
+    return BiasReport(
+        min_sample_size=min_sample_size,
+        window_start=since,
+        delta_skew=delta_skew,
+        by_direction=by_direction,
+        event_proximity=event_proximity,
     )

@@ -52,6 +52,7 @@ from options_agent.contracts import (
 )
 from options_agent.obs.review import (
     cycle_funnel,
+    detect_bias,
     hit_rate_by_strategy,
     pnl_attribution,
 )
@@ -154,6 +155,8 @@ def _jr(
     timestamp: datetime = _T0,
     prompt_version: str = "v1",
     cycle_id: str | None = None,
+    net_delta_at_open: float | None = None,
+    earnings_within_dte: bool | None = None,
 ) -> JournalRecord:
     _CYCLE_COUNTER[0] += 1
     cid = cycle_id or f"cycle-{_CYCLE_COUNTER[0]:04d}"
@@ -175,6 +178,8 @@ def _jr(
         prompt_version=prompt_version,
         model_id="claude-sonnet-4-6",
         rejection_rule_ids=rejection_rule_ids,
+        net_delta_at_open=net_delta_at_open,
+        earnings_within_dte=earnings_within_dte,
     )
 
 
@@ -533,3 +538,309 @@ def test_cycle_funnel_since_filter() -> None:
     assert report.total == 1
     assert report.opened == 1
     assert report.gated == 0
+
+
+# ===========================================================================
+# detect_bias — WP-7.4
+# ===========================================================================
+# All bias tests use min_sample_size=3 so fixture data stays small.
+# _jr() records with net_delta_at_open / earnings_within_dte set explicitly.
+
+
+# ---------------------------------------------------------------------------
+# detect_bias — empty inputs
+# ---------------------------------------------------------------------------
+
+
+def test_detect_bias_empty() -> None:
+    report = detect_bias([], [], min_sample_size=3)
+
+    assert report.delta_skew.sample_size == 0
+    assert not report.delta_skew.sufficient
+    assert math.isnan(report.delta_skew.mean_net_delta)
+    assert report.delta_skew.direction == "insufficient_data"
+
+    # by_direction always carries both buckets; all insufficient when empty
+    assert set(report.by_direction.keys()) == {"bullish", "bearish"}
+    for d_stats in report.by_direction.values():
+        assert not d_stats.sufficient
+        assert d_stats.sample_size == 0
+
+    assert not report.event_proximity.near_catalyst.sufficient
+    assert not report.event_proximity.baseline.sufficient
+
+
+# ---------------------------------------------------------------------------
+# detect_bias — insufficient data (n < min_sample_size)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_bias_insufficient_data() -> None:
+    # 2 records with net_delta_at_open; min_sample_size=3 → insufficient
+    r1 = _jr(position_ids=["pb1"], net_delta_at_open=0.20)
+    r2 = _jr(position_ids=["pb2"], net_delta_at_open=0.15)
+    o1 = _outcome("pb1", 100.0)
+    o2 = _outcome("pb2", 80.0)
+
+    report = detect_bias([r1, r2], [o1, o2], min_sample_size=3)
+
+    assert report.delta_skew.sample_size == 2
+    assert not report.delta_skew.sufficient
+    assert math.isnan(report.delta_skew.mean_net_delta)
+    assert report.delta_skew.direction == "insufficient_data"
+
+    bullish = report.by_direction["bullish"]
+    assert bullish.sample_size == 2
+    assert not bullish.sufficient
+    assert math.isnan(bullish.hit_rate)
+
+    assert not report.event_proximity.baseline.sufficient
+
+
+# ---------------------------------------------------------------------------
+# detect_bias — exactly at min_sample_size boundary → sufficient
+# ---------------------------------------------------------------------------
+
+
+def test_detect_bias_at_sample_floor_is_sufficient() -> None:
+    # Exactly 3 records with net_delta_at_open; min_sample_size=3 → sufficient
+    records = [
+        _jr(position_ids=[f"pb_floor_{i}"], net_delta_at_open=0.10) for i in range(3)
+    ]
+    report = detect_bias(records, [], min_sample_size=3)
+
+    assert report.delta_skew.sample_size == 3
+    assert report.delta_skew.sufficient
+
+
+# ---------------------------------------------------------------------------
+# detect_bias — no bias (neutral delta skew)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_bias_no_bias_neutral_delta() -> None:
+    # Three proposals: two slightly bullish, one slightly bearish → mean near 0
+    records = [
+        _jr(position_ids=["pn1"], net_delta_at_open=0.04),
+        _jr(position_ids=["pn2"], net_delta_at_open=0.03),
+        _jr(position_ids=["pn3"], net_delta_at_open=-0.04),
+    ]
+    # mean = (0.04 + 0.03 + -0.04) / 3 ≈ 0.01 — inside neutral band (±0.05)
+    report = detect_bias(records, [], min_sample_size=3)
+
+    assert report.delta_skew.sufficient
+    assert report.delta_skew.direction == "neutral"
+    assert report.delta_skew.mean_net_delta == pytest.approx(0.01)
+
+
+# ---------------------------------------------------------------------------
+# detect_bias — strong bullish bias (delta skew)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_bias_strong_bullish_bias() -> None:
+    records = [
+        _jr(position_ids=["pbull1"], net_delta_at_open=0.25),
+        _jr(position_ids=["pbull2"], net_delta_at_open=0.30),
+        _jr(position_ids=["pbull3"], net_delta_at_open=0.20),
+    ]
+    # mean = 0.25 — well above _DELTA_NEUTRAL_BAND (0.05)
+    report = detect_bias(records, [], min_sample_size=3)
+
+    assert report.delta_skew.sufficient
+    assert report.delta_skew.direction == "bullish"
+    assert report.delta_skew.mean_net_delta == pytest.approx(0.25)
+
+
+# ---------------------------------------------------------------------------
+# detect_bias — strong bearish bias (delta skew)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_bias_strong_bearish_bias() -> None:
+    records = [
+        _jr(position_ids=["pbear1"], net_delta_at_open=-0.20),
+        _jr(position_ids=["pbear2"], net_delta_at_open=-0.25),
+        _jr(position_ids=["pbear3"], net_delta_at_open=-0.18),
+    ]
+    # mean ≈ -0.21 — below -_DELTA_NEUTRAL_BAND
+    report = detect_bias(records, [], min_sample_size=3)
+
+    assert report.delta_skew.sufficient
+    assert report.delta_skew.direction == "bearish"
+    assert report.delta_skew.mean_net_delta == pytest.approx(-0.21)
+
+
+# ---------------------------------------------------------------------------
+# detect_bias — direction win rate split (bullish vs bearish outcomes)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_bias_direction_win_rates() -> None:
+    # 3 bullish proposals: 2 wins, 1 loss
+    # 3 bearish proposals: 0 wins, 3 losses
+    records_bull = [
+        _jr(position_ids=[f"pdw_bull{i}"], net_delta_at_open=0.20) for i in range(3)
+    ]
+    records_bear = [
+        _jr(position_ids=[f"pdw_bear{i}"], net_delta_at_open=-0.20) for i in range(3)
+    ]
+    outcomes_bull = [
+        _outcome("pdw_bull0", 150.0),
+        _outcome("pdw_bull1", 200.0),
+        _outcome("pdw_bull2", -300.0),
+    ]
+    outcomes_bear = [
+        _outcome("pdw_bear0", -100.0),
+        _outcome("pdw_bear1", -200.0),
+        _outcome("pdw_bear2", -150.0),
+    ]
+
+    report = detect_bias(
+        records_bull + records_bear,
+        outcomes_bull + outcomes_bear,
+        min_sample_size=3,
+    )
+
+    bullish = report.by_direction["bullish"]
+    assert bullish.sufficient
+    assert bullish.sample_size == 3
+    assert bullish.hit_rate == pytest.approx(2 / 3)
+    assert bullish.avg_win == pytest.approx(175.0)
+    assert bullish.avg_loss == pytest.approx(-300.0)
+    assert bullish.total_pnl == pytest.approx(50.0)
+
+    bearish = report.by_direction["bearish"]
+    assert bearish.sufficient
+    assert bearish.sample_size == 3
+    assert bearish.hit_rate == pytest.approx(0.0)
+    assert math.isnan(bearish.avg_win)
+    assert bearish.avg_loss == pytest.approx(-150.0)
+    assert bearish.total_pnl == pytest.approx(-450.0)
+
+
+# ---------------------------------------------------------------------------
+# detect_bias — event-proximity loss scenario
+# ---------------------------------------------------------------------------
+
+
+def test_detect_bias_event_proximity_loss() -> None:
+    # 3 near-catalyst trades: all losses (earnings IV crush scenario)
+    # 3 baseline trades: all wins
+    near_records = [
+        _jr(position_ids=[f"pep_near{i}"], earnings_within_dte=True) for i in range(3)
+    ]
+    base_records = [
+        _jr(position_ids=[f"pep_base{i}"], earnings_within_dte=False) for i in range(3)
+    ]
+    near_outcomes = [
+        _outcome("pep_near0", -200.0),
+        _outcome("pep_near1", -150.0),
+        _outcome("pep_near2", -300.0),
+    ]
+    base_outcomes = [
+        _outcome("pep_base0", 100.0),
+        _outcome("pep_base1", 120.0),
+        _outcome("pep_base2", 80.0),
+    ]
+
+    report = detect_bias(
+        near_records + base_records,
+        near_outcomes + base_outcomes,
+        min_sample_size=3,
+    )
+
+    near = report.event_proximity.near_catalyst
+    assert near.sufficient
+    assert near.sample_size == 3
+    assert near.hit_rate == pytest.approx(0.0)
+    assert near.expectancy == pytest.approx(-650.0 / 3)
+    assert near.total_pnl == pytest.approx(-650.0)
+
+    baseline = report.event_proximity.baseline
+    assert baseline.sufficient
+    assert baseline.sample_size == 3
+    assert baseline.hit_rate == pytest.approx(1.0)
+    assert baseline.total_pnl == pytest.approx(300.0)
+
+
+# ---------------------------------------------------------------------------
+# detect_bias — records with no net_delta_at_open are skipped in direction
+# ---------------------------------------------------------------------------
+
+
+def test_detect_bias_missing_delta_skipped() -> None:
+    r_with = _jr(position_ids=["pmd1"], net_delta_at_open=0.20)
+    r_without = _jr(position_ids=["pmd2"])  # net_delta_at_open=None
+    o1 = _outcome("pmd1", 100.0)
+    o2 = _outcome("pmd2", -50.0)
+
+    report = detect_bias([r_with, r_without], [o1, o2], min_sample_size=1)
+
+    # Only r_with counts for delta skew
+    assert report.delta_skew.sample_size == 1
+    # pmd2 has no direction → skipped in by_direction; pmd1 is bullish
+    assert report.by_direction["bullish"].sample_size == 1
+    assert report.by_direction["bearish"].sample_size == 0
+
+
+# ---------------------------------------------------------------------------
+# detect_bias — since filter is applied
+# ---------------------------------------------------------------------------
+
+
+def test_detect_bias_since_filter() -> None:
+    r_old = _jr(position_ids=["pbf1"], net_delta_at_open=0.30, timestamp=_T0)
+    r_new = _jr(position_ids=["pbf2"], net_delta_at_open=-0.30, timestamp=_T2)
+    o1 = _outcome("pbf1", 100.0)
+    o2 = _outcome("pbf2", 100.0)
+
+    # Without filter: both records, mean ≈ 0 → neutral (or insufficient)
+    # With filter (since=_T1): only r_new → bearish delta skew
+    report = detect_bias([r_old, r_new], [o1, o2], since=_T1, min_sample_size=1)
+
+    assert report.window_start == _T1
+    assert report.delta_skew.sample_size == 1
+    assert report.delta_skew.direction == "bearish"
+
+
+# ---------------------------------------------------------------------------
+# detect_bias — total_pnl always set even when insufficient
+# ---------------------------------------------------------------------------
+
+
+def test_detect_bias_delta_neutral_skipped_from_direction_split() -> None:
+    # net_delta_at_open == 0.0 is within the ±0.05 neutral band — must not
+    # be silently bucketed into "bearish". Same for small positive/negative values
+    # within the band. All three should be skipped from both direction buckets.
+    r_zero = _jr(position_ids=["pdns1"], net_delta_at_open=0.0)
+    r_tiny_pos = _jr(position_ids=["pdns2"], net_delta_at_open=0.03)
+    r_tiny_neg = _jr(position_ids=["pdns3"], net_delta_at_open=-0.04)
+    outcomes = [
+        _outcome("pdns1", 100.0),
+        _outcome("pdns2", 200.0),
+        _outcome("pdns3", -50.0),
+    ]
+
+    report = detect_bias([r_zero, r_tiny_pos, r_tiny_neg], outcomes, min_sample_size=1)
+
+    # None of the three trades fall outside the band — both direction buckets empty
+    assert report.by_direction["bullish"].sample_size == 0
+    assert report.by_direction["bearish"].sample_size == 0
+
+    # Delta-skew: all three OPENED records with net_delta_at_open set → sufficient
+    assert report.delta_skew.sample_size == 3
+    assert report.delta_skew.direction == "neutral"
+
+
+def test_detect_bias_total_pnl_always_set() -> None:
+    # 1 bullish trade (below min_sample_size=3) with P&L
+    r = _jr(position_ids=["ptp1"], net_delta_at_open=0.20)
+    o = _outcome("ptp1", 175.0)
+
+    report = detect_bias([r], [o], min_sample_size=3)
+
+    bullish = report.by_direction["bullish"]
+    assert not bullish.sufficient
+    assert bullish.total_pnl == pytest.approx(175.0)
+    assert math.isnan(bullish.hit_rate)

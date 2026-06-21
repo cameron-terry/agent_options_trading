@@ -166,7 +166,7 @@ class Limits(BaseModel):
     exact limits active at the time. Bump it whenever any threshold changes.
     """
 
-    limits_version: str = "0.2.0"
+    limits_version: str = "0.3.0"
 
     # Risk / sizing
     max_loss_per_trade_pct: float = Field(default=0.01, gt=0, le=1.0)
@@ -203,6 +203,11 @@ class Limits(BaseModel):
 
     # Event proximity (entry gate only — does not affect open positions)
     event_blackout_days: int = Field(default=5, ge=0)
+
+    # Bias detection (WP-7.4): minimum closed-position count per metric cell before
+    # reporting a signal. Cells below this floor return NaN / "insufficient_data" so
+    # noise is never surfaced as a confident claim. Tune upward once trade count grows.
+    bias_min_sample_size: int = Field(default=10, ge=1)
 
     # Buying power floor (pre-flight gate; reads options_buying_power)
     min_buying_power_pct: float = Field(default=0.10, gt=0, le=1.0)

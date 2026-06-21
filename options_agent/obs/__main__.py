@@ -1,6 +1,6 @@
 """Observability CLI: python -m options_agent.obs
 
-Kill-switch management and journal review in one entry point.
+Kill-switch management, journal review, and bias detection in one entry point.
 
 Commands
 --------
@@ -9,6 +9,7 @@ Commands
   resume              Clear to NONE (requires acknowledgement + --reason).
   history [--n N]     Show last N kill-switch log entries (default 20).
   review              Print hit rate, P&L attribution, and cycle funnel.
+  bias                Print directional-bias and event-proximity analysis.
 
 Examples
 --------
@@ -20,6 +21,8 @@ Examples
   python -m options_agent.obs review
   python -m options_agent.obs review --since 2026-06-01
   python -m options_agent.obs review --prompt-version v2.0.0
+  python -m options_agent.obs bias
+  python -m options_agent.obs bias --since 2026-06-01
 """
 
 from __future__ import annotations
@@ -44,10 +47,12 @@ from options_agent.obs.killswitch import (
     set_state,
 )
 from options_agent.obs.review import (
+    BiasReport,
     CycleFunnelReport,
     HitRateReport,
     PnLAttributionReport,
     cycle_funnel,
+    detect_bias,
     hit_rate_by_strategy,
     pnl_attribution,
 )
@@ -314,6 +319,108 @@ def _render_pnl_attribution(report: PnLAttributionReport) -> None:
         )
 
 
+def _render_bias(report: BiasReport) -> None:
+    _console.print()
+    _console.rule("[bold]Bias / Failure-Mode Detection[/bold]")
+    _console.print(
+        f"[dim]Min sample size: {report.min_sample_size} closed positions per cell. "
+        "Cells below floor show [yellow]insufficient data[/yellow]. "
+        "Skew direction is not inherently a defect — interpret against market context. "
+        "This report surfaces evidence; it never recommends actions.[/dim]"
+    )
+
+    # --- (a) Delta skew ---
+    _console.print()
+    _console.print("[bold dim](a) Delta Skew — proposal-side[/bold dim]")
+    ds = report.delta_skew
+    n_label = f"n={ds.sample_size}"
+    need = report.min_sample_size
+    if not ds.sufficient:
+        _console.print(f"  [yellow]Insufficient data[/yellow] ({n_label}, need {need})")
+    else:
+        direction_color = (
+            "yellow"
+            if ds.direction == "bullish"
+            else "cyan"
+            if ds.direction == "bearish"
+            else "white"
+        )
+        _console.print(
+            f"  Mean net delta: [bold]{ds.mean_net_delta:+.4f}[/bold]  "
+            f"Direction: [{direction_color}]{ds.direction}[/{direction_color}]  "
+            f"({n_label})"
+        )
+
+    # --- (b) Direction win rates ---
+    _console.print()
+    _console.print("[bold dim](b) Direction Win Rates — outcome-side[/bold dim]")
+    if not report.by_direction:
+        _console.print(
+            "  [yellow]No closed trades with net_delta_at_open set.[/yellow]"
+        )
+    else:
+        td = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+        td.add_column("Direction", min_width=10)
+        td.add_column("Trades", justify="right")
+        td.add_column("Sufficient", justify="center")
+        td.add_column("Hit rate", justify="right")
+        td.add_column("Avg win", justify="right")
+        td.add_column("Avg loss", justify="right")
+        td.add_column("Expectancy", justify="right")
+        td.add_column("Net P&L", justify="right")
+        for d_stats in report.by_direction.values():
+            suf = "✓" if d_stats.sufficient else f"[yellow]✗ (need {need})[/yellow]"
+            td.add_row(
+                d_stats.direction,
+                str(d_stats.sample_size),
+                suf,
+                _pct_str(d_stats.hit_rate),
+                _pnl_str(d_stats.avg_win),
+                _pnl_str(d_stats.avg_loss),
+                _pnl_str(d_stats.expectancy),
+                _pnl_str(d_stats.total_pnl),
+            )
+        _console.print(td)
+        _console.print(
+            "[dim]Regime segmentation deferred — no denormalized regime "
+            "field on JournalRecord.[/dim]"
+        )
+
+    # --- Event proximity ---
+    _console.print()
+    _console.print(
+        "[bold dim]Event Proximity — near-catalyst cohort vs. baseline[/bold dim]"
+    )
+    _console.print(
+        "[dim]Near-catalyst: earnings_within_dte=True at open "
+        "(same threshold as entry gate). Baseline: all other closed trades.[/dim]"
+    )
+    ep = report.event_proximity
+    te = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+    te.add_column("Cohort", min_width=16)
+    te.add_column("Trades", justify="right")
+    te.add_column("Sufficient", justify="center")
+    te.add_column("Hit rate", justify="right")
+    te.add_column("Avg win", justify="right")
+    te.add_column("Avg loss", justify="right")
+    te.add_column("Expectancy", justify="right")
+    for label, cohort in [
+        ("Near catalyst", ep.near_catalyst),
+        ("Baseline", ep.baseline),
+    ]:
+        suf = "✓" if cohort.sufficient else f"[yellow]✗ (need {need})[/yellow]"
+        te.add_row(
+            label,
+            str(cohort.sample_size),
+            suf,
+            _pct_str(cohort.hit_rate),
+            _pnl_str(cohort.avg_win),
+            _pnl_str(cohort.avg_loss),
+            _pnl_str(cohort.expectancy),
+        )
+    _console.print(te)
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     since: datetime | None = None
     if args.since:
@@ -375,6 +482,63 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bias(args: argparse.Namespace) -> int:
+    since: datetime | None = None
+    if args.since:
+        try:
+            since = datetime.fromisoformat(args.since).replace(tzinfo=UTC)
+        except ValueError:
+            print(
+                f"ERROR: --since must be ISO 8601 date, e.g. 2026-06-01."
+                f" Got {args.since!r}"
+            )
+            return 1
+
+    prompt_ver: str | None = args.prompt_version or None
+
+    config = _load_config()
+    engine = build_engine(config.db_url)
+    metadata.create_all(engine)
+
+    with get_connection(engine) as conn:
+        records = query_journal(conn, date_from=since)
+        opened_action_types = {
+            ActionTaken.OPENED,
+            ActionTaken.CLOSED,
+            ActionTaken.ROLLED,
+        }
+        position_ids = [
+            pid
+            for r in records
+            if r.action_taken in opened_action_types
+            for pid in r.position_ids
+        ]
+        outcomes = query_outcome_records(conn, position_ids=position_ids or None)
+
+    filter_desc = []
+    if since:
+        filter_desc.append(f"since {since.date()}")
+    if prompt_ver:
+        filter_desc.append(f"prompt={prompt_ver}")
+    title = "Bias Detection"
+    if filter_desc:
+        title += f" ({', '.join(filter_desc)})"
+    _console.print(
+        f"\n[bold]{title}[/bold]  —  {len(records)} cycles, {len(outcomes)} outcomes"
+    )
+
+    bias_report = detect_bias(
+        records,
+        outcomes,
+        since=since,
+        prompt_version=prompt_ver,
+        min_sample_size=config.limits.bias_min_sample_size,
+    )
+    _render_bias(bias_report)
+    _console.print()
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -430,6 +594,20 @@ def main() -> int:
         help="Filter to a prompt version (e.g. v2.0.0) for before/after comparison",
     )
 
+    bias_p = sub.add_parser(
+        "bias", help="Print directional-bias and event-proximity analysis"
+    )
+    bias_p.add_argument(
+        "--since",
+        metavar="DATE",
+        help="ISO 8601 date (e.g. 2026-06-01) — only records from this date onward",
+    )
+    bias_p.add_argument(
+        "--prompt-version",
+        metavar="VERSION",
+        help="Filter to a prompt version (e.g. v2.0.0) for before/after comparison",
+    )
+
     args = parser.parse_args()
 
     dispatch = {
@@ -438,6 +616,7 @@ def main() -> int:
         "resume": cmd_resume,
         "history": cmd_history,
         "review": cmd_review,
+        "bias": cmd_bias,
     }
     return dispatch[args.command](args)
 
