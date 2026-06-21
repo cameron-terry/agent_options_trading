@@ -18,6 +18,7 @@ from sqlalchemy import (
     event,
 )
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.pool import StaticPool
 
 metadata = MetaData()
 
@@ -212,6 +213,31 @@ kill_switch_log_table = Table(
 
 
 # ---------------------------------------------------------------------------
+# alert_delivery_failures — append-only; one row per exhausted-retry send attempt.
+#
+# Written by AlertDispatcher when all retry attempts for an alert are exhausted.
+# The individual alert is dropped (delivery is best-effort), but the fact that
+# delivery failed is durable and queryable so WP-7 review can surface
+# "N undelivered CRITICAL alerts last week" without relying on log lines.
+#
+# event_type/severity stored as String (AlertEventType/AlertSeverity values);
+# no FK to journal_records — delivery failures may originate outside the
+# entry-cycle context (e.g. kill-switch changes fired from the CLI).
+# ---------------------------------------------------------------------------
+alert_delivery_failures_table = Table(
+    "alert_delivery_failures",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("event_type", String, nullable=False),
+    Column("severity", String, nullable=False),
+    Column("detail", String, nullable=False),
+    Column("attempted_at", DateTime(timezone=True), nullable=False, index=True),
+    Column("attempts", Integer, nullable=False),
+    Column("last_error", String, nullable=False),
+)
+
+
+# ---------------------------------------------------------------------------
 # Engine factory
 # ---------------------------------------------------------------------------
 
@@ -220,11 +246,21 @@ def build_engine(url: str) -> Engine:
     """Create a SQLAlchemy engine from a connection URL.
 
     SQLite connections get check_same_thread=False so the engine can be shared
-    across the main thread and any background reconcile tasks, and
-    foreign_keys=ON so FK constraints are enforced (matching Postgres behaviour).
+    across the main thread and any background tasks (e.g. AlertDispatcher's
+    worker thread), and foreign_keys=ON so FK constraints are enforced
+    (matching Postgres behaviour).
+
+    :memory: URLs additionally use StaticPool so that all engine.connect()
+    calls share the same DBAPI connection. Without StaticPool, each new
+    connection opens a fresh empty database — AlertDispatcher's worker thread
+    would write to a different (empty) :memory: DB than the one the test just
+    populated with create_all(). File-based SQLite and Postgres are unaffected.
     """
     if url.startswith("sqlite"):
-        engine = sa.create_engine(url, connect_args={"check_same_thread": False})
+        kwargs: dict = {"connect_args": {"check_same_thread": False}}
+        if ":memory:" in url:
+            kwargs["poolclass"] = StaticPool
+        engine = sa.create_engine(url, **kwargs)
 
         @event.listens_for(engine, "connect")
         def _set_sqlite_pragma(dbapi_conn, _record):  # type: ignore[misc]
