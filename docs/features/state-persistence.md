@@ -209,6 +209,28 @@ with get_connection(engine) as conn:
 
 For a live DB populated by real cycles, swap `build_engine("sqlite:///:memory:")` for `build_engine("sqlite:///options_agent.db")`.
 
+## Outcome records (WP-2.5 interface extension)
+
+`query_outcome_records` is the WP-2 read interface for `OutcomeRecord` rows — added retroactively in WP-7.3 (PR #69) and owned by `state/journal.py` going forward:
+
+```python
+from options_agent.state.journal import query_outcome_records
+
+with get_connection(engine) as conn:
+    # All outcomes for specific positions
+    outcomes = query_outcome_records(conn, position_ids=["pos-id-1", "pos-id-2"])
+
+    # All outcomes since a given date
+    from datetime import datetime, UTC
+    since = datetime(2025, 1, 1, tzinfo=UTC)
+    recent = query_outcome_records(conn, since=since)
+
+    # All outcomes (no filter)
+    all_outcomes = query_outcome_records(conn)
+```
+
+Results are ordered by `recorded_at` ascending. The `position_id` column is indexed; filtering by `position_ids` is efficient. WP-7 P&L attribution joins `OutcomeRecord.position_id → Position → JournalRecord.cycle_id` to correlate outcomes with entry decisions.
+
 ## Inspecting the SQLite file directly
 
 ```bash

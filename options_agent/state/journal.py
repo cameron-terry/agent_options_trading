@@ -12,6 +12,10 @@ Query API deliberately omits position_id filtering: the JSON position_ids
 column on journal_records is unindexed on SQLite. WP-7 attribution should
 join via OutcomeRecord.position_id → Position → JournalRecord.cycle_id,
 which is the primary key and is always indexed.
+
+Retroactive WP-2.5: query_outcome_records() was added by WP-7.3 (PR #69)
+without a WP-2 card. It is a WP-2 interface extension — state/journal.py
+owns it going forward; any future signature changes require a WP-2 card.
 """
 
 from __future__ import annotations
