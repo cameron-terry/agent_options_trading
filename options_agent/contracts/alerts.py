@@ -36,6 +36,10 @@ class AlertEventType(StrEnum):
     not as AlertEvents dispatched through the channel — dispatching would be
     circular. If a future WP needs to react programmatically to persistent
     delivery failures, scope the meta-alert flow in that WP's ticket.
+
+    WP-0 amendment: #68 (WP-7.2) introduced FILL, REJECTION, KILL_SWITCH_CHANGE.
+    Extended in #72/WP-8.2 (ENTRY_SUBMITTED, STATE_INTEGRITY), #73/WP-8.3
+    (EXIT_SUBMITTED), and #74/WP-8.4 (SCHEDULER_SKIP).
     """
 
     ENTRY_SUBMITTED = "ENTRY_SUBMITTED"

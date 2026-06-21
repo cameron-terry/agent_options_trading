@@ -100,6 +100,13 @@ class ExitReason(StrEnum):
     PROFIT_TARGET — unrealized P&L reached the profit-target percentage.
     DTE           — days-to-expiration reached the time-stop threshold.
     FLATTEN       — kill-switch FLATTEN overrode normal exit evaluation.
+
+    WP-0 amendment (WP-5.5 / PR #65): added retroactively. Stored as VARCHAR
+    NULL on orders and outcome_records (Alembic migration 005). WP-7 consumes
+    this field for GROUP BY exit_reason analytics; exit_reason on OutcomeRecord
+    is written in the finalize step after fill confirmation (deferred-journaling
+    pattern). None on pre-WP-5.5 records and non-monitor closes (expiry,
+    assignment).
     """
 
     STOP_LOSS = "STOP_LOSS"
