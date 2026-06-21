@@ -163,6 +163,7 @@ def test_default_severity_mapping() -> None:
     assert DEFAULT_SEVERITY[AlertEventType.FILL] == AlertSeverity.INFO
     assert DEFAULT_SEVERITY[AlertEventType.REJECTION] == AlertSeverity.WARN
     assert DEFAULT_SEVERITY[AlertEventType.KILL_SWITCH_CHANGE] == AlertSeverity.CRITICAL
+    assert DEFAULT_SEVERITY[AlertEventType.SCHEDULER_SKIP] == AlertSeverity.WARN
 
 
 # ---------------------------------------------------------------------------

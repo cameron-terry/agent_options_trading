@@ -62,19 +62,6 @@ _VALID_TERMINAL_ACTIONS = {
     ActionTaken.EXECUTION_FAILED,
 }
 
-# Short-circuit reasons that explain a NO_ACTION_GATED without journaling.
-_ACCEPTABLE_GATE_REASONS = {
-    ShortCircuitReason.KILL_SWITCH_HALT,
-    ShortCircuitReason.KILL_SWITCH_FLATTEN,
-    ShortCircuitReason.MARKET_CLOSED,
-    ShortCircuitReason.BLACKOUT_WINDOW,
-    ShortCircuitReason.NO_BUYING_POWER,
-    ShortCircuitReason.MAX_POSITIONS,
-    ShortCircuitReason.EMPTY_ACTION_SPACE,
-    ShortCircuitReason.WORKING_CANCEL_FAILED,
-    ShortCircuitReason.ORPHAN_UNRESOLVED,
-}
-
 
 @pytest.fixture(scope="module")
 def _universe_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
