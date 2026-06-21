@@ -664,11 +664,20 @@ def detect_bias(
     )
 
     # (b) Direction win rates — closed positions only
+    # Apply the same neutral band as delta_skew so a delta-neutral proposal
+    # (e.g., balanced iron condor at exactly 0.0) is not silently binned into
+    # "bearish". Proposals within the band are skipped — direction is ambiguous.
     direction_pnls: dict[str, list[float]] = {"bullish": [], "bearish": []}
     for _pid, (jr, pos_outcomes) in closed_trades.items():
-        if jr.net_delta_at_open is None:
+        delta = jr.net_delta_at_open
+        if delta is None:
             continue
-        d = "bullish" if jr.net_delta_at_open > 0 else "bearish"
+        if delta > _DELTA_NEUTRAL_BAND:
+            d = "bullish"
+        elif delta < -_DELTA_NEUTRAL_BAND:
+            d = "bearish"
+        else:
+            continue  # delta-neutral: skip rather than misclassify
         direction_pnls[d].append(sum(o.realized_pnl for o in pos_outcomes))
 
     by_direction = {

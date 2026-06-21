@@ -809,6 +809,30 @@ def test_detect_bias_since_filter() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_detect_bias_delta_neutral_skipped_from_direction_split() -> None:
+    # net_delta_at_open == 0.0 is within the ±0.05 neutral band — must not
+    # be silently bucketed into "bearish". Same for small positive/negative values
+    # within the band. All three should be skipped from both direction buckets.
+    r_zero = _jr(position_ids=["pdns1"], net_delta_at_open=0.0)
+    r_tiny_pos = _jr(position_ids=["pdns2"], net_delta_at_open=0.03)
+    r_tiny_neg = _jr(position_ids=["pdns3"], net_delta_at_open=-0.04)
+    outcomes = [
+        _outcome("pdns1", 100.0),
+        _outcome("pdns2", 200.0),
+        _outcome("pdns3", -50.0),
+    ]
+
+    report = detect_bias([r_zero, r_tiny_pos, r_tiny_neg], outcomes, min_sample_size=1)
+
+    # None of the three trades fall outside the band — both direction buckets empty
+    assert report.by_direction["bullish"].sample_size == 0
+    assert report.by_direction["bearish"].sample_size == 0
+
+    # Delta-skew: all three OPENED records with net_delta_at_open set → sufficient
+    assert report.delta_skew.sample_size == 3
+    assert report.delta_skew.direction == "neutral"
+
+
 def test_detect_bias_total_pnl_always_set() -> None:
     # 1 bullish trade (below min_sample_size=3) with P&L
     r = _jr(position_ids=["ptp1"], net_delta_at_open=0.20)
