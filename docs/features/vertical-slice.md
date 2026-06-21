@@ -2,11 +2,11 @@
 
 **Module:** `options_agent/orchestrator.py`  
 **Credentials required:** `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` (paper account)  
-**Status:** complete (WP-0.5)
+**Status:** complete (WP-0.5 / WP-8.1)
 
 The thin end-to-end proof that the WP-0 contracts connect. A hardcoded `TradeProposal` runs through the real validator, real sizing, real paper broker, real reconcile, and real journal write. This is the integration target that all other WPs are built against.
 
-**`run_monitor_cycle` is not yet implemented** — it raises `NotImplementedError` (WP-8).
+`run_monitor_cycle` is also implemented (WP-5.5) — see [monitor.md](monitor.md).
 
 ## What the slice does
 
@@ -24,7 +24,7 @@ No kill-switch check, no pre-flight gates, no real context assembly. WP-8 replac
 
 ## Running it
 
-> **Prerequisite:** the stub reasoner hardcodes SPY 450P/445P strikes. Alpaca paper rejects legs whose OCC symbols aren't listed — which happens when those strikes are far OTM (SPY at ~$741 means 450P has no open interest and isn't in Alpaca's system). Before running with real credentials, update `_STUB_EXPIRY`, `_STUB_STRIKE_SELL`, and `_STUB_STRIKE_BUY` in [options_agent/agent/stub_reasoner.py](../../options_agent/agent/stub_reasoner.py) to strikes near the current underlying price. **The offline mock section below is the reliable path for interactive testing without touching those values.**
+> **Prerequisite:** the stub reasoner hardcodes SPY 560P/555P strikes near the current market level. Alpaca paper rejects legs whose OCC symbols aren't listed — which happens when strikes are far OTM. If the market has moved significantly, update `_STUB_EXPIRY` and the leg strikes in [options_agent/agent/stub_reasoner.py](../../options_agent/agent/stub_reasoner.py). **The offline mock section below is the reliable path for interactive testing without touching those values.**
 
 ```python
 import logging
@@ -132,7 +132,7 @@ The stub reasoner emits a SPY bull-put-spread with a September quarterly expiry.
 |---|---|
 | Underlying | SPY |
 | Strategy | bull_put_spread |
-| Legs | sell 450P / buy 445P (Sep quarterly) |
+| Legs | sell 560P / buy 555P (Sep quarterly) |
 | Conviction | 0.65 |
-| Limit price | −$1.50 (net credit) |
-| Exit plan | 50% profit target, 2× stop, 21-DTE time-stop |
+| Limit price | `Config.slice_limit_price` (default −$1.50 net credit; smoke test uses −$0.01 to guarantee fill) |
+| Exit plan | 50% profit target, 50% max-loss stop, 21-DTE time-stop |

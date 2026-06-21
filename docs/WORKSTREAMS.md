@@ -386,7 +386,7 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 
 ## WP-8 — Orchestration & Integration `area:orchestration`
 
-**Owner:** integrator · **Status:** _not started_ · **Can start:** WP-0.5 early; full wiring last
+**Owner:** integrator · **Status:** _in progress_ · **Can start:** WP-0.5 early; full wiring last
 
 **Goal.** Wire the two loops, cadence, and real components together.
 
@@ -409,7 +409,7 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 - WP-0.5 (early), then all WPs for full wiring.
 
 **Suggested issue breakdown**
-- WP-0.5 vertical slice (do first).
+- WP-0.5 vertical slice (done — WP-8.1).
 - Entry-cycle wiring + short-circuit ordering.
 - Monitor-cycle wiring.
 - Scheduler + blackout windows.
