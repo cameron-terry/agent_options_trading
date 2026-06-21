@@ -19,9 +19,11 @@ from pydantic import BaseModel, Field
 class AlertEventType(StrEnum):
     """What triggered the alert.
 
-    FILL               — a position leg was filled by the broker.
+    ENTRY_SUBMITTED    — order sent to broker (working, not yet confirmed filled).
+    FILL               — a position leg was confirmed filled by the broker.
     REJECTION          — a TradeProposal was rejected by the validator.
     KILL_SWITCH_CHANGE — kill-switch state changed (HALT, FLATTEN, or NONE resume).
+    STATE_INTEGRITY    — reconcile detected an anomaly (orphan, unmatched-local, etc).
 
     Delivery failures are recorded as rows in alert_delivery_failures (DB),
     not as AlertEvents dispatched through the channel — dispatching would be
@@ -29,6 +31,7 @@ class AlertEventType(StrEnum):
     delivery failures, scope the meta-alert flow in that WP's ticket.
     """
 
+    ENTRY_SUBMITTED = "ENTRY_SUBMITTED"
     FILL = "FILL"
     REJECTION = "REJECTION"
     KILL_SWITCH_CHANGE = "KILL_SWITCH_CHANGE"
@@ -49,9 +52,11 @@ class AlertSeverity(StrEnum):
 
 
 DEFAULT_SEVERITY: dict[AlertEventType, AlertSeverity] = {
+    AlertEventType.ENTRY_SUBMITTED: AlertSeverity.INFO,
     AlertEventType.FILL: AlertSeverity.INFO,
     AlertEventType.REJECTION: AlertSeverity.WARN,
     AlertEventType.KILL_SWITCH_CHANGE: AlertSeverity.CRITICAL,
+    AlertEventType.STATE_INTEGRITY: AlertSeverity.WARN,
 }
 
 

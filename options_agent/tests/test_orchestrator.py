@@ -923,4 +923,83 @@ def test_run_entry_cycle_reasoner_error_is_cycle_error(
     with get_connection(engine) as conn:
         jr = read_journal_record(conn, result.journal_record_id)
     assert jr is not None
-    assert jr.action_taken == ActionTaken.NO_ACTION_GATED
+
+
+# ---------------------------------------------------------------------------
+# run_entry_cycle — NO_ACTION_AGENT path
+# ---------------------------------------------------------------------------
+
+
+def test_run_entry_cycle_no_action_agent(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reasoner returning NO_ACTION journals NO_ACTION_AGENT and skips validate/size."""
+    broker = _make_broker(monkeypatch)
+    _wire_reconcile_only(broker)
+
+    no_action_proposal = stub_reasoner().model_copy(update={"action": "NO_ACTION"})
+
+    with patch(_REASON_PATCH, return_value=no_action_proposal):
+        result = run_entry_cycle(
+            Config(), broker=broker, engine=engine, _now=_MARKET_HOURS_NOW
+        )
+
+    assert result.action_taken == ActionTaken.NO_ACTION_AGENT
+    assert result.proposal is not None
+    assert result.proposal.action == "NO_ACTION"
+    assert result.short_circuit_reason is None
+    assert result.validation is None
+    assert result.sizing is None
+    assert result.journal_record_id == result.cycle_id
+
+    assert result.journal_record_id is not None
+    with get_connection(engine) as conn:
+        jr = read_journal_record(conn, result.journal_record_id)
+    assert jr is not None
+    assert jr.action_taken == ActionTaken.NO_ACTION_AGENT
+
+
+# ---------------------------------------------------------------------------
+# run_entry_cycle — alert dispatch semantics (ENTRY_SUBMITTED before FILL)
+# ---------------------------------------------------------------------------
+
+
+def test_run_entry_cycle_entry_submitted_and_fill_alerts_dispatched(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ENTRY_SUBMITTED fires at submit; FILL fires after reconcile confirms fill."""
+    from options_agent.contracts.alerts import AlertEventType
+    from options_agent.obs.alerts import AlertDispatcher, NullChannel
+
+    broker = _make_broker(monkeypatch)
+    _wire_happy_broker(broker)
+
+    channel = NullChannel()
+    dispatcher = AlertDispatcher(channel, engine, retry_delay_s=0.0)
+
+    with patch(_REASON_PATCH, return_value=stub_reasoner()):
+        result = run_entry_cycle(
+            Config(),
+            broker=broker,
+            engine=engine,
+            dispatcher=dispatcher,
+            _now=_MARKET_HOURS_NOW,
+        )
+
+    dispatcher.shutdown()
+
+    assert result.action_taken == ActionTaken.OPENED
+
+    event_types = [e.event_type for e in channel.sent]
+    assert AlertEventType.ENTRY_SUBMITTED in event_types, (
+        f"Expected ENTRY_SUBMITTED in dispatched events; got {event_types}"
+    )
+    assert AlertEventType.FILL in event_types, (
+        f"Expected FILL in dispatched events; got {event_types}"
+    )
+
+    submitted_idx = event_types.index(AlertEventType.ENTRY_SUBMITTED)
+    fill_idx = event_types.index(AlertEventType.FILL)
+    assert submitted_idx < fill_idx, (
+        "ENTRY_SUBMITTED must precede FILL (submit happens before fill confirmation)"
+    )

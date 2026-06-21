@@ -293,6 +293,19 @@ def run_entry_cycle(
         len(state_diff.unmatched_local),
         len(state_diff.assigned_positions),
     )
+    for _filled_order in state_diff.newly_filled:
+        _dispatch(
+            dispatcher,
+            AlertEvent(
+                event_type=AlertEventType.FILL,
+                severity=AlertSeverity.INFO,
+                order_id=_filled_order.broker_order_id,
+                detail=(
+                    "Prior-cycle fill confirmed "
+                    f"broker_id={_filled_order.broker_order_id}"
+                ),
+            ),
+        )
 
     # ── Step 3: STATE_INTEGRITY ──────────────────────────────────────────────
     # 3a. WORKING OPEN orders — stale entries from a previous cycle that didn't
@@ -799,17 +812,10 @@ def run_entry_cycle(
         conviction=proposal.conviction,
     )
 
-    with get_connection(engine) as conn:
-        insert_position(conn, position)
-        insert_order(conn, order)
-        # reconcile() detects fills and transitions Position: PENDING_OPEN → OPEN.
-        _reconcile(broker, conn, _clock=now)
-        write_journal_record(conn, journal_record)
-
     _dispatch(
         dispatcher,
         AlertEvent(
-            event_type=AlertEventType.FILL,
+            event_type=AlertEventType.ENTRY_SUBMITTED,
             severity=AlertSeverity.INFO,
             symbol=proposal.underlying,
             order_id=order.broker_order_id,
@@ -819,6 +825,28 @@ def run_entry_cycle(
             ),
         ),
     )
+
+    with get_connection(engine) as conn:
+        insert_position(conn, position)
+        insert_order(conn, order)
+        # reconcile() detects fills and transitions Position: PENDING_OPEN → OPEN.
+        state_diff_post = _reconcile(broker, conn, _clock=now)
+        write_journal_record(conn, journal_record)
+
+    for _filled_order in state_diff_post.newly_filled:
+        _dispatch(
+            dispatcher,
+            AlertEvent(
+                event_type=AlertEventType.FILL,
+                severity=AlertSeverity.INFO,
+                symbol=proposal.underlying,
+                order_id=_filled_order.broker_order_id,
+                detail=(
+                    f"Fill confirmed: {proposal.strategy} on {proposal.underlying} "
+                    f"broker_id={_filled_order.broker_order_id}"
+                ),
+            ),
+        )
     logger.info(
         "cycle %s: OPENED broker_order_id=%s; journal written",
         cycle_id,
