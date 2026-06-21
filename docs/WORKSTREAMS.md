@@ -204,6 +204,12 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 - [x] A full `JournalRecord` (context snapshot, proposal, validation, sizing, orders, outcome) writes and reads back.
 - [x] Backend swap (SQLite↔Postgres) needs no call-site changes.
 
+**Post-freeze amendments** — `query_outcome_records()` was added to `state/journal.py` by WP-7.3 (PR #69) without a dedicated WP-2 card, documented retroactively per the contract-change policy (WP-2.5):
+
+| # | Change | File | PR | Consuming WPs |
+|---|--------|------|----|---------------|
+| 2.5-1 | `query_outcome_records(conn, *, position_ids, since)` added — bulk-fetch `OutcomeRecord` rows by position ID and/or date window; `conn`-based (consistent with all other state module functions); satisfies the deferred WP-2.3 join-path requirement (`OutcomeRecord.position_id` is the indexed join key to `JournalRecord` via `Position`) | `state/journal.py` | #69 (WP-7.3) | WP-7 (`obs/__main__.py`), data tools (`data/tools.py`) |
+
 ---
 
 ## WP-3 — Data & Signals `area:data`
