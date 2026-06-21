@@ -170,6 +170,17 @@ class Config(BaseModel):
     db_url: str = Field(default="sqlite:///options_agent.db")
     alpaca_paper: bool = Field(default=True)
 
+    # Data-layer selection (decoupled from alpaca_paper — see WP-8.5 for rationale).
+    # use_real_data_tools=False → MOCK_TOOL_IMPLS (dev / CI; paper only).
+    # use_real_data_tools=True  → real WP-3 data via AlpacaDataClient + yfinance
+    #                             (paper run or live; the 90-day paper run target).
+    # Four valid states:
+    #   paper + mock  → dev/CI (default)
+    #   paper + real  → the 90-day paper validation run  ← this must be expressible
+    #   live  + real  → production
+    #   live  + mock  → HARD ERROR (live money on fabricated data is forbidden)
+    use_real_data_tools: bool = Field(default=False)
+
     # Order execution
     # Poll every order_poll_interval_secs for fill status.
     # After order_poll_timeout_secs submit() returns current status
@@ -239,6 +250,16 @@ class Config(BaseModel):
                 f"See exchange_calendars.get_calendar_names() for valid names."
             )
         return v
+
+    @model_validator(mode="after")
+    def _live_requires_real_data(self) -> "Config":
+        if not self.alpaca_paper and not self.use_real_data_tools:
+            raise ValueError(
+                "live account (alpaca_paper=False) with use_real_data_tools=False "
+                "is forbidden: live money must never run on fabricated mock data. "
+                "Set use_real_data_tools=True before going live."
+            )
+        return self
 
     @model_validator(mode="after")
     def _slice_limit_price_paper_only(self) -> "Config":

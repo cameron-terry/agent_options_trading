@@ -1,8 +1,8 @@
 # Orchestration & Scheduling
 
-**Module:** `options_agent/orchestrator.py`, `options_agent/scheduler.py`  
+**Module:** `options_agent/orchestrator.py`, `options_agent/scheduler.py`, `options_agent/data/tools.py`  
 **Credentials required:** Alpaca keys (broker calls); `DISCORD_WEBHOOK_URL` (optional, alerting)  
-**Status:** entry-cycle wiring complete (WP-8.2); monitor-cycle wiring complete (WP-8.3); scheduler complete (WP-8.4)
+**Status:** entry-cycle wiring complete (WP-8.2); monitor-cycle wiring complete (WP-8.3); scheduler complete (WP-8.4); stub→real swap complete (WP-8.5)
 
 The orchestration layer wires all sub-systems together into two runtime loops and drives them at the correct cadences. `orchestrator.py` implements the logic of each cycle; `scheduler.py` drives both cycles at the configured intervals.
 
@@ -12,6 +12,7 @@ The orchestration layer wires all sub-systems together into two runtime loops an
 |---|---|
 | `orchestrator.py` | `run_entry_cycle()` — full 10-step entry pipeline; `run_monitor_cycle()` — exit evaluation loop |
 | `scheduler.py` | `CycleScheduler` — APScheduler-backed driver with lock-and-skip, kill-switch awareness, observable skip counters |
+| `data/tools.py` | `build_real_tool_impls()` — real WP-3 tool implementation factory (AlpacaDataClient + yfinance) |
 | `__main__.py` | Process entry point: load config, wire engine + alerting + scheduler, block until signal |
 
 ---
@@ -29,7 +30,7 @@ The full 10-step pipeline executed a few times per day at configured ET times.
    3c. orphans             → WARN alert + skip entry this cycle
    3d. assigned_positions  → HALT + CRITICAL (equity not modeled)
 4. TEMPORAL GATES   — market_is_open → within_blackout_window (no portfolio needed)
-5. ASSEMBLE         — context/assembler.py with mock tool impls (real WP-3: WP-8.5)
+5. ASSEMBLE         — context/assembler.py; tool impls selected by use_real_data_tools flag
 6. PORTFOLIO GATES  — has_buying_power → under_position_cap
 7. REASON           — agent/reasoner.py; ReasonerError → CycleError(REASON)
 8. VALIDATE         — risk/validator.py; rejection journals + REJECTION alert
@@ -140,6 +141,27 @@ export DISCORD_WEBHOOK_URL="..."   # optional; alerts silently suppressed withou
 ### Market-hours and blackout correctness
 
 `exchange_calendars` (already a project dep) drives all session-open/close detection, including holidays and early-close (half) days. The blackout windows in `within_blackout_window()` are computed against the **actual** session close for that date — not a hardcoded 16:00 ET. On an early-close day the close blackout window correctly starts 30 min before the real close (e.g., 12:30 ET for a 13:00 ET half-day close).
+
+## Data-layer selection (`use_real_data_tools`)
+
+`Config.use_real_data_tools` (default `False`) and `Config.alpaca_paper` are **independent flags**. The four combinations:
+
+| `alpaca_paper` | `use_real_data_tools` | Outcome |
+|---|---|---|
+| `True` | `False` | MOCK_TOOL_IMPLS — dev/CI, no live API calls (default) |
+| `True` | `True` | Real WP-3 data, paper money — **the 90-day paper validation run** |
+| `False` | `True` | Real WP-3 data, live money — production |
+| `False` | `False` | **Hard error** at Config construction (live money + fabricated data forbidden) |
+
+`build_real_tool_impls()` (`data/tools.py`) wires:
+- **`get_portfolio_state`** — open positions from WP-2 state DB + account equity/buying power from `BrokerClient.get_account()`
+- **`get_universe_snapshot`** — prices from `AlpacaDataClient`, VIX from `YFinanceVolatilityProvider`, macro events from the hardcoded calendar; symbols read from `Config.universe_file`
+- **`get_filtered_chain`** — real chain via `AlpacaDataClient` + full WP-3.2 filter pipeline; limits from `Config.limits.chain_filter`
+- **`get_events`** — earnings and ex-dividend via `YFinanceProvider`; lookahead window 60 days
+- **`get_journal_by_symbol`** — WP-2 `query_journal`, capped at `JOURNAL_MAX_RECORDS`
+- **`get_position_history`** — WP-2 position + journal + outcome-record lookup
+
+**Warm-up period:** during the first ~30 days `iv_rank=None` for all symbols (insufficient IV history from WP-3.4). The correct behaviour is `NO_ACTION` on every entry cycle — this is expected and will be the dominant outcome early in the paper run.
 
 ## Invariants
 

@@ -132,6 +132,31 @@ def test_config_defaults() -> None:
     assert isinstance(config.limits, Limits)
 
 
+def test_config_use_real_data_tools_default_false() -> None:
+    assert Config().use_real_data_tools is False
+
+
+def test_config_paper_mock_allowed() -> None:
+    # paper + mock is the dev/CI default — must be accepted
+    Config(alpaca_paper=True, use_real_data_tools=False)
+
+
+def test_config_paper_real_allowed() -> None:
+    # paper + real is the 90-day paper run target — must be expressible
+    Config(alpaca_paper=True, use_real_data_tools=True)
+
+
+def test_config_live_real_allowed() -> None:
+    # live + real is the eventual production config — must be accepted
+    Config(alpaca_paper=False, use_real_data_tools=True)
+
+
+def test_config_live_mock_rejected() -> None:
+    # live + mock is the dangerous combination — hard error at Config construction
+    with pytest.raises(ValueError, match="live account.*use_real_data_tools=False"):
+        Config(alpaca_paper=False, use_real_data_tools=False)
+
+
 def test_config_invalid_exchange_calendar_rejected() -> None:
     with pytest.raises(ValueError, match="Unknown exchange calendar name"):
         Config(exchange_calendar="TYPO_XNYS")

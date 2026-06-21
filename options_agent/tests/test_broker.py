@@ -61,7 +61,9 @@ def _api_error(status_code: int, retry_after: str | None = None) -> APIError:
 
 
 def _config(paper: bool = True) -> Config:
-    return Config(alpaca_paper=paper)
+    # live config (paper=False) requires use_real_data_tools=True per the
+    # _live_requires_real_data validator; paper config keeps the default False.
+    return Config(alpaca_paper=paper, use_real_data_tools=not paper)
 
 
 # ---------------------------------------------------------------------------

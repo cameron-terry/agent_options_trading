@@ -38,6 +38,7 @@ from options_agent.contracts.state import (
     PositionLeg,
     PositionStatus,
 )
+from options_agent.data.tools import build_real_tool_impls
 from options_agent.execution.broker import BrokerClient
 from options_agent.execution.reconcile import reconcile as _reconcile
 from options_agent.monitor.exits import (
@@ -96,19 +97,39 @@ def _dispatch(dispatcher: AlertDispatcher | None, event: AlertEvent) -> None:
         dispatcher.dispatch(event)
 
 
-def _build_tool_impls(config: Config) -> dict[str, ToolImpl]:
+def _build_tool_impls(
+    config: Config,
+    engine: Engine,
+    broker: BrokerClient,
+) -> dict[str, ToolImpl]:
     """Return the tool implementation map for the current run mode.
 
-    WP-8.5 swaps MOCK_TOOL_IMPLS for real WP-3 impls when alpaca_paper=False.
-    Paper guard ensures MOCK_TOOL_IMPLS is only used on paper accounts.
+    Selection logic (use_real_data_tools is independent of alpaca_paper):
+      use_real_data_tools=False + alpaca_paper=True  → MOCK_TOOL_IMPLS (dev/CI)
+      use_real_data_tools=False + alpaca_paper=False → hard error (Config validator
+          already rejects this; guard here is a belt-and-suspenders check)
+      use_real_data_tools=True                       → build_real_tool_impls (paper
+          or live — the 90-day paper run uses paper money + real data)
+
+    The live + mocks combination is rejected at Config construction time by
+    _live_requires_real_data(), so it cannot reach here in normal operation.
     """
+    if config.use_real_data_tools:
+        logger.info(
+            "Using real WP-3 data tools (use_real_data_tools=True, paper=%s)",
+            config.alpaca_paper,
+        )
+        return build_real_tool_impls(config, engine, broker)
+
+    # mock path: only reachable when use_real_data_tools=False
     if not config.alpaca_paper:
+        # Belt-and-suspenders — Config validator should have blocked this already.
         raise RuntimeError(
-            "Real WP-3 tool implementations not yet wired (WP-8.5). "
-            "alpaca_paper must be True to use MOCK_TOOL_IMPLS."
+            "live account (alpaca_paper=False) with use_real_data_tools=False "
+            "is forbidden. This should have been caught by Config validation."
         )
     logger.info(
-        "Using MOCK_TOOL_IMPLS (alpaca_paper=True; WP-3 swap deferred to WP-8.5)"
+        "Using MOCK_TOOL_IMPLS (use_real_data_tools=False, paper=True — dev/CI mode)"
     )
     return MOCK_TOOL_IMPLS
 
@@ -483,8 +504,7 @@ def run_entry_cycle(
         )
 
     # ── Step 5: ASSEMBLE ─────────────────────────────────────────────────────
-    # MOCK_TOOL_IMPLS (WP-6.1) for paper; real WP-3 impls swapped in WP-8.5.
-    _tool_impls = _build_tool_impls(config)
+    _tool_impls = _build_tool_impls(config, engine, broker)
     bundle = assemble_context(
         _tool_impls,
         model_id=_model_id,
