@@ -1003,3 +1003,133 @@ def test_run_entry_cycle_entry_submitted_and_fill_alerts_dispatched(
     assert submitted_idx < fill_idx, (
         "ENTRY_SUBMITTED must precede FILL (submit happens before fill confirmation)"
     )
+
+
+# ---------------------------------------------------------------------------
+# run_entry_cycle — FILL alert idempotency (prior-cycle fills)
+# ---------------------------------------------------------------------------
+
+
+def test_fill_alert_dispatched_exactly_once_on_double_reconcile(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prior-cycle fill fires exactly one FILL alert regardless of how many cycles run.
+
+    Mechanism: list_pending_orders() excludes terminal orders (FILLED, CANCELLED…),
+    so reconcile's newly_filled is empty on every pass after the first confirmation.
+    This test uses the real _reconcile() (not patched) to exercise that DB guard.
+    """
+    from datetime import date
+
+    from options_agent.contracts.alerts import AlertEventType
+    from options_agent.contracts.proposal import Leg
+    from options_agent.contracts.state import (
+        AssetClass,
+        LegStatus,
+        Position,
+        PositionLeg,
+        PositionStatus,
+    )
+    from options_agent.obs.alerts import AlertDispatcher, NullChannel
+
+    _expiry = date(2026, 9, 18)
+    _prior_broker_id = "broker-prior-fill-001"
+
+    # Insert a WORKING OPEN order left over from a prior cycle (not yet confirmed).
+    prior_pos = Position(
+        id="pos-prior-fill-001",
+        underlying="SPY",
+        strategy="bull_put_spread",
+        legs=[
+            PositionLeg(
+                leg=Leg(right="put", side="sell", strike=560.0, expiration=_expiry),
+                filled_qty=0,
+                avg_fill_price=0.0,
+                status=LegStatus.OPEN,
+            )
+        ],
+        quantity=2,
+        entry_net_amount=-1.50,
+        current_mark=-1.50,
+        marked_at=_NOW,
+        unrealized_pnl=0.0,
+        realized_pnl=None,
+        exit_plan=None,
+        status=PositionStatus.PENDING_OPEN,
+        opened_at=_NOW,
+        closed_at=None,
+        nearest_expiration=_expiry,
+        est_max_loss=-500.0,
+        est_max_profit=150.0,
+        opening_order_id="ord-prior-fill-001",
+        asset_class=AssetClass.OPTION_STRATEGY,
+        equity_legs=[],
+        assigned_from_position_id=None,
+    )
+    prior_order = Order(
+        id="ord-prior-fill-001",
+        broker_order_id=_prior_broker_id,
+        position_id="pos-prior-fill-001",
+        role=OrderRole.OPEN,
+        status=OrderStatus.WORKING,
+        broker_status_raw="new",
+        submitted_at=_NOW,
+        filled_at=None,
+        limit_price=-1.50,
+        legs_filled=[],
+        net_fill_price=None,
+        filled_qty=0,
+    )
+    with get_connection(engine) as conn:
+        insert_position(conn, prior_pos)
+        insert_order(conn, prior_order)
+
+    # Broker reports the order as filled (same response on every call).
+    filled_alpaca = MagicMock()
+    filled_alpaca.id = _prior_broker_id
+    filled_alpaca.status.value = "filled"
+    filled_alpaca.filled_qty = 2
+    filled_alpaca.filled_avg_price = -1.50
+    filled_alpaca.symbol = None
+    filled_alpaca.legs = None
+    filled_alpaca.submitted_at = _NOW
+    filled_alpaca.filled_at = _NOW
+
+    broker = _make_broker(monkeypatch)
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=filled_alpaca)
+    broker.get_all_positions = MagicMock(return_value=[])
+    broker.get_account_activities = MagicMock(return_value=[])
+
+    channel = NullChannel()
+    dispatcher = AlertDispatcher(channel, engine, retry_delay_s=0.0)
+
+    no_action_proposal = stub_reasoner().model_copy(update={"action": "NO_ACTION"})
+
+    # Cycle 1: step-2 reconcile sees the prior-cycle fill → one FILL dispatched.
+    with patch(_REASON_PATCH, return_value=no_action_proposal):
+        run_entry_cycle(
+            Config(),
+            broker=broker,
+            engine=engine,
+            dispatcher=dispatcher,
+            _now=_MARKET_HOURS_NOW,
+        )
+
+    # Cycle 2: prior order is now terminal in DB; list_pending_orders excludes it
+    # → newly_filled is empty → no second FILL.
+    with patch(_REASON_PATCH, return_value=no_action_proposal):
+        run_entry_cycle(
+            Config(),
+            broker=broker,
+            engine=engine,
+            dispatcher=dispatcher,
+            _now=_MARKET_HOURS_NOW,
+        )
+
+    dispatcher.shutdown()
+
+    fill_events = [e for e in channel.sent if e.event_type == AlertEventType.FILL]
+    assert len(fill_events) == 1, (
+        f"Expected exactly 1 FILL alert across two cycles; got {len(fill_events)}"
+    )

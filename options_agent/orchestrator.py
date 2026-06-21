@@ -293,6 +293,8 @@ def run_entry_cycle(
         len(state_diff.unmatched_local),
         len(state_diff.assigned_positions),
     )
+    # FILL source 1-of-2: prior-cycle orders whose fill was confirmed this pass.
+    # Same-cycle confirmed fills come from step 10's inner _reconcile (source 2-of-2).
     for _filled_order in state_diff.newly_filled:
         _dispatch(
             dispatcher,
@@ -833,6 +835,8 @@ def run_entry_cycle(
         state_diff_post = _reconcile(broker, conn, _clock=now)
         write_journal_record(conn, journal_record)
 
+    # FILL source 2-of-2: same-cycle order confirmed by the inner _reconcile above.
+    # Prior-cycle fills are dispatched from step 2's reconcile (source 1-of-2).
     for _filled_order in state_diff_post.newly_filled:
         _dispatch(
             dispatcher,
