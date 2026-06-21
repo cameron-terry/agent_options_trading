@@ -17,6 +17,7 @@ dependencies = [
     # psycopg2 built against the system libpq, or migrate to psycopg v3.
     "psycopg2-binary>=2.9",
     "yfinance>=0.2",
+    "rich>=13.0",
 ]
 
 [dependency-groups]

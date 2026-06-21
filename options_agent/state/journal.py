@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
@@ -268,6 +269,31 @@ def read_journal_record(conn: Connection, cycle_id: str) -> JournalRecord | None
         )
     ).first()
     return _row_to_journal_record(row) if row is not None else None
+
+
+def query_outcome_records(
+    conn: Connection,
+    *,
+    position_ids: Sequence[str] | None = None,
+    since: datetime | None = None,
+) -> list[OutcomeRecord]:
+    """Query outcome records, ordered by recorded_at ascending.
+
+    Args:
+        position_ids: If provided, return only outcomes for these positions.
+                      Pass None to return all outcome records.
+        since:        If provided, return only outcomes recorded at or after
+                      this timestamp.
+    """
+    stmt = sa.select(outcome_records_table).order_by(
+        outcome_records_table.c.recorded_at
+    )
+    if position_ids is not None:
+        stmt = stmt.where(outcome_records_table.c.position_id.in_(position_ids))
+    if since is not None:
+        stmt = stmt.where(outcome_records_table.c.recorded_at >= since)
+    rows = conn.execute(stmt).fetchall()
+    return [_row_to_outcome_record(r) for r in rows]
 
 
 def read_outcome_record(conn: Connection, outcome_id: str) -> OutcomeRecord | None:
