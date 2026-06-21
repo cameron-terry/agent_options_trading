@@ -221,6 +221,9 @@ class Config(BaseModel):
     # monitor_max_mark_age_minutes: max acceptable age of pos.marked_at before
     #   exits.py raises MarkStaleError. Keep this >= 2 × monitor_interval_minutes
     #   so a single slow cycle does not cause spurious stale-mark errors.
+    # WP-0 amendment (WP-5.5 / PR #65): monitor_max_mark_age_minutes added
+    # retroactively to Config. Provides a configurable staleness window for
+    # MarkStaleError in exit evaluators; default tracks 2 × monitor_interval_minutes.
     monitor_interval_minutes: int = Field(default=2, ge=1, le=60)
     monitor_max_mark_age_minutes: int = Field(default=4, ge=1, le=60)
 

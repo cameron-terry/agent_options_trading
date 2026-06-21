@@ -90,6 +90,15 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 - [x] CI green on the skeleton.
 - [x] Contracts module is sign-off-frozen; change policy documented; CODEOWNERS set.
 
+**Post-freeze amendments** — changes made inside WP-5/WP-7 PRs without a dedicated WP-0 PR, documented retroactively per the contract-change policy (PRs WP-0.A1 and WP-0.A2):
+
+| # | Change | File | PR | Consuming WPs |
+|---|--------|------|----|---------------|
+| A1-1 | `stop_loss_mult` → `stop_loss_max_loss_fraction` — fraction of `est_max_loss` in `(0, 1]`; formula uniform across credit and debit strategies | `contracts/proposal.py` (`ExitPlan`) | #59 (WP-5.1) | WP-6 (confirmed clean 2026-06-20), WP-4 |
+| A1-2 | `ExitReason` enum added (`STOP_LOSS`, `PROFIT_TARGET`, `DTE`, `FLATTEN`) — stored as `VARCHAR NULL` on `orders` and `outcome_records` (migration 005); written in finalize step after fill confirmation | `contracts/state.py`, `contracts/journal.py` | #65 (WP-5.5) | WP-7 (implicit sign-off via usage in #69, #70) |
+| A1-3 | `monitor_max_mark_age_minutes` added to `Config` — configurable staleness window for `MarkStaleError`; default tracks `2 × monitor_interval_minutes` | `config.py` (`Config`) | #65 (WP-5.5) | WP-5 |
+| A2-1 | `contracts/alerts.py` (new file) — `AlertEventType`, `AlertSeverity`, `AlertEvent`; all three exported from `contracts/__init__.py` | `contracts/alerts.py` | #68 (WP-7.2) | WP-7 (dispatches), WP-8 (constructs in entry + monitor cycles) |
+
 ---
 
 ## WP-0.5 — Vertical slice (thin end-to-end) `blocker`
