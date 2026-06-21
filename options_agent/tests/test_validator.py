@@ -1353,3 +1353,63 @@ def test_same_proposal_passes_neutral_fails_loaded_portfolio() -> None:
     assert any(
         r.rule_id == ValidationRuleId.PORTFOLIO_DELTA_BAND for r in result_fail.reasons
     )
+
+
+# ===========================================================================
+# WP-4.7: _STRATEGY_DELTA_SIGN must mirror the config-file playbook
+# ===========================================================================
+
+
+def test_delta_sign_covers_all_playbook_strategies() -> None:
+    """Every strategy in config.toml [playbook] must have a delta-sign entry.
+
+    Compares against Config.from_toml so config-file additions are caught, not
+    just changes to PlaybookConfig code-level defaults.  Fail message tells the
+    developer exactly which strategies need to be added to _STRATEGY_DELTA_SIGN.
+    """
+    from pathlib import Path
+
+    from options_agent.config import Config
+    from options_agent.risk.validator import _STRATEGY_DELTA_SIGN
+
+    playbook = Config.from_toml(Path("config.toml")).playbook
+    missing = playbook.all_allowed_strategies - set(_STRATEGY_DELTA_SIGN.keys())
+    assert not missing, (
+        f"Strategies in config.toml [playbook] but missing from _STRATEGY_DELTA_SIGN:"
+        f" {missing}. Update both together in validator.py."
+    )
+
+
+def test_delta_sign_no_stale_entries() -> None:
+    """_STRATEGY_DELTA_SIGN must not contain strategies absent from config.toml.
+
+    Stale entries mask typos. Remove them from _STRATEGY_DELTA_SIGN when a
+    strategy is retired from the playbook.
+    """
+    from pathlib import Path
+
+    from options_agent.config import Config
+    from options_agent.risk.validator import _STRATEGY_DELTA_SIGN
+
+    playbook = Config.from_toml(Path("config.toml")).playbook
+    extra = set(_STRATEGY_DELTA_SIGN.keys()) - playbook.all_allowed_strategies
+    assert not extra, (
+        f"Strategies in _STRATEGY_DELTA_SIGN but absent from config.toml [playbook]:"
+        f" {extra}. Remove stale entries or restore them to the playbook."
+    )
+
+
+def test_delta_sign_drift_is_detectable() -> None:
+    """Confirm that adding a strategy to the playbook without updating
+    _STRATEGY_DELTA_SIGN is caught by test_delta_sign_covers_all_playbook_strategies.
+    """
+    from options_agent.config import PlaybookConfig
+    from options_agent.risk.validator import _STRATEGY_DELTA_SIGN
+
+    new_strategy = "long_straddle"
+    extended_playbook = PlaybookConfig(
+        medium_iv_strategies=PlaybookConfig().medium_iv_strategies | {new_strategy}
+    )
+    keys = set(_STRATEGY_DELTA_SIGN.keys())
+    missing = extended_playbook.all_allowed_strategies - keys
+    assert new_strategy in missing
