@@ -267,18 +267,19 @@ def test_iv_rank_no_history_and_zero_denominator_log_are_distinct(conn, caplog) 
 
 
 def test_iv_rank_uses_at_most_252_observations(conn) -> None:
-    # Insert 300 observations; the window should cap at 252.
-    # Set the 300th-oldest (outermost) to an extreme value; if it leaked in,
-    # it would distort the rank.
+    # 252 observations spanning [0.10, 0.25]; plus one record at 350 days ago
+    # (outside the 366-day calendar window) at iv=99.0. If the window cap
+    # failed, iv_high would be 99.0 and rank would be ≈ 0.001 instead of 0.667.
     old_date = _TODAY - timedelta(days=350)
     record_daily_iv(_SYMBOL, 99.0, old_date, conn)  # outside 366-day window
-    _insert_history(conn, _SYMBOL, [0.25] * 252)
-    # Add a spread so denominator isn't zero
-    record_daily_iv(_SYMBOL, 0.10, _TODAY - timedelta(days=1), conn)
+
+    # 251 observations at 0.25 + 1 at 0.10 to create a non-zero spread.
+    _insert_history(conn, _SYMBOL, [0.25] * 251)
+    record_daily_iv(_SYMBOL, 0.10, _TODAY - timedelta(days=252), conn)
+
     result = compute_iv_rank(_SYMBOL, 0.20, conn, min_days=30)
-    # If 99.0 leaked in, iv_high would be 99.0 and rank would be ≈ 0.001.
-    # With only the 252-day window, high=0.25, low=0.10, rank=(0.20-0.10)/0.15 ≈ 0.667
-    assert result is not None and result < 2.0  # 99.0 didn't contaminate
+    # high=0.25, low=0.10, rank=(0.20-0.10)/(0.25-0.10)=0.10/0.15≈0.667
+    assert result == pytest.approx(0.10 / 0.15, abs=0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +455,40 @@ def test_get_atm_iv_returns_none_when_only_puts() -> None:
     contracts = [_make_put(strike=500.0, expiration=exp, iv=0.25)]
     result = get_atm_iv(contracts, spot_price=500.0)
     assert result is None
+
+
+def test_get_atm_iv_mixed_delta_and_no_delta_on_same_expiry() -> None:
+    # Some calls have delta, some don't. The function should select from the
+    # with-delta group and ignore the no-delta calls on the same expiration.
+    exp = _TODAY + timedelta(days=30)
+    contracts = [
+        _make_call(strike=490.0, expiration=exp, iv=0.30, delta=0.65),  # has delta
+        _make_call(strike=500.0, expiration=exp, iv=0.25, delta=0.50),  # has delta, ATM
+        _make_call(strike=510.0, expiration=exp, iv=0.20, delta=None),  # no delta
+    ]
+    # with_delta group: 490 (delta=0.65, dist=0.15) and 500 (delta=0.50, dist=0.0).
+    # ATM pick = 500, iv=0.25.
+    result = get_atm_iv(contracts, spot_price=500.0)
+    assert result == pytest.approx(0.25)
+
+
+def test_iv_percentile_all_history_equals_current_iv(conn) -> None:
+    # All 30 observations equal current_iv. Strictly-below count = 0 → 0.0.
+    _insert_history(conn, _SYMBOL, [0.25] * 30)
+    result = compute_iv_percentile(_SYMBOL, 0.25, conn, min_days=30)
+    assert result == pytest.approx(0.0)
+
+
+def test_iv_history_beyond_366_day_cutoff_excluded(conn) -> None:
+    # _fetch_history uses observation_date >= (today - 366 days), so a record
+    # at today-367 is outside the window; today-366 is on the boundary (included).
+    outside = _TODAY - timedelta(days=367)
+    record_daily_iv(_SYMBOL, 99.0, outside, conn)
+    # Also insert 30 in-window observations with a spread so denominator != 0.
+    _insert_history(conn, _SYMBOL, [0.10] + [0.20] * 28 + [0.30])
+    result = compute_iv_rank(_SYMBOL, 0.20, conn, min_days=30)
+    # high=0.30, low=0.10, rank=(0.20-0.10)/(0.30-0.10)=0.5. If 99.0 leaked: rank≈0.001.
+    assert result == pytest.approx(0.5)
 
 
 # ---------------------------------------------------------------------------

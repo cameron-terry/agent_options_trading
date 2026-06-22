@@ -180,7 +180,10 @@ def get_atm_iv(
     # ATM selection: prefer delta closest to 0.5; fallback to strike proximity.
     with_delta = [c for c in at_exp if c.delta is not None]
     if with_delta:
-        atm = min(with_delta, key=lambda c: abs((c.delta or 0.0) - 0.5))
+        atm = min(
+            with_delta,
+            key=lambda c: abs((c.delta if c.delta is not None else 0.0) - 0.5),
+        )
     else:
         atm = min(at_exp, key=lambda c: abs(c.strike - spot_price))
 

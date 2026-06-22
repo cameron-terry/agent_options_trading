@@ -11,6 +11,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     Float,
+    Index,
     Integer,
     MetaData,
     String,
@@ -44,6 +45,7 @@ iv_history_table = Table(
     Column("observation_date", Date, nullable=False),
     Column("atm_iv", Float, nullable=False),
     sa.UniqueConstraint("symbol", "observation_date", name="uq_iv_history_symbol_date"),
+    Index("ix_iv_history_symbol_date", "symbol", "observation_date"),
 )
 
 # ---------------------------------------------------------------------------
