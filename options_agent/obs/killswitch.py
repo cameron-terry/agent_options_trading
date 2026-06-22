@@ -20,13 +20,18 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
 from pydantic import BaseModel
 from sqlalchemy.engine import Connection
 
+from options_agent.contracts.alerts import AlertEvent, AlertEventType, AlertSeverity
 from options_agent.contracts.state import KillSwitchState
 from options_agent.state.db import kill_switch_log_table
+
+if TYPE_CHECKING:
+    from options_agent.obs.alerts import AlertDispatcher
 
 # Deterministic ordering: latest created_at first; UUID descending as tie-breaker.
 # Two entries in the same microsecond are vanishingly unlikely in production, but
@@ -90,11 +95,15 @@ def set_state(
     *,
     set_by: str,
     reason: str,
+    dispatcher: AlertDispatcher | None = None,
 ) -> KillSwitchEntry:
     """Append a kill-switch log entry with the given state.
 
     Prefer resume() when transitioning to NONE — it carries the semantic
     distinction between arming and resuming that the audit log makes visible.
+
+    dispatcher is optional; passing None is a safe no-op so existing callers
+    that do not inject a dispatcher are unaffected.
     """
     if not set_by:
         raise ValueError("set_by must not be empty")
@@ -112,6 +121,14 @@ def set_state(
             created_at=now,
         )
     )
+    if dispatcher is not None:
+        dispatcher.dispatch(
+            AlertEvent(
+                event_type=AlertEventType.KILL_SWITCH_CHANGE,
+                severity=AlertSeverity.CRITICAL,
+                detail=f"{set_by}: {state.value} — {reason}",
+            )
+        )
     return KillSwitchEntry(
         id=entry_id,
         state=state,
@@ -126,6 +143,7 @@ def resume(
     *,
     set_by: str,
     reason: str,
+    dispatcher: AlertDispatcher | None = None,
 ) -> KillSwitchEntry:
     """Resume normal trading by setting kill-switch state to NONE.
 
@@ -136,8 +154,12 @@ def resume(
     Asymmetry is intentional: halting is instant and frictionless; resuming
     requires a conscious acknowledgement.  The CLI enforces an additional
     confirmation prompt and displays open positions before allowing resume.
+
+    dispatcher is forwarded to set_state(); passing None is a safe no-op.
     """
-    return set_state(conn, KillSwitchState.NONE, set_by=set_by, reason=reason)
+    return set_state(
+        conn, KillSwitchState.NONE, set_by=set_by, reason=reason, dispatcher=dispatcher
+    )
 
 
 def list_history(conn: Connection, *, limit: int = 10) -> list[KillSwitchEntry]:

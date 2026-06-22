@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/obs/`  
 **Credentials required:** `DISCORD_WEBHOOK_URL` (alerting only; optional for review/kill-switch)  
-**Status:** kill-switch complete (WP-7.1); alerting complete (WP-7.2); review metrics complete (WP-7.3); bias detection complete (WP-7.4)
+**Status:** kill-switch complete (WP-7.1); alerting complete (WP-7.2); review metrics complete (WP-7.3); bias detection complete (WP-7.4); kill-switch alert wiring complete (WP-8.9)
 
 Runtime safety controls and operational visibility into the running agent. The module owns anything that lets an operator observe, pause, or stop the system without touching the core trading logic.
 
@@ -72,9 +72,11 @@ from options_agent.obs.killswitch import (
     resume,
     list_history,
 )
+from options_agent.obs.alerts import AlertDispatcher, NullChannel  # for dispatcher injection
 
 engine = build_engine("sqlite:///options_agent.db")
 metadata.create_all(engine)  # no-op if table already exists
+channel = NullChannel()  # or DiscordChannel(os.environ["DISCORD_WEBHOOK_URL"])
 
 # Read current state
 with get_connection(engine) as conn:
@@ -83,16 +85,23 @@ with get_connection(engine) as conn:
 print(is_halted(state))   # True under HALT or FLATTEN
 print(is_flatten(state))  # True only under FLATTEN
 
-# Arm the switch
-with get_connection(engine) as conn:
-    entry = set_state(
-        conn, KillSwitchState.HALT, set_by="operator", reason="broker mismatch"
-    )
+# Arm the switch (with alert dispatch)
+with AlertDispatcher(channel, engine) as dispatcher:
+    with get_connection(engine) as conn:
+        entry = set_state(
+            conn, KillSwitchState.HALT,
+            set_by="operator", reason="broker mismatch",
+            dispatcher=dispatcher,  # optional; omit for silent set
+        )
 print(entry.id, entry.state, entry.created_at)
 
-# Resume
-with get_connection(engine) as conn:
-    entry = resume(conn, set_by="operator", reason="reconcile complete")
+# Resume (with alert dispatch)
+with AlertDispatcher(channel, engine) as dispatcher:
+    with get_connection(engine) as conn:
+        entry = resume(
+            conn, set_by="operator", reason="reconcile complete",
+            dispatcher=dispatcher,
+        )
 
 # Read history (newest first)
 with get_connection(engine) as conn:

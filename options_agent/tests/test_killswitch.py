@@ -332,3 +332,95 @@ def test_monitor_cycle_proceeds_on_db_error(engine) -> None:
         assert result.errors == []
     finally:
         _orch.get_current_state = original
+
+
+# ---------------------------------------------------------------------------
+# WP-8.9: set_state() / resume() dispatcher injection
+# ---------------------------------------------------------------------------
+
+
+def _null_dispatcher(engine: sa.engine.Engine) -> tuple:
+    """Return (dispatcher, channel) backed by NullChannel for assertions."""
+    from options_agent.obs.alerts import AlertDispatcher, NullChannel
+
+    channel = NullChannel()
+    dispatcher = AlertDispatcher(channel, engine)
+    return dispatcher, channel
+
+
+def test_set_state_dispatches_kill_switch_change(engine) -> None:
+    """set_state() with a dispatcher emits KILL_SWITCH_CHANGE."""
+    from options_agent.contracts.alerts import AlertEventType
+
+    dispatcher, channel = _null_dispatcher(engine)
+    with dispatcher:
+        with get_connection(engine) as conn:
+            set_state(
+                conn,
+                KillSwitchState.HALT,
+                set_by="operator",
+                reason="test halt",
+                dispatcher=dispatcher,
+            )
+
+    assert len(channel.sent) == 1
+    event = channel.sent[0]
+    assert event.event_type == AlertEventType.KILL_SWITCH_CHANGE
+    assert "operator" in event.detail
+    assert "HALT" in event.detail
+    assert "test halt" in event.detail
+
+
+def test_set_state_flatten_dispatches_kill_switch_change(engine) -> None:
+    """FLATTEN transition also emits KILL_SWITCH_CHANGE."""
+    from options_agent.contracts.alerts import AlertEventType
+
+    dispatcher, channel = _null_dispatcher(engine)
+    with dispatcher:
+        with get_connection(engine) as conn:
+            set_state(
+                conn,
+                KillSwitchState.FLATTEN,
+                set_by="operator",
+                reason="flatten test",
+                dispatcher=dispatcher,
+            )
+
+    assert len(channel.sent) == 1
+    assert channel.sent[0].event_type == AlertEventType.KILL_SWITCH_CHANGE
+    assert "FLATTEN" in channel.sent[0].detail
+
+
+def test_resume_dispatches_kill_switch_change(engine) -> None:
+    """resume() with a dispatcher emits KILL_SWITCH_CHANGE for the NONE transition."""
+    from options_agent.contracts.alerts import AlertEventType
+
+    dispatcher, channel = _null_dispatcher(engine)
+    with dispatcher:
+        with get_connection(engine) as conn:
+            set_state(conn, KillSwitchState.HALT, set_by="op", reason="halt first")
+            resume(
+                conn,
+                set_by="operator",
+                reason="issue resolved",
+                dispatcher=dispatcher,
+            )
+
+    # Only the resume call carries a dispatcher — one event.
+    assert len(channel.sent) == 1
+    event = channel.sent[0]
+    assert event.event_type == AlertEventType.KILL_SWITCH_CHANGE
+    assert "NONE" in event.detail
+    assert "issue resolved" in event.detail
+
+
+def test_set_state_no_dispatcher_is_noop(engine) -> None:
+    """dispatcher=None (the default) does not raise and writes the DB row normally."""
+    with get_connection(engine) as conn:
+        entry = set_state(
+            conn,
+            KillSwitchState.HALT,
+            set_by="operator",
+            reason="no dispatcher",
+        )
+    assert entry.state == KillSwitchState.HALT
