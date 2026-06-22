@@ -1,8 +1,8 @@
 """Add iv_history table for daily ATM IV accumulation (WP-3.4).
 
-Revision ID: 004
-Revises: 003
-Create Date: 2026-06-14
+Revision ID: 007
+Revises: 006
+Create Date: 2026-06-22
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "004"
-down_revision: str | None = "003"
+revision: str = "007"
+down_revision: str | None = "006"
 branch_labels: str | tuple[str, ...] | None = None
 depends_on: str | tuple[str, ...] | None = None
 
