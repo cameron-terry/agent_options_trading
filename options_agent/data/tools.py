@@ -168,6 +168,12 @@ def build_real_tool_impls(
                 snapshot.symbol_snapshots[symbol] = ss.model_copy(
                     update={"iv_rank": iv_rank, "iv_percentile": iv_pct}
                 )
+                if iv_rank is None:
+                    logger.debug(
+                        "IV rank: %s — insufficient history "
+                        "(iv_rank=None; symbol ineligible this cycle)",
+                        symbol,
+                    )
             except Exception as exc:
                 logger.warning(
                     "IV rank enrichment failed for %s — %s "
