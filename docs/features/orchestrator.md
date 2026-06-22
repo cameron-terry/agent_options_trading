@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/orchestrator.py`, `options_agent/scheduler.py`, `options_agent/data/tools.py`  
 **Credentials required:** Alpaca keys (broker calls); `DISCORD_WEBHOOK_URL` (optional, alerting)  
-**Status:** entry-cycle wiring complete (WP-8.2); monitor-cycle wiring complete (WP-8.3); scheduler complete (WP-8.4); stub→real swap complete (WP-8.5)
+**Status:** entry-cycle wiring complete (WP-8.2); monitor-cycle wiring complete (WP-8.3); scheduler complete (WP-8.4); stub→real swap complete (WP-8.5); daily IV capture + context assembler IV enrichment complete (WP-8.10)
 
 The orchestration layer wires all sub-systems together into two runtime loops and drives them at the correct cadences. `orchestrator.py` implements the logic of each cycle; `scheduler.py` drives both cycles at the configured intervals.
 
@@ -10,7 +10,7 @@ The orchestration layer wires all sub-systems together into two runtime loops an
 
 | File | Responsibility |
 |---|---|
-| `orchestrator.py` | `run_entry_cycle()` — full 10-step entry pipeline; `run_monitor_cycle()` — exit evaluation loop |
+| `orchestrator.py` | `run_entry_cycle()` — full 10-step entry pipeline; `run_monitor_cycle()` — exit evaluation loop; `run_daily_iv_job()` — session-relative ATM IV capture for all universe symbols |
 | `scheduler.py` | `CycleScheduler` — APScheduler-backed driver with lock-and-skip, kill-switch awareness, observable skip counters |
 | `data/tools.py` | `build_real_tool_impls()` — real WP-3 tool implementation factory (AlpacaDataClient + yfinance) |
 | `__main__.py` | Process entry point: load config, wire engine + alerting + scheduler, block until signal |
@@ -77,6 +77,7 @@ APScheduler 3.x `BackgroundScheduler` driving both loops.
 |---|---|---|
 | Monitor | `IntervalTrigger(minutes=N)` | `config.monitor_interval_minutes` (default 2) |
 | Entry | `CronTrigger(hour=H, minute=M, timezone=tz)` per time | `config.entry_times` (default `[10:30, 13:00, 15:00]` ET) |
+| Daily IV | `DateTrigger` computed from `session_close + offset`; reschedules in `finally` | `config.daily_iv_capture_offset_minutes` (default 15) |
 
 ### Lock-and-skip
 
@@ -90,7 +91,16 @@ The skip counter resets to zero on the next successful (non-skipped) run.
 
 The entry job checks the kill-switch **before acquiring the entry lock**. Under `HALT` or `FLATTEN`, the entry cycle is not invoked at all — makes system-halted visible at the scheduler layer, not only inside the cycle. DB read failure → skip (fail closed, same as the cycle).
 
-The monitor job is not blocked at the scheduler layer.
+The monitor job and the daily IV job are **not blocked** at the scheduler layer. IV history accumulation must continue during HALT/FLATTEN so the 252-day window stays intact for resume.
+
+### Daily IV capture (`run_daily_iv_job`)
+
+Scheduled at `session_close + daily_iv_capture_offset_minutes` (default 15 min) using a `DateTrigger` computed from `exchange_calendars.next_close()`. The job reschedules itself in a `finally` block so it always fires the following session even if the current run raises.
+
+- **Session-relative, not wall-clock** — on a half-day the close is 13:00 ET, so the job fires at 13:15 ET, not 16:15 ET. Consistent sampling is essential: IV history rows must represent the same point in the day relative to session close or rank/percentile comparisons are corrupted.
+- **Idempotent** — `record_daily_iv()` is an upsert; running twice on the same date updates the row without creating a duplicate.
+- **No null/zero fill** — if `get_atm_iv()` returns `None` for a symbol, no row is written. Missing rows are the correct representation of unavailable data (consistent with WP-3.4).
+- **Skip = permanent history gap** — a skipped session cannot be reconstructed after the fact. A `SCHEDULER_SKIP / WARN` alert fires if the previous job is still running when the next session fires.
 
 ### APScheduler settings
 
@@ -137,6 +147,7 @@ export DISCORD_WEBHOOK_URL="..."   # optional; alerts silently suppressed withou
 | `session_open_blackout_minutes` | `30` | Skip entry if within N min of session open |
 | `session_close_blackout_minutes` | `30` | Skip entry if within N min of session close |
 | `exchange_calendar` | `"XNYS"` | `exchange_calendars` calendar name; handles holidays + early closes |
+| `daily_iv_capture_offset_minutes` | `15` | Minutes after session close to sample ATM IV; session-relative so half-days use the real 13:00 ET close |
 
 ### Market-hours and blackout correctness
 
@@ -155,13 +166,13 @@ export DISCORD_WEBHOOK_URL="..."   # optional; alerts silently suppressed withou
 
 `build_real_tool_impls()` (`data/tools.py`) wires:
 - **`get_portfolio_state`** — open positions from WP-2 state DB + account equity/buying power from `BrokerClient.get_account()`
-- **`get_universe_snapshot`** — prices from `AlpacaDataClient`, VIX from `YFinanceVolatilityProvider`, macro events from the hardcoded calendar; symbols read from `Config.universe_file`
+- **`get_universe_snapshot`** — prices from `AlpacaDataClient`, VIX from `YFinanceVolatilityProvider`, macro events from the hardcoded calendar; symbols from `Config.universe_file`. After fetching the base snapshot the closure enriches each `SymbolSnapshot` with `iv_rank` and `iv_percentile` from `data/iv_rank.py`, using the same `get_atm_iv(target_dte=30)` call as the daily capture job to keep the live IV numerator commensurable with stored history.
 - **`get_filtered_chain`** — real chain via `AlpacaDataClient` + full WP-3.2 filter pipeline; limits from `Config.limits.chain_filter`
 - **`get_events`** — earnings and ex-dividend via `YFinanceProvider`; lookahead window 60 days
 - **`get_journal_by_symbol`** — WP-2 `query_journal`, capped at `JOURNAL_MAX_RECORDS`
 - **`get_position_history`** — WP-2 position + journal + outcome-record lookup
 
-**Warm-up period:** during the first ~30 days `iv_rank=None` for all symbols (insufficient IV history from WP-3.4). The correct behaviour is `NO_ACTION` on every entry cycle — this is expected and will be the dominant outcome early in the paper run.
+**Warm-up period:** during the first ~30 trading sessions `iv_rank=None` for all symbols (fewer than `min_days=30` rows in `iv_history`). The correct behaviour is `NO_ACTION` on every entry cycle — this is expected and will be the dominant outcome early in the paper run. After 30 sessions the warm-up lifts symbol by symbol as history accumulates.
 
 ## Invariants
 

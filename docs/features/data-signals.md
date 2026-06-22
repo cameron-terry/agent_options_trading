@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/data/`  
 **Credentials required:** `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`  
-**Status:** in progress (WP-3.1–3.3, 3.6, 3.8 complete; IV-rank WP-3.4 pending)
+**Status:** in progress (WP-3.1–3.4, 3.6, 3.8, 8.10 complete)
 
 Turns raw Alpaca market data into the compact, token-efficient inputs the agent consumes. The provider client handles caching and rate-limit back-off internally — callers see a single blocking call per symbol.
 
@@ -12,8 +12,10 @@ Turns raw Alpaca market data into the compact, token-efficient inputs the agent 
 |---|---|
 | `providers/alpaca_data.py` | `AlpacaDataClient` — Alpaca options data with per-cycle cache + retry |
 | `chains.py` | `get_filtered_chain` — fetch + liquidity/DTE/delta pre-filter → `FilteredChain`; `get_held_leg_greeks` — unfiltered Greek fetch for open positions |
-| `greeks_iv.py` | `enrich_greeks_iv` — validate and normalise Greeks/IV on raw contracts |
+| `greeks_iv.py` | `get_atm_iv` — ATM IV extraction from a chain; `enrich_greeks_iv` — validate and normalise Greeks/IV on raw contracts |
+| `iv_rank.py` | `record_daily_iv` — idempotent upsert into `iv_history`; `compute_iv_rank` / `compute_iv_percentile` — 252-day lookback rank/percentile |
 | `market.py` | `get_universe_snapshot` — VIX fetch, regime classification, per-symbol prices |
+| `tools.py` | `load_universe` — shared universe reader; `build_real_tool_impls` — wires all live tool implementations |
 
 ## AlpacaDataClient
 
@@ -146,7 +148,39 @@ for key, (delta, vega, theta) in greek_map.items():
 
 Unlike `get_filtered_chain`, no DTE window or delta range is applied — the full chain is fetched for each underlying. This closes the gap where a held leg that has aged below `dte_min` would be absent from the entry-chain and silently contribute `0.0` to portfolio Greek aggregation. Contracts absent from the provider snapshot (expired options no longer quoted) are simply omitted; callers should fall back to `0.0` and log a warning.
 
+## IV rank and percentile (WP-3.4 + WP-8.10)
+
+`iv_rank.py` maintains a rolling 252-trading-day history of ATM IV and computes rank/percentile on demand. `run_daily_iv_job()` (in `orchestrator.py`) records one IV observation per symbol per session, scheduled at `session_close + daily_iv_capture_offset_minutes`. The entry cycle's `get_universe_snapshot` tool enriches each `SymbolSnapshot` with live rank/percentile from the same history table.
+
+**Correctness invariant:** both the daily capture job and the live enrichment at assembly time call `get_atm_iv()` with identical default parameters (`target_dte=30`). Using the same function at both sites keeps the stored history and the live `current_iv` numerator commensurable.
+
+**Missing data policy:** if fewer than `min_days=30` historical observations exist, `compute_iv_rank` / `compute_iv_percentile` return `None`. Symbols with `iv_rank=None` are labelled `ineligible (iv_rank unknown)` in the assembler context and excluded from entry candidates by WP-4 gates. This is the expected state during the first ~30 sessions of the paper run.
+
+```python
+from datetime import date
+from options_agent.data.greeks_iv import get_atm_iv
+from options_agent.data.iv_rank import record_daily_iv, compute_iv_rank, compute_iv_percentile
+from options_agent.state.db import build_engine, get_connection
+
+engine = build_engine("sqlite:///options_agent.db")
+
+# Manually record today's IV for a symbol:
+client = AlpacaDataClient()
+client.begin_cycle()
+contracts = client.fetch_option_chain("SPY")
+price = client.fetch_latest_price("SPY")
+atm_iv = get_atm_iv(contracts, price)   # float | None
+
+if atm_iv is not None:
+    with get_connection(engine) as conn:
+        record_daily_iv("SPY", atm_iv, date.today(), conn)
+
+# Query rank and percentile:
+with get_connection(engine) as conn:
+    rank = compute_iv_rank("SPY", atm_iv, conn)        # float | None
+    pct  = compute_iv_percentile("SPY", atm_iv, conn)  # float | None
+```
+
 ## What's not yet implemented
 
-- IV rank / percentile / historical vol on `SymbolSnapshot` — WP-3.4 (currently `None`)
 - `news.py` — headline sentiment (phase 2, optional)
