@@ -11,6 +11,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     Float,
+    Index,
     Integer,
     MetaData,
     String,
@@ -21,6 +22,31 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.pool import StaticPool
 
 metadata = MetaData()
+
+# ---------------------------------------------------------------------------
+# iv_history — append-once-per-trading-day; one ATM IV observation per symbol.
+#
+# Accumulates the daily ATM IV scalar used to compute iv_rank and iv_percentile
+# (WP-3.4). Observation discipline: one row per (symbol, date); a re-run on
+# the same market day updates atm_iv rather than inserting a duplicate (the
+# unique constraint enforces this via data/iv_rank.record_daily_iv()).
+#
+# Compute rank/percentile on read from the trailing 252-row window; never store
+# the derived metrics — they change every day as the window rolls, and storing
+# them creates a staleness risk with no compensating benefit.
+#
+# "current IV" definition (must be consistent across stored history and live
+# compute): ATM call at the nearest-to-30-DTE expiration. See data/iv_rank.py.
+# ---------------------------------------------------------------------------
+iv_history_table = Table(
+    "iv_history",
+    metadata,
+    Column("symbol", String, nullable=False),
+    Column("observation_date", Date, nullable=False),
+    Column("atm_iv", Float, nullable=False),
+    sa.UniqueConstraint("symbol", "observation_date", name="uq_iv_history_symbol_date"),
+    Index("ix_iv_history_symbol_date", "symbol", "observation_date"),
+)
 
 # ---------------------------------------------------------------------------
 # positions — one strategy-level position per row; mutable (status, mark, pnl)
