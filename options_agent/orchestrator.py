@@ -2,7 +2,7 @@ import hashlib
 import json
 import logging
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import exchange_calendars as xcals
 from sqlalchemy.engine import Engine
@@ -38,7 +38,10 @@ from options_agent.contracts.state import (
     PositionLeg,
     PositionStatus,
 )
-from options_agent.data.tools import build_real_tool_impls
+from options_agent.data.greeks_iv import get_atm_iv
+from options_agent.data.iv_rank import record_daily_iv
+from options_agent.data.providers.alpaca_data import AlpacaDataClient
+from options_agent.data.tools import build_real_tool_impls, load_universe
 from options_agent.execution.broker import BrokerClient
 from options_agent.execution.reconcile import reconcile as _reconcile
 from options_agent.monitor.exits import (
@@ -218,6 +221,123 @@ def _dispose_assignment(
         len(assigned_positions),
         detail,
     )
+
+
+def run_daily_iv_job(
+    config: Config,
+    *,
+    engine: Engine | None = None,
+    dispatcher: AlertDispatcher | None = None,
+    _today: date | None = None,
+) -> None:
+    """Record daily ATM IV for every symbol in the universe.
+
+    Called by CycleScheduler once per trading session, at session_close +
+    config.daily_iv_capture_offset_minutes. Not gated by the kill switch —
+    IV accumulation must continue during HALT/FLATTEN so history stays intact
+    for when trading resumes. Silently stopping accumulation during a halt
+    would punch a gap in the 252-day window that degrades rank quality for
+    weeks afterward.
+
+    For each universe symbol:
+    1. Fetch the options chain via AlpacaDataClient.fetch_option_chain().
+    2. Extract ATM IV with get_atm_iv() — identical call (same function, same
+       default target_dte=30) as the context assembler's live-IV fetch, so the
+       stored history and the live current_iv numerator remain commensurable.
+    3. Upsert via record_daily_iv() — idempotent: re-running the job on the
+       same day updates the existing row, never inserts a duplicate.
+
+    Missing-data policy: a failed symbol fetch writes NO row for that symbol
+    on this date. The rank computation sees the gap as an absent observation,
+    not a null value — consistent with WP-3.4's "None means no data" invariant.
+
+    Symbol failures are dispatched as SCHEDULER_SKIP WARN alerts so silent IV
+    history degradation surfaces before it degrades trading eligibility. A few
+    days of gaps can leave symbols None-ineligible without any visible error.
+
+    _today is a test-only override for the current date (same DI pattern as
+    _now in run_entry_cycle). Production callers must not pass it.
+    """
+    if engine is None:
+        engine = build_engine(config.db_url)
+
+    today = _today if _today is not None else date.today()
+    today_str = today.isoformat()
+    calendar = xcals.get_calendar(config.exchange_calendar)
+
+    if not calendar.is_session(today_str):
+        logger.info(
+            "run_daily_iv_job: %s is not a trading session — skipping",
+            today_str,
+        )
+        return
+
+    symbols = load_universe(config)
+    if not symbols:
+        logger.warning("run_daily_iv_job: universe is empty — nothing to record")
+        return
+
+    data_provider = AlpacaDataClient()
+    data_provider.begin_cycle()
+
+    recorded = 0
+    failed: list[str] = []
+
+    for symbol in symbols:
+        try:
+            contracts = data_provider.fetch_option_chain(symbol)
+            price = data_provider.fetch_latest_price(symbol)
+            atm_iv = get_atm_iv(contracts, price)
+            if atm_iv is None:
+                logger.warning(
+                    "run_daily_iv_job: %s on %s — no ATM IV extractable from chain "
+                    "(no row written for this session)",
+                    symbol,
+                    today_str,
+                )
+                failed.append(symbol)
+                continue
+            with get_connection(engine) as conn:
+                record_daily_iv(symbol, atm_iv, today, conn)
+            recorded += 1
+            logger.debug(
+                "run_daily_iv_job: %s on %s — recorded atm_iv=%.4f",
+                symbol,
+                today_str,
+                atm_iv,
+            )
+        except Exception as exc:
+            logger.error(
+                "run_daily_iv_job: %s on %s — %s",
+                symbol,
+                today_str,
+                exc,
+            )
+            failed.append(symbol)
+
+    logger.info(
+        "run_daily_iv_job: %s — recorded=%d failed=%d%s",
+        today_str,
+        recorded,
+        len(failed),
+        f" failed_symbols={failed[:5]}{'...' if len(failed) > 5 else ''}"
+        if failed
+        else "",
+    )
+
+    if failed:
+        _dispatch(
+            dispatcher,
+            AlertEvent(
+                event_type=AlertEventType.SCHEDULER_SKIP,
+                severity=AlertSeverity.WARN,
+                detail=(
+                    f"Daily IV capture: {len(failed)}/{len(symbols)} symbols failed "
+                    f"on {today_str}: {failed[:5]}"
+                    + (" ..." if len(failed) > 5 else "")
+                ),
+            ),
+        )
 
 
 def run_entry_cycle(
@@ -1235,6 +1355,7 @@ __all__ = [
     "CycleStage",
     "MonitorResult",
     "ShortCircuitReason",
+    "run_daily_iv_job",
     "run_entry_cycle",
     "run_monitor_cycle",
 ]

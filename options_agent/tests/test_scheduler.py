@@ -290,3 +290,143 @@ def test_monitor_coalesce_enabled(config, engine):
     monitor_job = sched._apscheduler.get_job("monitor")
     assert monitor_job is not None
     assert monitor_job.coalesce is True
+
+
+def test_daily_iv_job_registered(config, engine):
+    """daily_iv job is registered as a DateTrigger job."""
+    sched = CycleScheduler(config, engine=engine)
+    job_ids = {job.id for job in sched._apscheduler.get_jobs()}
+    assert "daily_iv" in job_ids
+
+
+def test_daily_iv_job_coalesce_enabled(config, engine):
+    sched = CycleScheduler(config, engine=engine)
+    job = sched._apscheduler.get_job("daily_iv")
+    assert job is not None
+    assert job.coalesce is True
+
+
+# ---------------------------------------------------------------------------
+# Daily IV — NOT kill-switch gated
+# ---------------------------------------------------------------------------
+
+
+def test_daily_iv_runs_not_gated_by_kill_switch(scheduler) -> None:
+    """Daily IV runs unconditionally — no kill-switch check in _run_daily_iv."""
+    with (
+        patch("options_agent.scheduler.run_daily_iv_job") as mock_job,
+        patch.object(scheduler, "_add_daily_iv_job"),
+    ):
+        scheduler._run_daily_iv()
+    mock_job.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Daily IV — lock-and-skip
+# ---------------------------------------------------------------------------
+
+
+def test_daily_iv_skips_when_locked(scheduler) -> None:
+    scheduler._daily_iv_lock.acquire()
+    try:
+        with (
+            patch("options_agent.scheduler.run_daily_iv_job") as mock_job,
+            patch.object(scheduler, "_add_daily_iv_job"),
+        ):
+            scheduler._run_daily_iv()
+        mock_job.assert_not_called()
+        assert scheduler._daily_iv_skip_count == 1
+    finally:
+        scheduler._daily_iv_lock.release()
+
+
+def test_daily_iv_skip_count_resets_on_run(scheduler) -> None:
+    scheduler._daily_iv_lock.acquire()
+    try:
+        with (
+            patch("options_agent.scheduler.run_daily_iv_job"),
+            patch.object(scheduler, "_add_daily_iv_job"),
+        ):
+            scheduler._run_daily_iv()
+    finally:
+        scheduler._daily_iv_lock.release()
+    assert scheduler._daily_iv_skip_count == 1
+
+    with (
+        patch("options_agent.scheduler.run_daily_iv_job"),
+        patch.object(scheduler, "_add_daily_iv_job"),
+    ):
+        scheduler._run_daily_iv()
+    assert scheduler._daily_iv_skip_count == 0
+
+
+def test_daily_iv_warn_alert_at_skip_threshold(scheduler) -> None:
+    """Skipping _SKIP_WARN_THRESHOLD times dispatches a WARN alert."""
+    with patch("options_agent.scheduler._dispatch_safe") as mock_dispatch:
+        scheduler._daily_iv_lock.acquire()
+        try:
+            for _ in range(_SKIP_WARN_THRESHOLD):
+                with (
+                    patch("options_agent.scheduler.run_daily_iv_job"),
+                    patch.object(scheduler, "_add_daily_iv_job"),
+                ):
+                    scheduler._run_daily_iv()
+        finally:
+            scheduler._daily_iv_lock.release()
+
+    skip_dispatches = [
+        call
+        for call in mock_dispatch.call_args_list
+        if call.args[1].event_type == AlertEventType.SCHEDULER_SKIP
+        and call.args[1].severity == AlertSeverity.WARN
+    ]
+    assert len(skip_dispatches) >= 1
+
+
+def test_daily_iv_reschedules_after_run(scheduler) -> None:
+    """Daily IV job reschedules for the next session after completing."""
+    reschedule_called = []
+
+    def _mock_reschedule() -> None:
+        reschedule_called.append(True)
+
+    with (
+        patch("options_agent.scheduler.run_daily_iv_job"),
+        patch.object(scheduler, "_add_daily_iv_job", side_effect=_mock_reschedule),
+    ):
+        scheduler._run_daily_iv()
+
+    assert len(reschedule_called) == 1
+
+
+def test_daily_iv_reschedules_even_on_exception(scheduler) -> None:
+    """Daily IV job reschedules for the next session even if the job raises."""
+    reschedule_called = []
+
+    def _mock_reschedule() -> None:
+        reschedule_called.append(True)
+
+    with (
+        patch(
+            "options_agent.scheduler.run_daily_iv_job",
+            side_effect=RuntimeError("boom"),
+        ),
+        patch.object(scheduler, "_add_daily_iv_job", side_effect=_mock_reschedule),
+    ):
+        scheduler._run_daily_iv()
+
+    assert len(reschedule_called) == 1
+
+
+# ---------------------------------------------------------------------------
+# _next_iv_capture_datetime
+# ---------------------------------------------------------------------------
+
+
+def test_next_iv_capture_datetime_is_in_future(config, engine) -> None:
+    """The computed next capture datetime is always in the future."""
+    from datetime import UTC, datetime
+
+    sched = CycleScheduler(config, engine=engine)
+    capture_dt = sched._next_iv_capture_datetime()
+    assert capture_dt > datetime.now(UTC)

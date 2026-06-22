@@ -42,6 +42,8 @@ from options_agent.contracts.data import (
 from options_agent.contracts.journal import JournalRecord
 from options_agent.data.chains import get_filtered_chain as _chain_impl
 from options_agent.data.events import get_events as _events_impl
+from options_agent.data.greeks_iv import get_atm_iv
+from options_agent.data.iv_rank import compute_iv_percentile, compute_iv_rank
 from options_agent.data.market import get_universe_snapshot as _universe_impl
 from options_agent.data.providers.alpaca_data import AlpacaDataClient
 from options_agent.data.providers.yfinance_provider import YFinanceProvider
@@ -61,12 +63,15 @@ _EVENTS_LOOKAHEAD_DAYS = 60
 _MACRO_LOOKAHEAD_DAYS = 60
 
 
-def _load_universe(config: Config) -> list[str]:
+def load_universe(config: Config) -> list[str]:
     """Return the ordered symbol list from config.universe_file.
 
     Lines starting with '#' and blank lines are ignored. Returns [] with a
     WARNING when the file is missing or empty so the cycle short-circuits at
     the EMPTY_ACTION_SPACE gate rather than crashing.
+
+    Used by both build_real_tool_impls() (entry cycle) and run_daily_iv_job()
+    (daily IV capture). One source so both paths trade the same universe.
     """
     path = config.universe_file
     if not path.exists():
@@ -100,7 +105,7 @@ def build_real_tool_impls(
         engine: SQLAlchemy engine for WP-2 state and journal reads.
         broker: BrokerClient for live account equity and buying power.
     """
-    universe_symbols = _load_universe(config)
+    universe_symbols = load_universe(config)
     data_provider = AlpacaDataClient()
     vol_provider = YFinanceVolatilityProvider()
     event_provider = YFinanceProvider()
@@ -132,13 +137,45 @@ def build_real_tool_impls(
         )
 
     def _universe(_tool_input: dict[str, Any]) -> UniverseSnapshot:
-        return _universe_impl(
+        snapshot = _universe_impl(
             symbols=universe_symbols,
             provider=data_provider,
             vol_provider=vol_provider,
             playbook=config.playbook,
             macro_lookahead_days=_MACRO_LOOKAHEAD_DAYS,
         )
+        # Enrich each SymbolSnapshot with iv_rank and iv_percentile.
+        # fetch_option_chain() is cached within the cycle (keyed by
+        # ("fetch_option_chain", symbol)), so this call and the agent's later
+        # get_filtered_chain() calls share the same cached chain object.
+        # get_atm_iv() uses identical parameters (default target_dte=30) as
+        # the daily IV job, keeping the live current_iv numerator commensurable
+        # with the stored history — same ATM definition, same tenor.
+        for symbol, ss in list(snapshot.symbol_snapshots.items()):
+            try:
+                contracts = data_provider.fetch_option_chain(symbol)
+                atm_iv = get_atm_iv(contracts, ss.price)
+                if atm_iv is None:
+                    logger.debug(
+                        "IV rank: %s — no ATM IV available; "
+                        "iv_rank/iv_percentile remain None (symbol ineligible)",
+                        symbol,
+                    )
+                    continue
+                with get_connection(engine) as conn:
+                    iv_rank = compute_iv_rank(symbol, atm_iv, conn)
+                    iv_pct = compute_iv_percentile(symbol, atm_iv, conn)
+                snapshot.symbol_snapshots[symbol] = ss.model_copy(
+                    update={"iv_rank": iv_rank, "iv_percentile": iv_pct}
+                )
+            except Exception as exc:
+                logger.warning(
+                    "IV rank enrichment failed for %s — %s "
+                    "(iv_rank/iv_percentile remain None; symbol ineligible this cycle)",
+                    symbol,
+                    exc,
+                )
+        return snapshot
 
     def _filtered_chain(tool_input: dict[str, Any]) -> FilteredChain:
         return _chain_impl(

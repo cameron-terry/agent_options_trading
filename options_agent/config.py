@@ -227,6 +227,14 @@ class Config(BaseModel):
     monitor_interval_minutes: int = Field(default=2, ge=1, le=60)
     monitor_max_mark_age_minutes: int = Field(default=4, ge=1, le=60)
 
+    # Daily IV accumulation (WP-8.10).
+    # Minutes after each session's actual close to capture ATM IV.
+    # Session-relative (not wall-clock) so early-close days (e.g. Black Friday,
+    # Christmas Eve) are handled correctly and IV history is sampled at a
+    # consistent point each session — critical for rank/percentile validity.
+    # le=120 caps obviously wrong values; 15 minutes is the production default.
+    daily_iv_capture_offset_minutes: int = Field(default=15, ge=0, le=120)
+
     # Risk limits (nested)
     limits: Limits = Field(default_factory=Limits)
 
