@@ -143,6 +143,8 @@ def _refresh_position_marks(
     for pos in list_open_positions(conn):
         if pos.asset_class != AssetClass.OPTION_STRATEGY:
             continue
+        if pos.status != PositionStatus.OPEN:
+            continue
 
         net_mark = 0.0
         skip = False
