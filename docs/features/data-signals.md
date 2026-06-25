@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/data/`  
 **Credentials required:** `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`  
-**Status:** in progress (WP-3.1–3.4, 3.6, 3.8, 8.10 complete)
+**Status:** in progress (WP-3.1–3.4, 3.4b, 3.6, 3.8, 8.10 complete)
 
 Turns raw Alpaca market data into the compact, token-efficient inputs the agent consumes. The provider client handles caching and rate-limit back-off internally — callers see a single blocking call per symbol.
 
@@ -180,6 +180,38 @@ with get_connection(engine) as conn:
     rank = compute_iv_rank("SPY", atm_iv, conn)        # float | None
     pct  = compute_iv_percentile("SPY", atm_iv, conn)  # float | None
 ```
+
+## Bootstrapping iv_history for a new paper run (WP-3.4b)
+
+The daily IV capture job accumulates one observation per trading session going forward.
+`compute_iv_rank` / `compute_iv_percentile` require `min_days=30` observations before
+returning non-null values, and ideally 252 for a full 52-week window. Without seeding,
+every entry cycle returns `iv_rank=None` for all symbols and the agent NO_ACTIONs
+indefinitely.
+
+Run the one-shot backfill script before starting the paper run:
+
+```bash
+uv run python scripts/backfill_iv_history.py
+```
+
+The script fetches ~15 months of daily closing prices from yfinance for every symbol in
+`universe.txt`, computes annualized 30-day trailing realized volatility (HV30) as an ATM
+IV proxy, and loads up to 252 sessions into the production `iv_history` table via
+`record_daily_iv()`. It prints a per-symbol summary with session count, HV range, and
+resulting IV rank/percentile so the operator can spot obvious anomalies before the first
+entry cycle.
+
+**Known trade-off:** the bootstrapped rows use realized vol (HV30) while the live daily
+job accumulates real ATM IV from options chains. The two metrics correlate but differ,
+especially around earnings events. The approximation degrades gracefully: over a live
+252-trading-day window, real IV observations replace bootstrapped rows one-by-one until
+the window is fully live-sourced. `record_daily_iv()` is idempotent on `(symbol, date)`,
+so re-running the script after real data exists for a date is safe — the live observation
+takes precedence.
+
+The script exits with code 1 and an error message if fewer than 3 symbols end up with
+non-null IV rank (indicating an insufficient history load or data-source failure).
 
 ## What's not yet implemented
 

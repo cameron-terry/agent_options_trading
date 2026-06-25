@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.engine import Connection
@@ -96,6 +96,98 @@ _EXPIRY_GRACE_DAYS: int = 1
 # Activity feed lookback window.  48 h catches weekend expirations that reconcile
 # runs on Monday, and any same-day processing lag.
 _ACTIVITY_LOOKBACK_HOURS: int = 48
+
+
+def _occ_symbol(underlying: str, expiration: date, right: str, strike: float) -> str:
+    """Build the OCC option symbol used by Alpaca to identify a single leg.
+
+    Format: {underlying}{YYMMDD}{P|C}{strike_in_thousandths_zero_padded_to_8}
+    Example: QQQ260724P00691000
+    """
+    right_char = "P" if right == "put" else "C"
+    strike_thou = round(strike * 1000)
+    return f"{underlying}{expiration.strftime('%y%m%d')}{right_char}{strike_thou:08d}"
+
+
+def _refresh_position_marks(
+    broker: BrokerClient,
+    conn: Connection,
+    now: datetime,
+) -> None:
+    """Update current_mark, marked_at, and unrealized_pnl for all open option positions.
+
+    Fetches current leg prices from the broker's open-positions list, computes the
+    net combo mark per position, and writes it back so the monitor's exit evaluators
+    have a fresh basis for stop-loss and profit-target checks.
+
+    Called at the end of every reconcile() pass so that mark age never exceeds
+    2 × monitor interval (240 s) before MarkStaleError would fire.
+    """
+    try:
+        broker_positions = broker.get_all_positions()
+    except Exception as exc:
+        logger.warning(
+            "reconcile: mark refresh — broker.get_all_positions() failed: %s", exc
+        )
+        return
+
+    # Build OCC symbol → current per-share option price (always positive magnitude).
+    price_by_occ: dict[str, float] = {}
+    for bp in broker_positions:
+        if bp.current_price is not None:
+            try:
+                price_by_occ[str(bp.symbol)] = abs(float(bp.current_price))
+            except (ValueError, TypeError):
+                pass
+
+    for pos in list_open_positions(conn):
+        if pos.asset_class != AssetClass.OPTION_STRATEGY:
+            continue
+        if pos.status != PositionStatus.OPEN:
+            continue
+
+        net_mark = 0.0
+        skip = False
+        for pl in pos.legs:
+            occ = _occ_symbol(
+                pos.underlying, pl.leg.expiration, pl.leg.right, pl.leg.strike
+            )
+            price = price_by_occ.get(occ)
+            if price is None:
+                logger.warning(
+                    "reconcile: mark refresh — leg %s not found in broker positions"
+                    " (position %s); skipping mark update",
+                    occ,
+                    pos.id,
+                )
+                skip = True
+                break
+            sign = -1.0 if pl.leg.side == "sell" else 1.0
+            net_mark += sign * price * pl.leg.ratio
+
+        if skip:
+            continue
+
+        unrealized_pnl = round(
+            (net_mark - pos.entry_net_amount) * pos.quantity * 100, 4
+        )
+        update_position(
+            conn,
+            pos.model_copy(
+                update={
+                    "current_mark": round(net_mark, 4),
+                    "marked_at": now,
+                    "unrealized_pnl": unrealized_pnl,
+                }
+            ),
+        )
+        logger.debug(
+            "reconcile: mark refresh — %s pos=%s mark=%.4f unrealized_pnl=%.2f",
+            pos.underlying,
+            pos.id,
+            net_mark,
+            unrealized_pnl,
+        )
 
 
 def reconcile(
@@ -378,6 +470,9 @@ def reconcile(
         _detect_expiry_and_assignments(broker, conn, now)
     )
     anomalies.extend(ext_anomalies)
+
+    # ── Mark refresh: update current_mark for all open option positions ───────
+    _refresh_position_marks(broker, conn, now)
 
     return StateDiff(
         newly_filled=newly_filled,
