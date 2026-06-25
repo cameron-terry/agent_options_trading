@@ -134,7 +134,10 @@ class DiscordChannel:
         req = urllib.request.Request(
             self._url,
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "DiscordBot (private, 1.0)",
+            },
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10):
