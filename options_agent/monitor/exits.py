@@ -49,6 +49,7 @@ from options_agent.contracts.state import (
     ExitReason,
     Order,
     OrderRole,
+    OrderStatus,
     Position,
     PositionStatus,
 )
@@ -251,7 +252,15 @@ def check_stop_loss(
         )
 
     order = order.model_copy(update={"exit_reason": ExitReason.STOP_LOSS})
-    updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
+    # If the order filled synchronously, skip PENDING_CLOSE and go straight to
+    # CLOSED — reconcile only processes non-terminal orders and would never see
+    # this already-FILLED order, leaving the position stranded in PENDING_CLOSE.
+    if order.status == OrderStatus.FILLED:
+        updated_pos = pos.model_copy(
+            update={"status": PositionStatus.CLOSED, "closed_at": order.filled_at or now}
+        )
+    else:
+        updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
     insert_order(conn, order)
     update_position(conn, updated_pos)
 
@@ -385,7 +394,12 @@ def check_profit_target(
         )
 
     order = order.model_copy(update={"exit_reason": ExitReason.PROFIT_TARGET})
-    updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
+    if order.status == OrderStatus.FILLED:
+        updated_pos = pos.model_copy(
+            update={"status": PositionStatus.CLOSED, "closed_at": order.filled_at or now}
+        )
+    else:
+        updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
     insert_order(conn, order)
     update_position(conn, updated_pos)
 
@@ -509,7 +523,12 @@ def check_time_stop(
         )
 
     order = order.model_copy(update={"exit_reason": ExitReason.DTE})
-    updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
+    if order.status == OrderStatus.FILLED:
+        updated_pos = pos.model_copy(
+            update={"status": PositionStatus.CLOSED, "closed_at": order.filled_at or now}
+        )
+    else:
+        updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
     insert_order(conn, order)
     update_position(conn, updated_pos)
 
@@ -584,7 +603,12 @@ def flatten_position(
         )
 
     order = order.model_copy(update={"exit_reason": ExitReason.FLATTEN})
-    updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
+    if order.status == OrderStatus.FILLED:
+        updated_pos = pos.model_copy(
+            update={"status": PositionStatus.CLOSED, "closed_at": order.filled_at or now}
+        )
+    else:
+        updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
     insert_order(conn, order)
     update_position(conn, updated_pos)
 

@@ -2,8 +2,8 @@
 
 Starts the CycleScheduler, which drives both the entry and monitor loops at
 the cadences defined in config.  All credentials must be in environment
-variables (ALPACA_API_KEY, ALPACA_SECRET_KEY, and optionally
-DISCORD_WEBHOOK_URL).
+variables (ALPACA_API_KEY, ALPACA_SECRET_KEY, ANTHROPIC_API_KEY, and
+optionally DISCORD_WEBHOOK_URL).
 
 Logs go to stdout at INFO level by default.  Set LOG_LEVEL=DEBUG for verbose
 output including per-cycle APScheduler and orchestrator detail.

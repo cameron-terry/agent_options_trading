@@ -909,8 +909,23 @@ def run_entry_cycle(
             journal_record_id=cycle_id,
         )
 
-    # Insert Position (PENDING_OPEN) then Order, to satisfy FK constraint.
+    # Insert Position then Order, to satisfy FK constraint.
     # order.id is only known after submit returns; it becomes opening_order_id.
+    #
+    # If the order filled synchronously (within the poll timeout), apply the
+    # PENDING_OPEN → OPEN transition and capture the actual fill price here.
+    # reconcile() only processes non-terminal (PENDING) orders, so it would
+    # never see this already-FILLED order and the position would be stranded.
+    _initial_status = (
+        PositionStatus.OPEN
+        if order.status == OrderStatus.FILLED
+        else PositionStatus.PENDING_OPEN
+    )
+    _entry_net = (
+        order.net_fill_price
+        if order.status == OrderStatus.FILLED and order.net_fill_price is not None
+        else limit_price
+    )
     position = Position(
         id=position_id,
         underlying=proposal.underlying,
@@ -922,13 +937,13 @@ def run_entry_cycle(
             for leg in proposal.legs
         ],
         quantity=sizing.contracts,
-        entry_net_amount=limit_price,
-        current_mark=limit_price,
+        entry_net_amount=_entry_net,
+        current_mark=_entry_net,
         marked_at=now,
         unrealized_pnl=0.0,
         realized_pnl=None,
         exit_plan=proposal.exit_plan,
-        status=PositionStatus.PENDING_OPEN,
+        status=_initial_status,
         opened_at=now,
         closed_at=None,
         nearest_expiration=min(leg.expiration for leg in proposal.legs),
