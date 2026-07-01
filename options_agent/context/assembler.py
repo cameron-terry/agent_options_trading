@@ -384,6 +384,35 @@ def render_overview(bundle: ContextBundle) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _journal_record_summary(record: JournalRecord) -> dict[str, Any]:
+    """Compact, non-recursive summary of a historical JournalRecord.
+
+    Deliberately omits `decision` and `context_snapshot` — JournalRecord.
+    context_snapshot.assembled_context embeds this same `journal` field
+    (each historical record carries its own prior N records), so dumping it
+    in full here would re-embed that record's entire ancestry. Because every
+    cycle's context_snapshot is persisted and then re-fetched as one of the
+    *next* cycle's journal entries, embedding it in full compounds
+    generation over generation — prompt size grows geometrically with cycle
+    count until requests blow past the model's context window. The
+    denormalized fields on JournalRecord (strategy, underlying, conviction,
+    etc.) exist precisely to index this history without the nested payload;
+    use those instead of model_dump()'ing the whole record.
+    """
+    return {
+        "cycle_id": record.cycle_id,
+        "timestamp": record.timestamp.isoformat(),
+        "action_taken": record.action_taken.value,
+        "strategy": record.strategy,
+        "underlying": record.underlying,
+        "net_delta_at_open": record.net_delta_at_open,
+        "earnings_within_dte": record.earnings_within_dte,
+        "conviction": record.conviction,
+        "iv_rank_at_open": record.iv_rank_at_open,
+        "rejection_rule_ids": [r.value for r in record.rejection_rule_ids],
+    }
+
+
 def to_context_snapshot(bundle: ContextBundle) -> ContextSnapshot:
     """Serialise *bundle* into the ContextSnapshot stored in the JournalRecord.
 
@@ -391,6 +420,11 @@ def to_context_snapshot(bundle: ContextBundle) -> ContextSnapshot:
     can reconstruct what the agent started from without relying on tool-call
     transcripts.  model_id and prompt_version are duplicated at the top level
     of ContextSnapshot per the WP-0.3 contract.
+
+    Journal history is summarized via _journal_record_summary() rather than
+    dumped in full — see that function's docstring for why: full dumps
+    recurse through each record's own context_snapshot and compound across
+    cycles.
     """
     assembled: dict[str, Any] = {
         "portfolio": bundle.portfolio.model_dump(mode="json"),
@@ -399,7 +433,7 @@ def to_context_snapshot(bundle: ContextBundle) -> ContextSnapshot:
             sym: ei.model_dump(mode="json") for sym, ei in bundle.events.items()
         },
         "journal": {
-            sym: [r.model_dump(mode="json") for r in records]
+            sym: [_journal_record_summary(r) for r in records]
             for sym, records in bundle.journal.items()
         },
         "excluded": bundle.excluded,
