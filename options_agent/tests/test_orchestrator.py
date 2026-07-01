@@ -760,7 +760,9 @@ def test_run_entry_cycle_sync_fill_position_open_with_filled_legs(
 
     filled_qty = 2
 
-    def _submit_filled(proposal, qty_arg, limit_price, position_id, role=OrderRole.OPEN):
+    def _submit_filled(
+        proposal, qty_arg, limit_price, position_id, role=OrderRole.OPEN
+    ):
         return Order(
             id="order-sync-001",
             broker_order_id="broker-sync-001",
