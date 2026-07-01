@@ -24,6 +24,7 @@ from options_agent.monitor.exits import (
     check_profit_target,
     check_stop_loss,
     check_time_stop,
+    flatten_position,
 )
 from options_agent.state.crud import (
     get_order,
@@ -1709,3 +1710,103 @@ def test_double_run_time_stop_produces_exactly_one_close(engine) -> None:
     assert second_order is None
     broker_2.submit_multi_leg.assert_not_called()
     broker_2.submit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Sync-fill path: FILLED order skips PENDING_CLOSE → CLOSED directly
+# ---------------------------------------------------------------------------
+
+_FILL_TIME = datetime(2026, 6, 19, 14, 5, 0, tzinfo=UTC)
+
+
+def _make_sync_filled_broker(position_id: str) -> MagicMock:
+    """Broker whose submit returns a FILLED order (synchronous fill)."""
+    order = Order(
+        id=str(uuid.uuid4()),
+        broker_order_id=str(uuid.uuid4()),
+        position_id=position_id,
+        role=OrderRole.CLOSE,
+        status=OrderStatus.FILLED,
+        broker_status_raw="filled",
+        submitted_at=_FILL_TIME,
+        filled_at=_FILL_TIME,
+        limit_price=0.15,
+        legs_filled=[],
+        net_fill_price=0.15,
+        filled_qty=5,
+    )
+    broker = MagicMock()
+    broker.submit_multi_leg.return_value = order
+    broker.submit.return_value = order
+    return broker
+
+
+def test_stop_loss_sync_fill_transitions_to_closed(engine) -> None:
+    """Sync-fill stop-loss closes position directly — no PENDING_CLOSE intermediary."""
+    pos = _make_position(
+        unrealized_pnl=-1500.0,
+        est_max_loss=2225.0,
+        exit_plan=ExitPlan(
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+        ),
+    )
+    broker = _make_sync_filled_broker(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        check_stop_loss(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+        saved = get_position(conn, pos.id)
+
+    assert saved is not None
+    assert saved.status == PositionStatus.CLOSED
+    assert saved.closed_at == _FILL_TIME
+
+
+def test_profit_target_sync_fill_transitions_to_closed(engine) -> None:
+    """Sync-fill profit-target closes position directly — no PENDING_CLOSE."""
+    pos = _make_position(
+        current_mark=-50.0,
+        unrealized_pnl=225.0,  # 225 ≥ 0.50 * 275 → triggers
+        exit_plan=ExitPlan(
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+        ),
+    )
+    broker = _make_sync_filled_broker(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        check_profit_target(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+        saved = get_position(conn, pos.id)
+
+    assert saved is not None
+    assert saved.status == PositionStatus.CLOSED
+    assert saved.closed_at == _FILL_TIME
+
+
+def test_time_stop_sync_fill_transitions_to_closed(engine) -> None:
+    """Sync-fill time-stop closes position directly — no PENDING_CLOSE."""
+    pos = _make_position(
+        nearest_expiration=_EXPIRY_AT_THRESHOLD,  # DTE=21, triggers
+        exit_plan=_DTE_EXIT_PLAN,
+    )
+    broker = _make_sync_filled_broker(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        check_time_stop(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+        saved = get_position(conn, pos.id)
+
+    assert saved is not None
+    assert saved.status == PositionStatus.CLOSED
+    assert saved.closed_at == _FILL_TIME
+
+
+def test_flatten_sync_fill_transitions_to_closed(engine) -> None:
+    """Sync-fill flatten closes position directly — no PENDING_CLOSE."""
+    pos = _make_position()
+    broker = _make_sync_filled_broker(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        flatten_position(pos, conn, broker, _NOW)
+        saved = get_position(conn, pos.id)
+
+    assert saved is not None
+    assert saved.status == PositionStatus.CLOSED
+    assert saved.closed_at == _FILL_TIME

@@ -932,7 +932,14 @@ def run_entry_cycle(
         strategy=proposal.strategy,
         legs=[
             PositionLeg(
-                leg=leg, filled_qty=0, avg_fill_price=0.0, status=LegStatus.OPEN
+                leg=leg,
+                filled_qty=(
+                    order.filled_qty * leg.ratio
+                    if order.status == OrderStatus.FILLED
+                    else 0
+                ),
+                avg_fill_price=0.0,
+                status=LegStatus.OPEN,
             )
             for leg in proposal.legs
         ],

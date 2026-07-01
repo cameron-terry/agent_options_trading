@@ -257,7 +257,10 @@ def check_stop_loss(
     # this already-FILLED order, leaving the position stranded in PENDING_CLOSE.
     if order.status == OrderStatus.FILLED:
         updated_pos = pos.model_copy(
-            update={"status": PositionStatus.CLOSED, "closed_at": order.filled_at or now}
+            update={
+                "status": PositionStatus.CLOSED,
+                "closed_at": order.filled_at or now,
+            }
         )
     else:
         updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
@@ -396,7 +399,10 @@ def check_profit_target(
     order = order.model_copy(update={"exit_reason": ExitReason.PROFIT_TARGET})
     if order.status == OrderStatus.FILLED:
         updated_pos = pos.model_copy(
-            update={"status": PositionStatus.CLOSED, "closed_at": order.filled_at or now}
+            update={
+                "status": PositionStatus.CLOSED,
+                "closed_at": order.filled_at or now,
+            }
         )
     else:
         updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
@@ -525,7 +531,10 @@ def check_time_stop(
     order = order.model_copy(update={"exit_reason": ExitReason.DTE})
     if order.status == OrderStatus.FILLED:
         updated_pos = pos.model_copy(
-            update={"status": PositionStatus.CLOSED, "closed_at": order.filled_at or now}
+            update={
+                "status": PositionStatus.CLOSED,
+                "closed_at": order.filled_at or now,
+            }
         )
     else:
         updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
@@ -605,7 +614,10 @@ def flatten_position(
     order = order.model_copy(update={"exit_reason": ExitReason.FLATTEN})
     if order.status == OrderStatus.FILLED:
         updated_pos = pos.model_copy(
-            update={"status": PositionStatus.CLOSED, "closed_at": order.filled_at or now}
+            update={
+                "status": PositionStatus.CLOSED,
+                "closed_at": order.filled_at or now,
+            }
         )
     else:
         updated_pos = pos.model_copy(update={"status": PositionStatus.PENDING_CLOSE})
