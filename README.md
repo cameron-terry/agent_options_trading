@@ -14,6 +14,8 @@ uv sync --dev
 |---|---|---|
 | `ALPACA_API_KEY` | broker + data | Paper or live key from Alpaca dashboard |
 | `ALPACA_SECRET_KEY` | broker + data | Paired secret |
+| `ANTHROPIC_API_KEY` | LLM reasoner | Required when `use_real_data_tools = true`; `reason()` calls the Claude API |
+| `DISCORD_WEBHOOK_URL` | alerts | Incoming webhook URL; posts alerts to a Discord channel |
 | `DB_URL` | Postgres backend | e.g. `postgresql://postgres:postgres@localhost/options_agent`; omit to use SQLite |
 
 Secrets are never read from `config.toml` — set them in the shell or a `.env` file sourced before running.

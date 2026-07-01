@@ -740,6 +740,70 @@ def test_run_entry_cycle_orphan_unresolved(
     assert result.journal_record_id == result.cycle_id
 
 
+def test_run_entry_cycle_sync_fill_position_open_with_filled_legs(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sync-fill: when submit returns FILLED immediately, position is OPEN and
+    PositionLeg.filled_qty reflects the actual fill quantity (qty × leg.ratio),
+    so Greek aggregation is not silently zeroed.
+    """
+    broker = _make_broker(monkeypatch)
+    _wire_reconcile_only(broker)
+
+    # Override account info required by the entry cycle gates.
+    mock_account = MagicMock()
+    mock_account.equity = "100000.00"
+    mock_account.buying_power = "100000.00"
+    mock_account.options_buying_power = "100000.00"
+    mock_account.options_approved_level = 3
+    broker.get_account = MagicMock(return_value=mock_account)
+
+    filled_qty = 2
+
+    def _submit_filled(
+        proposal, qty_arg, limit_price, position_id, role=OrderRole.OPEN
+    ):
+        return Order(
+            id="order-sync-001",
+            broker_order_id="broker-sync-001",
+            position_id=position_id,
+            role=role,
+            status=OrderStatus.FILLED,
+            broker_status_raw="filled",
+            submitted_at=_NOW,
+            filled_at=_NOW,
+            limit_price=limit_price,
+            legs_filled=[],
+            net_fill_price=-1.50,
+            filled_qty=filled_qty,
+        )
+
+    broker.submit_multi_leg = _submit_filled  # type: ignore[method-assign]
+
+    with patch(_REASON_PATCH, return_value=stub_reasoner()):
+        result = run_entry_cycle(
+            Config(), broker=broker, engine=engine, _now=_MARKET_HOURS_NOW
+        )
+
+    assert result.action_taken == ActionTaken.OPENED
+    assert result.journal_record_id is not None
+
+    with get_connection(engine) as conn:
+        jr = read_journal_record(conn, result.journal_record_id)
+        assert jr is not None
+        pos = get_position(conn, jr.position_ids[0])
+
+    assert pos is not None
+    assert pos.status == PositionStatus.OPEN
+    assert pos.entry_net_amount == -1.50
+    for pos_leg in pos.legs:
+        expected_qty = filled_qty * pos_leg.leg.ratio
+        assert pos_leg.filled_qty == expected_qty, (
+            f"leg {pos_leg.leg}: expected filled_qty={expected_qty}, "
+            f"got {pos_leg.filled_qty}"
+        )
+
+
 def test_run_entry_cycle_state_integrity_unmatched_local(
     engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:

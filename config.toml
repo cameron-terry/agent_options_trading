@@ -1,18 +1,23 @@
 # options_agent operational configuration
-# Secrets (ALPACA_API_KEY, ALPACA_SECRET_KEY) go in environment variables — not here.
+# Secrets (ALPACA_API_KEY, ALPACA_SECRET_KEY, ANTHROPIC_API_KEY) go in environment variables — not here.
 # Load with: Config.from_toml(Path("config.toml"))
 
 universe_file = "universe.txt"
 timezone = "America/New_York"
 entry_times = ["10:30", "13:00", "15:00"]
-blackout_minutes = 30
+session_open_blackout_minutes  = 30   # replaces obsolete blackout_minutes (WP-8.4)
+session_close_blackout_minutes = 30
 db_url = "sqlite:///options_agent.db"
 alpaca_paper = true
+use_real_data_tools = true    # false → mock data (dev/CI); true → live Alpaca + yfinance; requires ANTHROPIC_API_KEY
+
+# Agent / reasoner
+model_id = "claude-sonnet-4-6"   # stamp on ContextSnapshot; upgrade to claude-opus-4-8 only if journal shows reasoning failures
 
 [limits]
 # Bump limits_version whenever any threshold changes so WP-7 analytics can
 # correlate trade outcomes with the exact limits active at the time.
-limits_version = "0.2.0"
+limits_version = "0.3.0"
 
 # allowed_strategies is intentionally absent here — it is derived from
 # [playbook] by Config._sync_allowed_strategies. Never set it in [limits];
@@ -58,20 +63,20 @@ min_abs_delta = 0.15
 max_abs_delta = 0.45
 
 [limits.exit_plan_defaults]
-profit_target_pct = 0.50   # close at 50% of max profit
-stop_loss_mult = 2.0       # stop at loss = 2× abs(entry_net_amount)
-time_stop_dte = 21         # close at 21 DTE regardless of P&L
+profit_target_pct = 0.50                # close at 50% of max profit
+stop_loss_max_loss_fraction = 0.50      # close when unrealized_pnl ≤ -(fraction × est_max_loss)
+time_stop_dte = 21                      # close at 21 DTE regardless of P&L
 
 # Policy bounds checked by the validator against a proposal's exit_plan.
 # Distinct from exit_plan_defaults (what's sensible) — these are tunable limits.
 # Bump limits_version whenever any bound changes.
 [limits.exit_plan_bounds]
-profit_target_pct_min = 0.25   # reject targets too tight to be worth the trade
-profit_target_pct_max = 1.00   # structural ceiling (redundant with ExitPlan field)
-stop_loss_mult_min = 1.5       # stop must be at least 1.5× entry_net_amount
-stop_loss_mult_max = 5.0       # stop no looser than 5× (prevents runaway loss)
-time_stop_dte_min = 7          # must have a time-stop; 7 DTE minimum
-time_stop_dte_max = 45         # time-stop must be within the chain filter window
+profit_target_pct_min = 0.25
+profit_target_pct_max = 1.00
+stop_loss_max_loss_fraction_min = 0.10  # stop must trigger at ≥ 10% of max loss
+stop_loss_max_loss_fraction_max = 1.00  # stop no looser than 100% of max loss
+time_stop_dte_min = 7                   # must have a time-stop; 7 DTE minimum
+time_stop_dte_max = 45                  # time-stop must be within the chain filter window
 
 # ---------------------------------------------------------------------------
 # Strategy playbook
