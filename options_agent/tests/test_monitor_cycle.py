@@ -96,18 +96,18 @@ def _make_position(
         legs=[
             PositionLeg(
                 leg=_SHORT_PUT,
-                filled_qty=5,
+                filled_qty=1,
                 avg_fill_price=0.55,
                 status=LegStatus.OPEN,
             ),
             PositionLeg(
                 leg=_LONG_PUT,
-                filled_qty=5,
+                filled_qty=1,
                 avg_fill_price=0.0,
                 status=LegStatus.OPEN,
             ),
         ],
-        quantity=5,
+        quantity=1,
         entry_net_amount=entry_net_amount,
         current_mark=current_mark,
         marked_at=marked_at,
@@ -453,9 +453,9 @@ def test_outcome_record_written_on_fill_confirmation(
     assert row.event_type == OutcomeEventType.FULL_CLOSE.value
     assert row.contracts_closed == pos.quantity
     # realized_pnl = (-entry_net_amount - fill_price) * qty * 100
-    # = (-(-275.0) - 1.05) * 5 * 100 = 136975.0
+    # = (-(-275.0) - 1.05) * 1 * 100 = 27395.0
     assert row.fill_price == pytest.approx(1.05)
-    assert row.realized_pnl == pytest.approx(136975.0)
+    assert row.realized_pnl == pytest.approx(27395.0)
 
 
 # ---------------------------------------------------------------------------
