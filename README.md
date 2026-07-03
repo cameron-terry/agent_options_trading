@@ -48,6 +48,23 @@ uv run pytest
 DB_URL=postgresql://postgres:postgres@localhost/options_agent_test uv run pytest
 ```
 
+## Docker
+
+Runs the full scheduler in a container with `restart: unless-stopped`, so Docker
+Desktop brings it back up automatically after the host resumes from sleep/hibernation
+(as long as Docker Desktop itself is set to start at login). State (SQLite DB) persists
+in the `agent_data` named volume; `config.toml` and `universe.txt` are mounted read-only
+from the repo so they can be edited without rebuilding the image.
+
+```bash
+cp .env.example .env   # fill in ALPACA_API_KEY, ALPACA_SECRET_KEY, ANTHROPIC_API_KEY, DISCORD_WEBHOOK_URL
+docker compose up -d --build options-agent
+docker compose logs -f options-agent
+```
+
+Migrations (`alembic upgrade head`) run automatically on container start via
+`docker-entrypoint.sh` before the scheduler launches.
+
 ## Lint / type-check
 
 ```bash
