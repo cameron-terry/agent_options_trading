@@ -24,6 +24,8 @@ Do not call `list_boards` or `get_board_details`.
 
 4. **Read the project docs** — `docs/WORKSTREAMS.md` and `docs/options-agent-plan.md` — to understand the WP's scope, contracts, and design intent. Focus on the section relevant to the parent WP (e.g. "WP-0" section for WP-0.8).
 
+   **If `<WP-N>` is `WP-9`:** also read the "WP-9 (Ops Console UI) — carried-forward context" section near the end of this file before Phase 3 — it has exact design tokens, the design reference's file-access gotcha, and the docker visual-verification workflow, all learned the hard way in WP-9.2. Re-deriving any of it from scratch is wasted effort.
+
 5. **Move the card to "In Progress"** if it is currently in "To-Do". Do NOT move cards that are in "Needs Implementation Details" or "Needs Reqs" — those need questions answered first.
 
 ### Phase 2 — Identify open questions
@@ -125,6 +127,47 @@ Once all CI gates are green, commit the work and open a pull request:
 2. Move the card to "In Review" using `mcp__trello__move_card`.
 
 3. Update the corresponding WP-epic Trello ticket to reflect the ticket's status.
+
+## WP-9 (Ops Console UI) — carried-forward context
+
+Everything below was learned building WP-9.2 (Overview screen) and applies to every remaining WP-9.x screen ticket (Decisions, Performance, Ask). Read this section whenever `<WP-N>` is `WP-9`.
+
+**Design reference:** `https://claude.ai/code/artifact/ba602f8d-fd08-4c36-8fc5-93fa8a3efd3a` is the canonical visual/behavioral spec for all four screens, not just Overview. Each screen's markup lives in the same document under section anchors `#overview` (done), `#decisions`, `#performance`, `#ask` — grep for the anchor instead of reading the whole ~60KB doc.
+
+**Fetching it — avoid re-deriving colors from a screenshot:**
+- `WebFetch` on this URL saves the **full HTML to a local file** even though the tool's returned text preview truncates partway through (typically mid-`<style>`-block). The saved path is printed in the tool result header (`...tool-results/artifact-<id>-<timestamp>.html`) — `Read` that file directly (or `grep` it) instead of assuming the truncated preview is all there is, and instead of asking the user to fetch it for you.
+- **Critical values live in inline `<script>` tags, not the `<style>` block.** The equity-curve chart (and any other screen with a hand-drawn SVG — funnel bars, skew meter, attribution bars) is built by vanilla-JS at the bottom of the document, with its own hardcoded colors/opacities that never appear in the CSS. Grep the saved file for the section's chart `id` (e.g. `eqchart`) to find its drawing script before assuming a CSS custom property covers it.
+
+**Exact design tokens** (confirmed from the reference's `<style>` block — reuse verbatim, don't re-derive from a screenshot):
+```
+--ground:#0F141B   --surface:#151C26   --raised:#1B2431   --inset:#111823
+--line:#26303F     --line-soft:#1E2836
+--ink:#E9EEF5      --ink2:#9AA8BA      --ink3:#5F6E82
+--accent:#3987e5   --accent-soft:#7FB4E5
+--good:#0ca30c     --warn:#fab219      --crit:#d03b3b
+--gain:#1fb14b     --loss:#e05e5e
+--f1:#6da7ec --f2:#5598e7 --f3:#3987e5 --f4:#256abf --f5:#1c5cab   (funnel bar shades, Performance screen)
+mono: ui-monospace,"SF Mono","Cascadia Code",Consolas,"Liberation Mono",monospace
+sans: system-ui,-apple-system,"Segoe UI",sans-serif
+```
+Equity-curve-chart-specific (inline-JS only, confirmed WP-9.2): gridline stroke `#232E3C` (not a named token — sits between `--line` and `--line-soft`), area fill `rgba(57,135,229,0.10)`, hover crosshair stroke `#3E4C5F` dashed, hover dot fill `--accent-soft`. Draw gridlines/area before the line/dot layer if you want the semi-transparent area fill to not wash them out (the reference itself doesn't bother — its gridlines render slightly muted under the fill — but WP-9.2 intentionally reordered for legibility per user feedback; use judgment per chart).
+
+**Structure:** `.frame` (outer border + radius 12px + `box-shadow:0 24px 60px -32px rgba(0,0,0,.7)`) wraps an `.appbar` (header, `background:var(--raised)`, 48px tall) and a `.screen` (padded content, `background:var(--surface)`, 18px padding, 16px gap). Numeric table columns use a `.num` class (both `<th>` and `<td>`) for right-alignment + tabular-nums; everything else stays left-aligned.
+
+**Header tabs are presentational, not routed.** The reference's `.apptabs` are plain `<span>` elements (`Overview Decisions Performance Ask`), not `<a>` links — there's no client-side router in this codebase yet. Keep replicating that: a static tab list with the current screen marked `.on`, no navigation wired up, until a WP actually adds routing (not yet scheduled as of WP-9.2).
+
+**Visual verification workflow (docker, since no browser exists in this sandbox):**
+1. `docker compose build console && docker compose up -d console` — rebuilds and restarts the *real* service. Confirms no crashes, but `agent_data` is the live trading DB and is usually sparse/empty — not useful for a populated screenshot.
+2. For a populated visual, run a **separate, non-compose container** against a seeded scratch SQLite DB — never write fixture rows into the real `agent_data` volume:
+   ```bash
+   docker run -d --rm --name console-demo -p 127.0.0.1:8001:8000 \
+     -v <scratch-dir>:/app/demo-data \
+     -e DB_URL=sqlite:////app/demo-data/dev.db \
+     agent_options_trading-console:latest
+   ```
+3. **`docker restart` does not pick up a rebuilt image** — a container is pinned to the image snapshot from its `docker run`. After every rebuild, `docker rm -f console-demo` then re-`docker run` from the fresh tag. `docker stop` with `--rm` can race the name becoming free again — prefer `docker rm -f` immediately before recreating.
+4. **No headless-browser screenshot tool is available** in this sandbox (Playwright's Chromium is missing shared libs — `libnspr4.so` etc. — and there's no passwordless `sudo` to install them; confirmed dead end WP-9.2). Don't spend time re-attempting this — ask the user to open the URL and screenshot it themselves.
+5. Stop the demo container when done (`docker rm -f console-demo`) — it's scratch/throwaway, not part of the compose lifecycle.
 
 ## Rules
 
