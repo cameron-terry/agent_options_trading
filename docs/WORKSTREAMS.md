@@ -1,7 +1,7 @@
 # WORKSTREAMS — AI Options Trading Agent
 
 > Companion to `options-agent-plan.md`. That doc is the design; this doc is the **work breakdown**.
-> **Last updated:** 2026-06-20
+> **Last updated:** 2026-07-02
 
 ---
 
@@ -19,7 +19,7 @@ Each work package (WP) below is written to be lifted directly into a tracker (Tr
 WP-0 contracts are frozen after initial sign-off. Changes after freeze are treated like public API changes: proposed in a PR against WP-0, reviewed by the lead + any consuming WP owner, versioned, and announced. Silent contract drift is the single biggest risk to a parallel build.
 
 ### Labels suggested
-`area:broker` `area:data` `area:risk` `area:agent` `area:state` `area:obs` `area:orchestration` `contract` `blocker` `good-first-issue`
+`area:broker` `area:data` `area:risk` `area:agent` `area:state` `area:obs` `area:orchestration` `area:ui` `contract` `blocker` `good-first-issue`
 
 ---
 
@@ -439,6 +439,50 @@ WP-0 contracts are frozen after initial sign-off. Changes after freeze are treat
 - [ ] Short-circuits work (kill switch / empty action space avoid the LLM call).
 - [ ] Full proposal→outcome loop journaled end-to-end with real components.
 - [ ] Ready for the long paper run.
+
+---
+
+## WP-9 — Ops Console UI `area:ui` `area:obs`
+
+**Owner:** cameron-terry · **Status:** _not started_ · **Can start:** immediately (reads existing tables; no trading-loop changes)
+
+**Goal.** A read-only web console over the journal the agent already writes: trade/performance visibility, replay of the agent's reasoning per cycle, and a natural-language query agent over the DB. One new FastAPI service beside the scheduler in docker-compose; **zero changes to the trading loop**; exactly one write path (the kill switch, reusing `obs/killswitch.py`).
+
+Design reference: UI proposal artifact (2026-07-02) — four screens (Overview, Decision explorer, Performance & bias, Ask the journal), architecture, and phasing. <https://claude.ai/code/artifact/ba602f8d-fd08-4c36-8fc5-93fa8a3efd3a>
+
+**Scope (in)**
+- FastAPI service with a **read-only** DB engine: `/api/overview`, `/api/positions`, `/api/cycles`, `/api/cycles/{cycle_id}`, `/api/review/*`, `/api/events` (SSE).
+- React SPA served by the same service; four screens per the design reference.
+- **Overview:** kill-switch state, equity/P&L tiles, portfolio Greeks, open positions with distance-to-trigger meters (monitor-cached marks only), live activity feed.
+- **Decision explorer:** cycle list with `query_journal` filters; full-trace renderer for one `JournalRecord` — tool-call transcript, thesis/iv_rationale, per-rule validation chips, sizing, linked position → outcome.
+- **Performance & bias:** thin wrappers over `obs/review.py` (`cycle_funnel`, `hit_rate_by_strategy`, `pnl_attribution`, `detect_bias`) with `since` + `prompt_version` filters and a prompt-version compare view; insufficient-sample cells rendered explicitly.
+- **Kill-switch console:** the only write — `POST /api/killswitch` → `obs/killswitch.set_state()`/`resume()`, required reason, typed confirmation for RESUME and FLATTEN; history from `kill_switch_log`; alert-delivery health panel over `alert_delivery_failures`.
+- **Ask the journal:** Claude-backed analyst with a single SELECT-only `run_sql` tool on a read-only connection (row cap + statement timeout); schema + WP-0 conventions in the system prompt; every answer cites the cycle IDs it drew from, linking into the Decision explorer; streamed over SSE.
+
+**Out of scope**
+- Any broker/Alpaca calls from the UI; computing or refreshing marks (read the monitor's cache); changes to cycle logic, prompts, or contracts; auth/multi-user (localhost, single-operator deployment); live trading controls beyond the kill switch.
+
+**Consumes**
+- WP-0 contracts (`JournalRecord`, `Decision`, `ContextSnapshot`, `ActionTaken`, `ValidationRuleId`); WP-2 read interfaces (`query_journal`, `query_outcome_records`, position/order CRUD); WP-7 `obs/review.py` pure functions + `obs/killswitch.py` API.
+
+**Produces**
+- Runnable console service (compose service beside the scheduler) + the read-only HTTP API (reusable by future tooling).
+
+**Depends on**
+- WP-2, WP-7 (both complete). Independent of WP-3/WP-8 progress — renders whatever the journal contains.
+
+**Suggested issue breakdown**
+- Phase 1 (read-only core): FastAPI skeleton + read-only engine + compose wiring; overview endpoints + screen; decision-explorer endpoints + trace renderer (the flagship); SSE activity tick.
+- Phase 2 (analytics + control): `/api/review/*` wrappers + performance screen; prompt-version compare; kill-switch console + alert-delivery health.
+- Phase 3 (the analyst): SELECT-only `run_sql` tool + schema/conventions prompt; ask screen with citations + SSE streaming.
+
+**Definition of done**
+- [ ] UI runs in docker-compose beside the scheduler; DB opened read-only; no broker credentials in the UI environment.
+- [ ] Decision explorer renders any historical cycle's full trace (tool transcript, validation reasons, sizing, outcome join) from `JournalRecord` alone.
+- [ ] `/api/review/*` numbers match `python -m options_agent.obs review`/`bias` output on the same DB (parity test).
+- [ ] Sub-sample cells show explicit "insufficient" states, never 0% or hidden rows.
+- [ ] Kill-switch arm/resume from the UI round-trips through `kill_switch_log` and fires the existing CRITICAL alert; it is the console's only write (verified by inspection/test).
+- [ ] NL agent rejects non-SELECT statements and cites cycle IDs in every answer.
 
 ---
 
