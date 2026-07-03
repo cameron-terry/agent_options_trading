@@ -53,6 +53,7 @@ export interface OverviewResponse {
   tiles: Tiles
   equity_curve: EquityCurvePoint[]
   activity: ActivityItem[]
+  mode: 'paper' | 'live'
 }
 
 export interface DistanceToTrigger {
@@ -64,6 +65,7 @@ export interface PositionSummary {
   id: string
   underlying: string
   strategy: string
+  strikes: string
   quantity: number
   entry_net_amount: number
   current_mark: number

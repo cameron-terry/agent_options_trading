@@ -108,6 +108,7 @@ class PositionSummary(BaseModel):
     id: str
     underlying: str
     strategy: str
+    strikes: str
     quantity: int
     entry_net_amount: float
     current_mark: float
@@ -122,6 +123,7 @@ class OverviewResponse(BaseModel):
     tiles: Tiles
     equity_curve: list[EquityCurvePoint]
     activity: list[ActivityItem]
+    mode: Literal["paper", "live"]
 
 
 def distance_to_trigger(pos: Position, *, today: datetime) -> DistanceToTrigger | None:
@@ -159,6 +161,24 @@ def _position_dte(pos: Position, *, now: datetime) -> int | None:
     return (pos.nearest_expiration - now.date()).days
 
 
+def _strikes_summary(pos: Position) -> str:
+    """Compact strike string, e.g. "530/525" or "485/480 · 560/565" (iron condor).
+
+    Groups legs by option right (put/call), preserving pos.legs order within
+    each group — which is short-leg-then-long-leg by construction (every
+    strategy in this codebase opens the short leg first per right). Groups
+    are joined in the order they first appear, matching the put-then-call
+    convention the design reference uses. A single-leg position (e.g. a cash-
+    secured put) renders as just its strike.
+    """
+    groups: dict[str, list[str]] = {}
+    for pos_leg in pos.legs:
+        strike = pos_leg.leg.strike
+        strike_str = str(int(strike)) if strike == int(strike) else str(strike)
+        groups.setdefault(pos_leg.leg.right, []).append(strike_str)
+    return " · ".join("/".join(strikes) for strikes in groups.values())
+
+
 def get_positions(conn: Connection, *, now: datetime) -> list[PositionSummary]:
     """Open positions with distance-to-trigger meters — GET /api/positions."""
     positions = list_open_positions(conn)
@@ -167,6 +187,7 @@ def get_positions(conn: Connection, *, now: datetime) -> list[PositionSummary]:
             id=pos.id,
             underlying=pos.underlying,
             strategy=pos.strategy,
+            strikes=_strikes_summary(pos),
             quantity=pos.quantity,
             entry_net_amount=pos.entry_net_amount,
             current_mark=pos.current_mark,
@@ -343,11 +364,17 @@ def get_activity(
     return items[:limit]
 
 
-def get_overview(conn: Connection, *, now: datetime | None = None) -> OverviewResponse:
+def get_overview(
+    conn: Connection,
+    *,
+    now: datetime | None = None,
+    mode: Literal["paper", "live"] = "paper",
+) -> OverviewResponse:
     now = now or datetime.now(UTC)
     return OverviewResponse(
         kill_switch=KillSwitchTile(state=get_current_state(conn).value),
         tiles=get_tiles(conn, now=now),
         equity_curve=get_equity_curve(conn),
         activity=get_activity(conn),
+        mode=mode,
     )

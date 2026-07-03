@@ -51,25 +51,27 @@ def _make_position(
     asset_class: AssetClass = AssetClass.OPTION_STRATEGY,
     status: PositionStatus = PositionStatus.OPEN,
     nearest_expiration: date = date(2026, 8, 15),
+    legs: list[PositionLeg] | None = None,
 ) -> Position:
-    legs = [
-        PositionLeg(
-            leg=Leg(
-                right="put", side="sell", strike=450.0, expiration=date(2026, 8, 15)
+    if legs is None:
+        legs = [
+            PositionLeg(
+                leg=Leg(
+                    right="put", side="sell", strike=450.0, expiration=date(2026, 8, 15)
+                ),
+                filled_qty=quantity,
+                avg_fill_price=0.55,
+                status=LegStatus.OPEN,
             ),
-            filled_qty=quantity,
-            avg_fill_price=0.55,
-            status=LegStatus.OPEN,
-        ),
-        PositionLeg(
-            leg=Leg(
-                right="put", side="buy", strike=445.0, expiration=date(2026, 8, 15)
+            PositionLeg(
+                leg=Leg(
+                    right="put", side="buy", strike=445.0, expiration=date(2026, 8, 15)
+                ),
+                filled_qty=quantity,
+                avg_fill_price=0.0,
+                status=LegStatus.OPEN,
             ),
-            filled_qty=quantity,
-            avg_fill_price=0.0,
-            status=LegStatus.OPEN,
-        ),
-    ]
+        ]
     return Position(
         id=str(uuid.uuid4()),
         underlying=underlying,
@@ -267,6 +269,58 @@ def test_distance_to_trigger_none_for_equity_position() -> None:
 def test_distance_to_trigger_none_when_no_exit_plan() -> None:
     pos = _make_position(exit_plan=None)
     assert distance_to_trigger(pos, today=_NOW) is None
+
+
+# ---------------------------------------------------------------------------
+# _strikes_summary — compact strike string for the positions table
+# ---------------------------------------------------------------------------
+
+
+def _leg(right, side, strike):
+    return PositionLeg(
+        leg=Leg(right=right, side=side, strike=strike, expiration=date(2026, 8, 15)),
+        filled_qty=1,
+        avg_fill_price=1.0,
+        status=LegStatus.OPEN,
+    )
+
+
+def test_strikes_summary_vertical_spread() -> None:
+    from options_agent.ui.overview import _strikes_summary
+
+    pos = _make_position(legs=[_leg("put", "sell", 530.0), _leg("put", "buy", 525.0)])
+    assert _strikes_summary(pos) == "530/525"
+
+
+def test_strikes_summary_iron_condor_preserves_short_then_long_per_side() -> None:
+    from options_agent.ui.overview import _strikes_summary
+
+    # Matches the design reference's QQQ example: put spread 485/480, call
+    # spread 560/565 — each side lists its short leg first, not numeric order
+    # (the call side is short-low/long-high, so short-first is *ascending*).
+    pos = _make_position(
+        legs=[
+            _leg("put", "sell", 485.0),
+            _leg("put", "buy", 480.0),
+            _leg("call", "sell", 560.0),
+            _leg("call", "buy", 565.0),
+        ]
+    )
+    assert _strikes_summary(pos) == "485/480 · 560/565"
+
+
+def test_strikes_summary_single_leg() -> None:
+    from options_agent.ui.overview import _strikes_summary
+
+    pos = _make_position(legs=[_leg("put", "sell", 205.0)])
+    assert _strikes_summary(pos) == "205"
+
+
+def test_strikes_summary_integer_strikes_render_without_decimal() -> None:
+    from options_agent.ui.overview import _strikes_summary
+
+    pos = _make_position(legs=[_leg("put", "sell", 205.0), _leg("put", "buy", 200.5)])
+    assert _strikes_summary(pos) == "205/200.5"
 
 
 # ---------------------------------------------------------------------------

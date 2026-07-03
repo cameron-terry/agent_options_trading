@@ -42,40 +42,59 @@ function App() {
   }, [])
 
   return (
-    <main className="console">
+    <main className="frame">
       <header className="console-header">
-        <span className="console-header__brand">OPTIONS AGENT</span>
-        {overview && <KillSwitchChip state={overview.kill_switch.state} />}
-        {overview && overview.tiles.account_equity.value !== null && (
-          <span className="console-header__equity">
-            EQ ${overview.tiles.account_equity.value.toLocaleString()}
-          </span>
-        )}
+        <span className="console-header__brand">
+          OPTIONS AGENT {overview && <span>/ {overview.mode}</span>}
+        </span>
+        <nav className="apptabs">
+          <span className="on">Overview</span>
+          <span>Decisions</span>
+          <span>Performance</span>
+          <span>Ask</span>
+        </nav>
+        <div className="console-header__right">
+          {overview && <KillSwitchChip state={overview.kill_switch.state} />}
+          {overview && overview.tiles.account_equity.value !== null && (
+            <span className="console-header__equity">
+              EQ <b>${overview.tiles.account_equity.value.toLocaleString()}</b>
+            </span>
+          )}
+        </div>
       </header>
 
-      {error && <div className="console-error">Failed to load: {error}</div>}
+      <div className="console-screen">
+        {error && <div className="console-error">Failed to load: {error}</div>}
 
-      {overview && (
-        <>
-          <Tiles tiles={overview.tiles} />
+        {overview && (
+          <>
+            <Tiles tiles={overview.tiles} />
 
-          <div className="console-panels">
-            <section className="panel">
-              <h2>Equity Curve</h2>
-              <EquityCurve points={overview.equity_curve} />
-            </section>
-            <section className="panel">
-              <h2>Live Activity</h2>
-              <ActivityFeed items={overview.activity} />
-            </section>
-          </div>
-        </>
-      )}
+            <div className="console-panels">
+              <section className="panel">
+                <h2>
+                  Equity curve{' '}
+                  <small>{overview.equity_curve.length} sessions · realized + marked</small>
+                </h2>
+                <EquityCurve points={overview.equity_curve} />
+              </section>
+              <section className="panel">
+                <h2>
+                  Live activity <small>journal + alerts</small>
+                </h2>
+                <ActivityFeed items={overview.activity} />
+              </section>
+            </div>
+          </>
+        )}
 
-      <section className="panel">
-        <h2>Open Positions</h2>
-        <PositionsTable positions={positions ?? []} />
-      </section>
+        <section className="panel">
+          <h2>
+            Open positions <small>marks from monitor cache — never fetched live by the UI</small>
+          </h2>
+          <PositionsTable positions={positions ?? []} />
+        </section>
+      </div>
     </main>
   )
 }

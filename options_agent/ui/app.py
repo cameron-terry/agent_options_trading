@@ -13,6 +13,7 @@ import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 import sqlalchemy as sa
 from fastapi import FastAPI
@@ -47,6 +48,8 @@ def create_app(
         config = config or Config()
         db_url = os.environ.get("DB_URL", config.db_url)
         engine = build_engine(db_url, read_only=True)
+    config = config or Config()
+    mode: Literal["paper", "live"] = "paper" if config.alpaca_paper else "live"
 
     app = FastAPI(title="Options Agent Console")
     app.state.engine = engine
@@ -70,7 +73,7 @@ def create_app(
     @app.get("/api/overview")
     def overview() -> OverviewResponse:
         with get_connection(engine) as conn:
-            return get_overview(conn, now=datetime.now(UTC))
+            return get_overview(conn, now=datetime.now(UTC), mode=mode)
 
     @app.get("/api/positions")
     def positions() -> list[PositionSummary]:

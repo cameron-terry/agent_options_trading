@@ -33,11 +33,11 @@ export function PositionsTable({ positions }: { positions: PositionSummary[] }) 
         <tr>
           <th>Underlying</th>
           <th>Strategy</th>
-          <th>Qty</th>
-          <th>Entry Cr.</th>
-          <th>Mark</th>
-          <th>Unreal. P&L</th>
-          <th>DTE</th>
+          <th className="num">Qty</th>
+          <th className="num">Entry Cr.</th>
+          <th className="num">Mark</th>
+          <th className="num">Unreal. P&L</th>
+          <th className="num">DTE</th>
           <th>Distance to Trigger</th>
         </tr>
       </thead>
@@ -45,14 +45,17 @@ export function PositionsTable({ positions }: { positions: PositionSummary[] }) 
         {positions.map((pos) => (
           <tr key={pos.id}>
             <td className="positions-table__underlying">{pos.underlying}</td>
-            <td>{pos.strategy}</td>
-            <td>{pos.quantity}</td>
-            <td>{formatCurrency(Math.abs(pos.entry_net_amount))}</td>
-            <td>{formatCurrency(Math.abs(pos.current_mark))}</td>
-            <td className={pos.unrealized_pnl >= 0 ? 'pnl-positive' : 'pnl-negative'}>
+            <td>
+              <span className="positions-table__strategy-name">{pos.strategy}</span>{' '}
+              <span className="positions-table__strikes">{pos.strikes}</span>
+            </td>
+            <td className="num">{pos.quantity}</td>
+            <td className="num">{formatCurrency(Math.abs(pos.entry_net_amount))}</td>
+            <td className="num">{formatCurrency(Math.abs(pos.current_mark))}</td>
+            <td className={`num ${pos.unrealized_pnl >= 0 ? 'pnl-positive' : 'pnl-negative'}`}>
               {formatSignedCurrency(pos.unrealized_pnl)}
             </td>
-            <td>{pos.dte ?? '—'}</td>
+            <td className="num">{pos.dte ?? '—'}</td>
             <td>
               <DistanceBar position={pos} />
             </td>

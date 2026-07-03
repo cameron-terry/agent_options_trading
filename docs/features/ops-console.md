@@ -86,6 +86,10 @@ with get_connection(engine) as conn:
 
 **Activity feed** merges `query_journal` and `query_outcome_records`, newest first, capped at 20 rows. Two mockup rows from the design reference are not sourced from this card's data: alert-delivery events (`FILL alert delivered → Discord` — belongs to WP-9.7's `alert_delivery_failures` panel) and synthetic "armed" events on a position nearing its trigger (nothing persists that state; it would have to be recomputed and re-synthesized on every poll). `NO_ACTION_GATED` rows have no gate-reason text — the orchestrator writes that `JournalRecord` with `decision.validation_result=None`, so there's nothing stored to report beyond the action type.
 
+**Trading mode** (`mode: "paper" | "live"` on `OverviewResponse`) reads `Config.alpaca_paper`, resolved once in `create_app` and threaded into `get_overview`. Not fabricated — the design reference's `/ paper` header badge is real deployment config, not a placeholder.
+
+**Strike detail** (`PositionSummary.strikes`, e.g. `"530/525"` or `"485/480 · 560/565"` for an iron condor) groups `pos.legs` by option right, preserving each leg's original order — short-leg-then-long-leg by construction, since every strategy in this codebase opens the short leg first per right. Groups join in first-seen order; a single-leg position (cash-secured put) renders as just its strike.
+
 ---
 
 ## Frontend (WP-9.1, WP-9.2)
