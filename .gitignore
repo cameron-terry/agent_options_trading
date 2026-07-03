@@ -12,3 +12,7 @@ build/
 .pyright/
 *.db
 *.sqlite
+
+# Frontend build tooling / output (frontend/dist is also covered by dist/ above)
+node_modules/
+options_agent/ui/static/

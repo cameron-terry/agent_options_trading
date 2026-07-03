@@ -23,6 +23,26 @@ services:
       - ./config.toml:/app/config.toml:ro
       - ./universe.txt:/app/universe.txt:ro
 
+  console:
+    build:
+      context: .
+      dockerfile: Dockerfile.console
+    restart: unless-stopped
+    depends_on:
+      - options-agent
+    environment:
+      DB_URL: sqlite:////app/data/options_agent.db
+    ports:
+      # Bound to localhost only — no auth, single-operator deployment (WP-9).
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Read-write mount despite being a read-only *engine*: SQLite WAL mode
+      # requires write access to the -wal/-shm files even for readers (see
+      # state/db.py build_engine docstring). Enforcement is at the connection
+      # level (PRAGMA query_only), not the filesystem level.
+      - agent_data:/app/data
+      - ./config.toml:/app/config.toml:ro
+
 volumes:
   postgres_data:
   agent_data:

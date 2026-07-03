@@ -268,19 +268,28 @@ alert_delivery_failures_table = Table(
 # ---------------------------------------------------------------------------
 
 
-def build_engine(url: str) -> Engine:
+def build_engine(url: str, *, read_only: bool = False) -> Engine:
     """Create a SQLAlchemy engine from a connection URL.
 
     SQLite connections get check_same_thread=False so the engine can be shared
     across the main thread and any background tasks (e.g. AlertDispatcher's
     worker thread), and foreign_keys=ON so FK constraints are enforced
-    (matching Postgres behaviour).
+    (matching Postgres behaviour). File-based SQLite connections also get
+    journal_mode=WAL so a writer (the scheduler) doesn't block a reader (the
+    WP-9 console) — setting it is idempotent and persists in the DB file, so
+    it only needs to happen on some connection, not specifically the first.
 
     :memory: URLs additionally use StaticPool so that all engine.connect()
     calls share the same DBAPI connection. Without StaticPool, each new
     connection opens a fresh empty database — AlertDispatcher's worker thread
     would write to a different (empty) :memory: DB than the one the test just
     populated with create_all(). File-based SQLite and Postgres are unaffected.
+
+    read_only=True enforces read-only access at the session/connection level
+    (SQLite: PRAGMA query_only; Postgres: default_transaction_read_only) —
+    same DB_URL and credentials as the writable engine, no separate DB role
+    to provision. Used by the WP-9 console; a write attempted through this
+    engine fails.
     """
     if url.startswith("sqlite"):
         kwargs: dict = {"connect_args": {"check_same_thread": False}}
@@ -292,10 +301,30 @@ def build_engine(url: str) -> Engine:
         def _set_sqlite_pragma(dbapi_conn, _record):  # type: ignore[misc]
             cursor = dbapi_conn.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
+            if ":memory:" not in url:
+                cursor.execute("PRAGMA journal_mode=WAL")
+            if read_only:
+                cursor.execute("PRAGMA query_only=ON")
             cursor.close()
 
         return engine
-    return sa.create_engine(url)
+
+    engine = sa.create_engine(url)
+    if read_only:
+
+        @event.listens_for(engine, "connect")
+        def _set_postgres_read_only(dbapi_conn, _record):  # type: ignore[misc]
+            cursor = dbapi_conn.cursor()
+            cursor.execute("SET default_transaction_read_only = on")
+            cursor.close()
+            # psycopg2 opens an implicit transaction around the SET above;
+            # without committing it here, SQLAlchemy's pool-checkin ROLLBACK
+            # (or any later rollback) discards the setting along with it —
+            # default_transaction_read_only is session-level but still lives
+            # inside the enclosing transaction until committed.
+            dbapi_conn.commit()
+
+    return engine
 
 
 @contextmanager
