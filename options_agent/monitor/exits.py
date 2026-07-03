@@ -17,11 +17,20 @@ but still benefits from fresh reconcile state for accurate status reads.
 
 Stop-loss formula (WP-0 amendment, WP-5.1)
 -------------------------------------------
-  trigger when: unrealized_pnl <= -(stop_loss_max_loss_fraction × est_max_loss)
+  trigger when: unrealized_pnl <= -(stop_loss_max_loss_fraction × est_max_loss
+                                     × quantity)
 
 This formula is uniform across credit and debit strategies because est_max_loss
 is always positive and always represents the maximum the position can lose,
 regardless of whether it was opened for a credit or a debit.
+
+est_max_loss (like est_max_profit) is carried per-contract from the proposal
+(WP-0.3 convention — see risk/validator.py's concentration check, which
+multiplies by quantity explicitly). unrealized_pnl, by contrast, is already
+scaled to the whole position (reconcile.py multiplies by pos.quantity * 100).
+The threshold must multiply est_max_loss by pos.quantity to compare like with
+like — omitting it understates the threshold by a factor of quantity and fires
+the stop far too early on any position sized above 1 contract.
 
 DTE formula (WP-5.3)
 ---------------------
@@ -152,7 +161,7 @@ def check_stop_loss(
     """Evaluate stop-loss for pos; submit and persist a closing order if breached.
 
     Stop-loss trigger formula:
-        unrealized_pnl <= -(stop_loss_max_loss_fraction * est_max_loss)
+        unrealized_pnl <= -(stop_loss_max_loss_fraction * est_max_loss * pos.quantity)
 
     The formula is identical for credit and debit strategies: est_max_loss is
     always a positive number representing the maximum the position can lose,
@@ -225,18 +234,21 @@ def check_stop_loss(
         )
         return None
 
-    threshold = -(pos.exit_plan.stop_loss_max_loss_fraction * pos.est_max_loss)
+    threshold = -(
+        pos.exit_plan.stop_loss_max_loss_fraction * pos.est_max_loss * pos.quantity
+    )
     if pos.unrealized_pnl > threshold:
         return None
 
     logger.info(
         "stop-loss triggered: position=%s unrealized_pnl=%.4f threshold=%.4f "
-        "(fraction=%.2f est_max_loss=%.4f)",
+        "(fraction=%.2f est_max_loss=%.4f quantity=%d)",
         pos.id,
         pos.unrealized_pnl,
         threshold,
         pos.exit_plan.stop_loss_max_loss_fraction,
         pos.est_max_loss,
+        pos.quantity,
     )
 
     close_proposal = _close_proposal(pos, thesis="Monitor stop-loss trigger")
@@ -281,7 +293,7 @@ def check_profit_target(
     """Evaluate profit-target for pos; submit and persist a closing order if reached.
 
     Profit-target trigger formula:
-        unrealized_pnl >= profit_target_pct * est_max_profit
+        unrealized_pnl >= profit_target_pct * est_max_profit * pos.quantity
 
     profit_target_pct is in (0, 1] — enforced by ExitPlan.profit_target_pct's
     Field(gt=0) constraint, so it can never produce a zero threshold on its own.
@@ -291,6 +303,11 @@ def check_profit_target(
 
     No credit/debit sign adjustment is needed (unlike the stop-loss formula).
     est_max_profit is always the maximum gain regardless of strategy direction.
+
+    est_max_profit is per-contract (same WP-0.3 convention as est_max_loss);
+    unrealized_pnl is whole-position (reconcile.py scales by pos.quantity * 100).
+    The threshold must multiply by pos.quantity to match units — otherwise the
+    target fires at 1/quantity of the intended profit.
 
     Guards (return None without submitting):
       - pos.asset_class != OPTION_STRATEGY  (EQUITY positions skip all exit rules)
@@ -370,18 +387,19 @@ def check_profit_target(
         )
         return None
 
-    threshold = pos.exit_plan.profit_target_pct * pos.est_max_profit
+    threshold = pos.exit_plan.profit_target_pct * pos.est_max_profit * pos.quantity
     if pos.unrealized_pnl < threshold:
         return None
 
     logger.info(
         "profit-target triggered: position=%s unrealized_pnl=%.4f threshold=%.4f "
-        "(pct=%.2f est_max_profit=%.4f)",
+        "(pct=%.2f est_max_profit=%.4f quantity=%d)",
         pos.id,
         pos.unrealized_pnl,
         threshold,
         pos.exit_plan.profit_target_pct,
         pos.est_max_profit,
+        pos.quantity,
     )
 
     close_proposal = _close_proposal(pos, thesis="Monitor profit-target trigger")

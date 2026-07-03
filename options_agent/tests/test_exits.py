@@ -53,10 +53,11 @@ _SHORT_PUT_LEG = Leg(
 )
 _LONG_PUT_LEG = Leg(right="put", side="buy", strike=445.0, expiration=date(2026, 8, 15))
 
-# A credit spread (bull put spread): sold for $0.55/contract, 5 contracts.
+# A credit spread (bull put spread), quantity=1 (the _make_position default):
 # entry_net_amount = -275.00 (credit received)
-# est_max_loss = 2225.00  (width − credit = $4.45 × 5 contracts × 100 multiplier)
-# With stop_loss_max_loss_fraction=0.5: trigger when unrealized_pnl <= -1112.50
+# est_max_loss = 2225.00 (per-contract; threshold = fraction * est_max_loss * quantity)
+# With stop_loss_max_loss_fraction=0.5, quantity=1:
+# trigger when unrealized_pnl <= -1112.50
 
 
 def _make_position(
@@ -64,7 +65,7 @@ def _make_position(
     underlying: str = "SPY",
     strategy: str = "bull_put_spread",
     legs: list[PositionLeg] | None = None,
-    quantity: int = 5,
+    quantity: int = 1,
     entry_net_amount: float = -275.0,
     current_mark: float = -150.0,
     marked_at: datetime = _FRESH_MARK,
@@ -81,13 +82,13 @@ def _make_position(
         legs = [
             PositionLeg(
                 leg=_SHORT_PUT_LEG,
-                filled_qty=5,
+                filled_qty=quantity,
                 avg_fill_price=0.55,
                 status=LegStatus.OPEN,
             ),
             PositionLeg(
                 leg=_LONG_PUT_LEG,
-                filled_qty=5,
+                filled_qty=quantity,
                 avg_fill_price=0.0,
                 status=LegStatus.OPEN,
             ),
@@ -235,6 +236,87 @@ def test_triggered_order_persisted_in_db(engine) -> None:
     assert fetched is not None
     assert fetched.role == OrderRole.CLOSE
     assert fetched.position_id == pos.id
+
+
+# ---------------------------------------------------------------------------
+# Quantity scaling (regression: MSFT iron condor incident, 2026-07-02)
+#
+# est_max_loss is per-contract (WP-0.3 convention; see risk/validator.py's
+# concentration check, which multiplies by quantity explicitly). unrealized_pnl
+# is whole-position (reconcile.py scales by pos.quantity * 100). The threshold
+# must multiply est_max_loss by pos.quantity to compare like with like.
+#
+# A live MSFT iron condor (quantity=4, est_max_loss=244/contract,
+# stop_loss_max_loss_fraction=1.5) closed on a stop-loss 32 seconds after fill
+# at unrealized_pnl=-780. The intended threshold was -(1.5 * 244 * 4) = -1464;
+# the unscaled bug computed -(1.5 * 244) = -366, firing the stop 4x too early.
+# ---------------------------------------------------------------------------
+
+
+def test_stop_loss_threshold_scales_with_quantity(engine) -> None:
+    """Reproduces the MSFT incident: -780 sits above the quantity-scaled
+    threshold of -1464 and must NOT trigger, even though it breaches the
+    unscaled per-contract threshold of -366.
+    """
+    pos = _make_position(
+        underlying="MSFT",
+        quantity=4,
+        est_max_loss=244.0,
+        unrealized_pnl=-780.0,
+        exit_plan=ExitPlan(
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=1.5, time_stop_dte=7
+        ),
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        result = check_stop_loss(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert result is None, (
+        "stop-loss must not trigger at -780 when the quantity-scaled "
+        "threshold is -1464 (quantity=4, est_max_loss=244, fraction=1.5)"
+    )
+    broker.submit_multi_leg.assert_not_called()
+
+
+def test_stop_loss_triggered_at_quantity_scaled_threshold(engine) -> None:
+    """P&L exactly at the quantity-scaled threshold must trigger."""
+    pos = _make_position(
+        underlying="MSFT",
+        quantity=4,
+        est_max_loss=244.0,
+        unrealized_pnl=-1464.0,  # exactly -(1.5 * 244 * 4)
+        exit_plan=ExitPlan(
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=1.5, time_stop_dte=7
+        ),
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        order = check_stop_loss(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert order is not None
+    broker.submit_multi_leg.assert_called_once()
+
+
+def test_stop_loss_triggered_below_quantity_scaled_threshold(engine) -> None:
+    """P&L below the quantity-scaled threshold must trigger."""
+    pos = _make_position(
+        underlying="MSFT",
+        quantity=4,
+        est_max_loss=244.0,
+        unrealized_pnl=-1500.0,  # below -1464
+        exit_plan=ExitPlan(
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=1.5, time_stop_dte=7
+        ),
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        order = check_stop_loss(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert order is not None
+    broker.submit_multi_leg.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -679,6 +761,83 @@ def test_profit_target_order_persisted_in_db(engine) -> None:
     assert fetched is not None
     assert fetched.role == OrderRole.CLOSE
     assert fetched.position_id == pos.id
+
+
+# ---------------------------------------------------------------------------
+# Quantity scaling (regression: IWM iron condor incident, 2026-07-01)
+#
+# est_max_profit is per-contract, same convention as est_max_loss. A live IWM
+# position (quantity=5, est_max_profit=215/contract, profit_target_pct=0.5)
+# closed on a profit-target at unrealized_pnl=110. The intended threshold was
+# 0.5 * 215 * 5 = 537.5; the unscaled bug computed 0.5 * 215 = 107.5, firing
+# the target at a small fraction of the intended gain.
+# ---------------------------------------------------------------------------
+
+
+def test_profit_target_threshold_scales_with_quantity(engine) -> None:
+    """Reproduces the IWM incident: 110 sits below the quantity-scaled
+    threshold of 537.5 and must NOT trigger, even though it clears the
+    unscaled per-contract threshold of 107.5.
+    """
+    pos = _make_position(
+        underlying="IWM",
+        quantity=5,
+        est_max_profit=215.0,
+        unrealized_pnl=110.0,
+        exit_plan=ExitPlan(
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=1.5, time_stop_dte=7
+        ),
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        result = check_profit_target(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert result is None, (
+        "profit-target must not trigger at 110 when the quantity-scaled "
+        "threshold is 537.5 (quantity=5, est_max_profit=215, pct=0.5)"
+    )
+    broker.submit_multi_leg.assert_not_called()
+
+
+def test_profit_target_triggered_at_quantity_scaled_threshold(engine) -> None:
+    """P&L exactly at the quantity-scaled threshold must trigger."""
+    pos = _make_position(
+        underlying="IWM",
+        quantity=5,
+        est_max_profit=215.0,
+        unrealized_pnl=537.5,  # exactly 0.5 * 215 * 5
+        exit_plan=ExitPlan(
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=1.5, time_stop_dte=7
+        ),
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        order = check_profit_target(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert order is not None
+    broker.submit_multi_leg.assert_called_once()
+
+
+def test_profit_target_triggered_above_quantity_scaled_threshold(engine) -> None:
+    """P&L above the quantity-scaled threshold must trigger."""
+    pos = _make_position(
+        underlying="IWM",
+        quantity=5,
+        est_max_profit=215.0,
+        unrealized_pnl=600.0,  # above 537.5
+        exit_plan=ExitPlan(
+            profit_target_pct=0.50, stop_loss_max_loss_fraction=1.5, time_stop_dte=7
+        ),
+    )
+    broker = _make_broker_mock(pos.id)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        order = check_profit_target(pos, conn, broker, _NOW, _MAX_MARK_AGE)
+
+    assert order is not None
+    broker.submit_multi_leg.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
