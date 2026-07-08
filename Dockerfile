@@ -10,6 +10,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY options_agent ./options_agent
 COPY alembic ./alembic
+COPY scripts ./scripts
 COPY alembic.ini config.toml universe.txt README.md ./
 
 RUN uv sync --frozen --no-dev

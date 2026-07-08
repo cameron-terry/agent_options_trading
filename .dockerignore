@@ -12,5 +12,4 @@ __pycache__/
 docs/
 tests/
 options_agent/tests/
-scripts/
 .claude/
