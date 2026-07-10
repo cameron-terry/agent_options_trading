@@ -56,7 +56,8 @@ def main() -> None:
             config_path,
         )
 
-    engine = build_engine(config.db_url)
+    db_url = os.environ.get("DB_URL", config.db_url)
+    engine = build_engine(db_url)
 
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "")
     channel = DiscordChannel(webhook_url) if webhook_url else NullChannel()

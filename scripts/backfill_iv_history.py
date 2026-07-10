@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -142,11 +143,15 @@ def main() -> None:
         print("ERROR: universe file is empty or missing.", file=sys.stderr)
         sys.exit(1)
 
-    engine = build_engine(config.db_url)
+    # Honor the DB_URL env override the same way options_agent.__main__ does,
+    # so running this inside the container targets the mounted volume DB
+    # (sqlite:////app/data/options_agent.db) rather than config.toml's default.
+    db_url = os.environ.get("DB_URL", config.db_url)
+    engine = build_engine(db_url)
 
     print(f"WP-3.4b iv_history backfill — {date.today()}")
     print(f"Source: {_HV_WINDOW}-day realized volatility (HV30) proxy via yfinance")
-    print(f"Target: up to {_TARGET_SESSIONS} sessions per symbol → {config.db_url}")
+    print(f"Target: up to {_TARGET_SESSIONS} sessions per symbol → {db_url}")
     print(f"Symbols ({len(symbols)}): {', '.join(symbols)}")
     print()
     print(

@@ -17,6 +17,10 @@ dependencies = [
     # psycopg2 built against the system libpq, or migrate to psycopg v3.
     "psycopg2-binary>=2.9",
     "yfinance>=0.2",
+    # yfinance uses lxml to scrape the earnings-dates page; without it,
+    # get_earnings_dates() raises "Import lxml failed" and the agent marks
+    # earnings data unavailable (data_available=False) for equities.
+    "lxml>=5.0",
     "rich>=13.0",
     "apscheduler>=3.10,<4.0",
 ]

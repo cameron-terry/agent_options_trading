@@ -10,5 +10,19 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  options-agent:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_URL: sqlite:////app/data/options_agent.db
+    volumes:
+      - agent_data:/app/data
+      - ./config.toml:/app/config.toml:ro
+      - ./universe.txt:/app/universe.txt:ro
+
 volumes:
   postgres_data:
+  agent_data:
