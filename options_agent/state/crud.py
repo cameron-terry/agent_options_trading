@@ -375,6 +375,25 @@ def has_pending_close(conn: Connection, position_id: str) -> bool:
     return row is not None
 
 
+def count_close_orders(conn: Connection, position_id: str) -> int:
+    """Return the number of CLOSE-role orders ever submitted for position_id.
+
+    Used by the monitor's reprice path as the escalation counter: each
+    cancel-and-replace inserts a new CLOSE order, so this count grows by one
+    per reprice and determines how far the replacement limit price is widened
+    toward the market.
+    """
+    row = conn.execute(
+        sa.select(sa.func.count())
+        .select_from(orders_table)
+        .where(
+            orders_table.c.position_id == position_id,
+            orders_table.c.role == OrderRole.CLOSE.value,
+        )
+    ).scalar()
+    return int(row or 0)
+
+
 def get_closing_order(conn: Connection, position_id: str) -> Order | None:
     """Return the most recently filled CLOSE order for position_id, or None.
 

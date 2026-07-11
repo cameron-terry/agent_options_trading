@@ -50,6 +50,22 @@ class DataAuthError(Exception):
     """
 
 
+class DailyBar(BaseModel):
+    """One split-adjusted daily OHLC bar for an underlying equity.
+
+    Provider-agnostic bridge type for price-history fetches (same role as
+    RawOptionContract for chains). Split-adjusted (not dividend-adjusted) so
+    close prices match live market levels and strike-proximity reasoning.
+    """
+
+    day: date
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float | None = None
+
+
 class RawOptionContract(BaseModel):
     """Provider-agnostic option contract snapshot from the market-data API.
 
@@ -126,4 +142,13 @@ class DataProvider(Protocol):
 
     def fetch_latest_price(self, symbol: str) -> float:
         """Return the latest bar close price for the underlying equity."""
+        ...
+
+    def fetch_daily_bars(self, symbol: str, lookback_days: int) -> list[DailyBar]:
+        """Return split-adjusted daily bars, oldest first.
+
+        lookback_days is calendar days back from now; the result contains
+        only trading sessions within that window. Consumed by
+        data/price_history.py to build the agent's trend context.
+        """
         ...

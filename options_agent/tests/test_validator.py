@@ -36,6 +36,8 @@ from typing import Any
 
 from options_agent.contracts.data import (
     ChainFilterParams,
+    EarningsEvent,
+    EventInfo,
     FilteredChain,
     OptionContract,
     PortfolioState,
@@ -340,6 +342,22 @@ def _make_snapshot(**overrides: Any) -> SymbolSnapshot:
     return SymbolSnapshot(**defaults)
 
 
+def _make_event_info(**overrides: Any) -> EventInfo:
+    """EventInfo consistent with _make_snapshot's default days_to_earnings=30.
+
+    The gate reads earnings presence from EventInfo and the day count from
+    SymbolSnapshot; the concrete event_date here is decorative.
+    """
+    defaults: dict = {
+        "symbol": "SPY",
+        "earnings": EarningsEvent(event_date=date(2026, 8, 15), confirmed=True),
+        "ex_dividend": None,
+        "data_available": True,
+    }
+    defaults.update(overrides)
+    return EventInfo(**defaults)
+
+
 def _make_option_contract(
     strike: float,
     right: str,
@@ -432,6 +450,7 @@ def _run(
     portfolio: PortfolioState | None = None,
     kill_switch: KillSwitchState = KillSwitchState.NONE,
     chain: FilteredChain | None | object = _UNSET,
+    event_info: EventInfo | None | object = _UNSET,
 ) -> list:
     """Helper that fills happy-path defaults so each test only touches one axis.
 
@@ -446,6 +465,7 @@ def _run(
         portfolio = _make_portfolio()
     resolved_snapshot = _make_snapshot() if snapshot is _UNSET else snapshot
     resolved_chain = _make_chain() if chain is _UNSET else chain
+    resolved_event_info = _make_event_info() if event_info is _UNSET else event_info
     return validate_market_access(
         proposal=proposal,
         limits=limits,
@@ -453,6 +473,7 @@ def _run(
         portfolio=portfolio,
         kill_switch_state=kill_switch,
         filtered_chain=resolved_chain,  # type: ignore[arg-type]
+        event_info=resolved_event_info,  # type: ignore[arg-type]
     )
 
 
@@ -743,6 +764,30 @@ def test_event_gate_beyond_blackout_passes() -> None:
     reasons = _run(snapshot=snapshot)
     gate_ids = {ValidationRuleId.EVENT_BLACKOUT, ValidationRuleId.EVENT_DATA_MISSING}
     assert not any(r.rule_id in gate_ids for r in reasons)
+
+
+def test_event_gate_no_earnings_with_data_available_passes() -> None:
+    """ETF case: provider succeeded and found no earnings — must pass.
+
+    This is the permanent, normal state for SPY/QQQ/IWM; failing closed here
+    would ban ETFs from the universe forever.
+    """
+    snapshot = _make_snapshot(days_to_earnings=None)
+    event_info = _make_event_info(earnings=None, data_available=True)
+    reasons = _run(snapshot=snapshot, event_info=event_info)
+    gate_ids = {ValidationRuleId.EVENT_BLACKOUT, ValidationRuleId.EVENT_DATA_MISSING}
+    assert not any(r.rule_id in gate_ids for r in reasons)
+
+
+def test_event_gate_provider_failure_fails_closed() -> None:
+    event_info = _make_event_info(earnings=None, data_available=False)
+    reasons = _run(event_info=event_info)
+    assert any(r.rule_id == ValidationRuleId.EVENT_DATA_MISSING for r in reasons)
+
+
+def test_event_gate_missing_event_info_fails_closed() -> None:
+    reasons = _run(event_info=None)
+    assert any(r.rule_id == ValidationRuleId.EVENT_DATA_MISSING for r in reasons)
 
 
 # ---------------------------------------------------------------------------

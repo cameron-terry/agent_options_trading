@@ -18,9 +18,12 @@ from options_agent.agent.tools import (
     AGENT_TOOLS,
     TOOL_GET_EVENTS,
     TOOL_GET_FILTERED_CHAIN,
+    TOOL_GET_HELD_LEG_GREEKS,
     TOOL_GET_JOURNAL_BY_SYMBOL,
+    TOOL_GET_OUTCOME_STATS,
     TOOL_GET_PORTFOLIO_STATE,
     TOOL_GET_POSITION_HISTORY,
+    TOOL_GET_PRICE_HISTORY,
     TOOL_GET_UNIVERSE_SNAPSHOT,
     PositionHistory,
 )
@@ -87,8 +90,8 @@ def test_tool_names_constant_matches_list() -> None:
 
 
 def test_expected_tool_count() -> None:
-    assert len(AGENT_TOOLS) == 6, (
-        f"Expected 6 tools, got {len(AGENT_TOOLS)}. "
+    assert len(AGENT_TOOLS) == 7, (
+        f"Expected 7 tools, got {len(AGENT_TOOLS)}. "
         "If you added or removed a tool, update this count and the card."
     )
 
@@ -343,8 +346,14 @@ def test_mock_impls_cover_all_tools() -> None:
 
 
 def test_mock_impls_no_extra_tools() -> None:
-    """MOCK_TOOL_IMPLS should not contain tools outside the agent tool list."""
-    extra = set(MOCK_TOOL_IMPLS.keys()) - AGENT_TOOL_NAMES
+    """MOCK_TOOL_IMPLS should not contain tools outside the agent tool list.
+
+    Internal assembler-only impl keys (never exposed to the LLM) are the
+    one sanctioned exception — they ride in the same map so the DI pattern
+    stays uniform between mock and real backings.
+    """
+    internal_keys = {TOOL_GET_HELD_LEG_GREEKS, TOOL_GET_OUTCOME_STATS}
+    extra = set(MOCK_TOOL_IMPLS.keys()) - AGENT_TOOL_NAMES - internal_keys
     assert not extra, (
         f"MOCK_TOOL_IMPLS contains implementations for unknown tools: {extra}. "
         "These will never be called and indicate a naming drift."
@@ -367,6 +376,7 @@ _SAMPLE_INPUTS: dict[str, dict] = {
     TOOL_GET_EVENTS: {"symbols": ["SPY", "AAPL", "NVDA"]},
     TOOL_GET_JOURNAL_BY_SYMBOL: {"symbol": "SPY"},
     TOOL_GET_POSITION_HISTORY: {"position_id": "pos-001"},
+    TOOL_GET_PRICE_HISTORY: {"symbol": "SPY"},
 }
 
 

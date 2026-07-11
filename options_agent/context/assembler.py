@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -44,7 +45,9 @@ from pydantic import BaseModel
 from options_agent.agent.tools import (
     TOOL_GET_EVENTS,
     TOOL_GET_FILTERED_CHAIN,
+    TOOL_GET_HELD_LEG_GREEKS,
     TOOL_GET_JOURNAL_BY_SYMBOL,
+    TOOL_GET_OUTCOME_STATS,
     TOOL_GET_PORTFOLIO_STATE,
     TOOL_GET_UNIVERSE_SNAPSHOT,
 )
@@ -55,8 +58,10 @@ from options_agent.contracts.data import (
     PortfolioState,
     UniverseSnapshot,
 )
-from options_agent.contracts.journal import JournalRecord
+from options_agent.contracts.journal import JournalRecord, SymbolOutcomeStats
 from options_agent.contracts.state import ContextSnapshot
+
+logger = logging.getLogger(__name__)
 
 ToolImpl = Callable[[dict[str, Any]], Any]
 
@@ -83,6 +88,9 @@ class ContextBundle(BaseModel):
     universe: UniverseSnapshot
     events: dict[str, EventInfo]
     journal: dict[str, list[JournalRecord]]
+    # Per-symbol realized track record (win rate, P&L, strategy breakdown).
+    # Empty for a fresh account or when the impl key is absent from the map.
+    outcome_stats: dict[str, SymbolOutcomeStats] = {}
     excluded: dict[str, str]
     greek_warnings: list[str]
     assembled_at: datetime
@@ -97,6 +105,7 @@ def _compute_context_hash(
     universe: UniverseSnapshot,
     events: dict[str, EventInfo],
     journal: dict[str, list[JournalRecord]],
+    outcome_stats: dict[str, SymbolOutcomeStats],
     excluded: dict[str, str],
     model_id: str,
     prompt_version: str,
@@ -119,6 +128,9 @@ def _compute_context_hash(
         "journal": {
             sym: [r.model_dump(mode="json") for r in records]
             for sym, records in journal.items()
+        },
+        "outcome_stats": {
+            sym: st.model_dump(mode="json") for sym, st in outcome_stats.items()
         },
         "excluded": excluded,
         "model_id": model_id,
@@ -181,6 +193,22 @@ def assemble_context(
         if records:
             journal[sym] = records[-journal_max_per_symbol:]
 
+    # ── 4b. Realized track record per symbol ──────────────────────────────────────
+    # Optional impl key: absent → empty stats (older maps / partial fixtures).
+    outcome_stats: dict[str, SymbolOutcomeStats] = {}
+    stats_impl = tool_impls.get(TOOL_GET_OUTCOME_STATS)
+    if stats_impl is not None:
+        try:
+            raw_stats = stats_impl({})
+            if isinstance(raw_stats, dict):
+                outcome_stats = raw_stats
+        except Exception as exc:
+            logger.warning(
+                "outcome-stats fetch failed — %s; context ships without a"
+                " track record this cycle",
+                exc,
+            )
+
     # ── 5. Chains for held-position Greek aggregation ─────────────────────────────
     # Fetch only the underlyings of open positions — NOT for all universe symbols
     # (chains are high-volume; universe candidates get full chains via live agent
@@ -194,14 +222,38 @@ def assemble_context(
         else:
             excluded[sym] = "chain_unavailable"
 
+    # ── 5b. Held-leg Greek fallback ──────────────────────────────────────────────
+    # The entry-filtered chain omits legs that have aged below min_dte (or
+    # drifted outside the delta band); without this fallback those legs would
+    # contribute 0.0 and the Greek-band gates would soften exactly when
+    # positions are oldest. The impl key is optional so older tool maps and
+    # partial test fixtures keep working (they fall back to warnings-only).
+    held_leg_greeks = None
+    held_impl = tool_impls.get(TOOL_GET_HELD_LEG_GREEKS)
+    if held_impl is not None and portfolio_raw.positions:
+        try:
+            held_leg_greeks = held_impl({"positions": portfolio_raw.positions})
+        except Exception as exc:
+            logger.warning(
+                "held-leg Greek fetch failed — %s; aged legs fall back to 0.0",
+                exc,
+            )
+
     # ── 6. Portfolio Greek aggregation ───────────────────────────────────────────
     portfolio, greek_warnings = aggregate_portfolio_greeks(
-        portfolio_raw, chains_for_greeks
+        portfolio_raw, chains_for_greeks, held_leg_greeks
     )
 
     # ── 7. Hash + bundle ─────────────────────────────────────────────────────────
     context_hash = _compute_context_hash(
-        portfolio, universe, events, journal, excluded, model_id, prompt_version
+        portfolio,
+        universe,
+        events,
+        journal,
+        outcome_stats,
+        excluded,
+        model_id,
+        prompt_version,
     )
 
     return ContextBundle(
@@ -209,6 +261,7 @@ def assemble_context(
         universe=universe,
         events=events,
         journal=journal,
+        outcome_stats=outcome_stats,
         excluded=excluded,
         greek_warnings=greek_warnings,
         assembled_at=now,
@@ -351,6 +404,25 @@ def render_overview(bundle: ContextBundle) -> str:
         lines.append("=== EVENTS ===")
         lines.extend(event_lines)
 
+    # ── Track record ──────────────────────────────────────────────────────────
+    if bundle.outcome_stats:
+        lines.append("")
+        lines.append("=== TRACK RECORD (realized outcomes) ===")
+        for sym, st in sorted(bundle.outcome_stats.items()):
+            wr = f"{st.win_rate:.0%}" if st.win_rate is not None else "—"
+            strat_parts = [
+                f"{name} {s.wins}/{s.closed_positions} ({s.total_realized_pnl:+,.0f})"
+                for name, s in sorted(st.by_strategy.items())
+            ]
+            lines.append(
+                f"  {sym}: {st.closed_positions} closed, {st.wins}W/{st.losses}L"
+                f" (win rate {wr}), total P&L {st.total_realized_pnl:+,.0f}"
+            )
+            if strat_parts:
+                lines.append(f"    by strategy: {'; '.join(strat_parts)}")
+            if st.recent_exit_reasons:
+                lines.append(f"    recent exits: {', '.join(st.recent_exit_reasons)}")
+
     # ── Journal summary ───────────────────────────────────────────────────────
     if bundle.journal:
         lines.append("")
@@ -435,6 +507,9 @@ def to_context_snapshot(bundle: ContextBundle) -> ContextSnapshot:
         "journal": {
             sym: [_journal_record_summary(r) for r in records]
             for sym, records in bundle.journal.items()
+        },
+        "outcome_stats": {
+            sym: st.model_dump(mode="json") for sym, st in bundle.outcome_stats.items()
         },
         "excluded": bundle.excluded,
         "greek_warnings": bundle.greek_warnings,

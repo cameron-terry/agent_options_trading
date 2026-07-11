@@ -159,6 +159,39 @@ class PortfolioState(BaseModel):
     net_dollar_vega: float
 
 
+class PriceHistorySummary(BaseModel):
+    """Compact daily-bar trend context returned by get_price_history().
+
+    Designed to ground the agent's directional thesis without dumping raw
+    bar data into the prompt: moving-average posture, 52-week range position,
+    realized range (ATR), and multi-horizon returns. All derived fields are
+    None when the available history is too short to compute them —
+    bars_available tells the agent how much history backed the summary.
+
+    Prices are split-adjusted daily closes (matching live market levels);
+    percentages are plain percents (e.g. -3.2 = down 3.2%).
+    """
+
+    symbol: str
+    as_of: datetime
+    price: float
+    sma_20: float | None
+    sma_50: float | None
+    price_vs_sma_20_pct: float | None
+    price_vs_sma_50_pct: float | None
+    high_52w: float | None
+    low_52w: float | None
+    pct_from_52w_high: float | None
+    pct_from_52w_low: float | None
+    atr_14: float | None
+    atr_14_pct: float | None
+    return_5d_pct: float | None
+    return_21d_pct: float | None
+    return_63d_pct: float | None
+    recent_closes: list[float]
+    bars_available: int
+
+
 class MacroEvent(BaseModel):
     """A market-wide scheduled event.
 

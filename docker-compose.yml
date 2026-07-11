@@ -1,5 +1,8 @@
 services:
   postgres:
+    # Test-only backend-dialect service — not used by the agent (SQLite on the
+    # agent_data volume). Start explicitly with: docker compose --profile test up postgres
+    profiles: ["test"]
     image: postgres:15-alpine
     environment:
       POSTGRES_USER: postgres

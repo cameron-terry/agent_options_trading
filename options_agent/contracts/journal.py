@@ -25,6 +25,38 @@ class OutcomeEventType(StrEnum):
     ASSIGNED = "ASSIGNED"
 
 
+class StrategyOutcomeStats(BaseModel):
+    """Per-strategy slice of a symbol's realized track record."""
+
+    closed_positions: int
+    wins: int
+    total_realized_pnl: float
+
+
+class SymbolOutcomeStats(BaseModel):
+    """Aggregated realized outcomes for one underlying.
+
+    Pre-loaded into the agent's context bundle so past results inform new
+    proposals without requiring a get_position_history drill-in per position.
+    A "win" is an outcome event with realized_pnl > 0. win_rate and
+    avg_realized_pnl are None when no outcomes exist yet.
+
+    Counts are per outcome event, not per position — a position closed in two
+    partial fills contributes two events. With the current full-close-only
+    exit paths the two coincide; revisit if partial closes are implemented.
+    """
+
+    symbol: str
+    closed_positions: int
+    wins: int
+    losses: int
+    win_rate: float | None
+    total_realized_pnl: float
+    avg_realized_pnl: float | None
+    by_strategy: dict[str, StrategyOutcomeStats]
+    recent_exit_reasons: list[str]
+
+
 class OutcomeRecord(BaseModel):
     """One terminal-ish event on a position — append-only, never updated.
 

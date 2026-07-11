@@ -11,13 +11,25 @@ db_url = "sqlite:///options_agent.db"
 alpaca_paper = true
 use_real_data_tools = true    # false → mock data (dev/CI); true → live Alpaca + yfinance; requires ANTHROPIC_API_KEY
 
+# Entry limit pricing: combo mid (conservative tick rounding) nudged toward
+# the market by this offset so orders actually fill. Replaces the deprecated
+# fixed slice_limit_price.
+order_limit_offset_from_mid = 0.02
+
+# Stale exit-order repricing: a WORKING close order older than this is
+# cancelled and resubmitted at a fresh mark, widening toward the market by
+# offset_step per attempt (capped at max_widenings attempts of widening).
+exit_reprice_after_minutes = 10
+exit_reprice_offset_step = 0.05
+exit_reprice_max_widenings = 5
+
 # Agent / reasoner
 model_id = "claude-sonnet-4-6"   # stamp on ContextSnapshot; upgrade to claude-opus-4-8 only if journal shows reasoning failures
 
 [limits]
 # Bump limits_version whenever any threshold changes so WP-7 analytics can
 # correlate trade outcomes with the exact limits active at the time.
-limits_version = "0.3.0"
+limits_version = "0.4.0"   # 0.4.0: min_dte 20→30 (entries no longer land inside the 21-DTE time-stop)
 
 # allowed_strategies is intentionally absent here — it is derived from
 # [playbook] by Config._sync_allowed_strategies. Never set it in [limits];
@@ -57,7 +69,10 @@ opposing_delta_tolerance = 0.05  # |net_delta| above this triggers conflict chec
 min_open_interest = 500
 max_spread_pct_of_mid = 0.10   # primary rule: spread ≤ 10% of mid
 max_spread_abs_floor = 0.05    # also pass if spread ≤ $0.05 (prevents false exclusions)
-min_dte = 20
+# min_dte must clear the 21-DTE time-stop default by a useful margin: with the
+# old min_dte=20, an entry at 20–25 DTE was time-stopped immediately or within
+# days, paying two spreads for nothing. 30–45 DTE is the classic entry window.
+min_dte = 30
 max_dte = 45
 min_abs_delta = 0.15
 max_abs_delta = 0.45
@@ -84,7 +99,7 @@ time_stop_dte_max = 45                  # time-stop must be within the chain fil
 # analytics can correlate outcomes with the exact playbook active at the time.
 # ---------------------------------------------------------------------------
 [playbook]
-playbook_version = "1.0.0"
+playbook_version = "1.1.0"   # 1.1.0: removed covered_call / cash_secured_put (see note below)
 
 # IV-rank band boundaries (0.0–1.0 percentile of the symbol's trailing-year IV).
 # These are v1 placeholders — expect WP-7 evidence to drive retunes.
@@ -98,13 +113,15 @@ vix_low_vol_threshold  = 15.0   # < this → low_vol; between → normal
 
 # Strategy sets per IV band.
 # High/low are hard-enforced; medium is permissive (agent picks based on thesis).
-# covered_call and cash_secured_put are absent from low_iv_strategies — selling
-# premium in low-IV environments captures too little to be worth the risk.
+# covered_call and cash_secured_put were removed in 1.1.0: the validator's
+# unconditional naked-short check (Core Principle 3: defined-risk only) rejects
+# any short leg without a covering long leg, so those strategies could never
+# pass validation — keeping them in the playbook only wasted reasoning cycles
+# on proposals that were guaranteed rejections. Re-add them only if the
+# validator ever gains share-coverage / cash-reservation checks.
 high_iv_strategies = [
     "bear_call_spread",
     "bull_put_spread",
-    "cash_secured_put",
-    "covered_call",
     "iron_butterfly",
     "iron_condor",
 ]
@@ -113,8 +130,6 @@ medium_iv_strategies = [
     "bear_put_spread",
     "bull_call_spread",
     "bull_put_spread",
-    "cash_secured_put",
-    "covered_call",
     "iron_butterfly",
     "iron_condor",
 ]

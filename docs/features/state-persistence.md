@@ -22,8 +22,8 @@ Run Alembic migrations once before first use:
 ```bash
 uv run alembic upgrade head          # SQLite (creates options_agent.db)
 
-# Postgres:
-docker compose up -d
+# Postgres (behind the "test" profile — not part of the default `docker compose up -d`):
+docker compose --profile test up -d postgres
 DB_URL=postgresql://postgres:postgres@localhost/options_agent_test \
   uv run alembic upgrade head
 ```

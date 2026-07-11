@@ -30,9 +30,18 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.engine import Connection
 
-from options_agent.contracts.journal import JournalRecord, OutcomeRecord
+from options_agent.contracts.journal import (
+    JournalRecord,
+    OutcomeRecord,
+    StrategyOutcomeStats,
+    SymbolOutcomeStats,
+)
 from options_agent.contracts.state import ActionTaken
-from options_agent.state.db import journal_records_table, outcome_records_table
+from options_agent.state.db import (
+    journal_records_table,
+    outcome_records_table,
+    positions_table,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -298,6 +307,82 @@ def query_outcome_records(
         stmt = stmt.where(outcome_records_table.c.recorded_at >= since)
     rows = conn.execute(stmt).fetchall()
     return [_row_to_outcome_record(r) for r in rows]
+
+
+def query_outcome_stats_by_symbol(conn: Connection) -> dict[str, SymbolOutcomeStats]:
+    """Aggregate realized outcomes per underlying for context pre-loading.
+
+    Joins outcome_records to positions (position_id → underlying, strategy)
+    and reduces to per-symbol win/loss counts, realized P&L totals, a
+    per-strategy breakdown, and the most recent exit reasons (newest first,
+    capped at 5). Symbols with no outcomes are simply absent.
+
+    Volume note: this scans all outcome records. At this system's trade
+    cadence (a handful of positions per week) that stays trivially small for
+    the life of the paper run; add a since-filter if it ever grows.
+    """
+    rows = conn.execute(
+        sa.select(
+            positions_table.c.underlying,
+            positions_table.c.strategy,
+            outcome_records_table.c.realized_pnl,
+            outcome_records_table.c.exit_reason,
+            outcome_records_table.c.recorded_at,
+        )
+        .select_from(
+            outcome_records_table.join(
+                positions_table,
+                outcome_records_table.c.position_id == positions_table.c.id,
+            )
+        )
+        .order_by(outcome_records_table.c.recorded_at)
+    ).fetchall()
+
+    per_symbol: dict[str, list[Any]] = {}
+    for row in rows:
+        per_symbol.setdefault(row.underlying, []).append(row)
+
+    stats: dict[str, SymbolOutcomeStats] = {}
+    for symbol, symbol_rows in per_symbol.items():
+        wins = sum(1 for r in symbol_rows if r.realized_pnl > 0)
+        total = sum(r.realized_pnl for r in symbol_rows)
+        count = len(symbol_rows)
+
+        by_strategy: dict[str, StrategyOutcomeStats] = {}
+        for r in symbol_rows:
+            existing = by_strategy.get(r.strategy)
+            if existing is None:
+                by_strategy[r.strategy] = StrategyOutcomeStats(
+                    closed_positions=1,
+                    wins=1 if r.realized_pnl > 0 else 0,
+                    total_realized_pnl=round(r.realized_pnl, 2),
+                )
+            else:
+                by_strategy[r.strategy] = StrategyOutcomeStats(
+                    closed_positions=existing.closed_positions + 1,
+                    wins=existing.wins + (1 if r.realized_pnl > 0 else 0),
+                    total_realized_pnl=round(
+                        existing.total_realized_pnl + r.realized_pnl, 2
+                    ),
+                )
+
+        stats[symbol] = SymbolOutcomeStats(
+            symbol=symbol,
+            closed_positions=count,
+            wins=wins,
+            losses=count - wins,
+            win_rate=round(wins / count, 3) if count else None,
+            total_realized_pnl=round(total, 2),
+            avg_realized_pnl=round(total / count, 2) if count else None,
+            by_strategy=by_strategy,
+            recent_exit_reasons=[
+                str(r.exit_reason)
+                for r in reversed(symbol_rows)
+                if r.exit_reason is not None
+            ][:5],
+        )
+
+    return stats
 
 
 def read_outcome_record(conn: Connection, outcome_id: str) -> OutcomeRecord | None:

@@ -23,6 +23,23 @@ Design (see Trello WP-6.4 for full rationale):
   do not consume schema-retry budget and are not caught here — let them
   propagate; run_entry_cycle owns the API-error handling policy.
 
+  Deterministic-validation feedback (optional)
+  ─────────────────────────────────────────────
+  When the caller supplies validation_feedback, each schema-valid proposal
+  is pre-checked against the same deterministic rules the orchestrator will
+  enforce. A proposal that would be rejected earns the model a revision
+  attempt (max_feedback_retries, default 1) with the rejection reasons fed
+  back as a tool_result error — converting otherwise-wasted REJECTED cycles
+  into corrected proposals or informed NO_ACTIONs. The orchestrator's own
+  validation remains authoritative.
+
+  Prompt caching
+  ──────────────
+  Three cache breakpoints per request: the system prompt (covers the tool
+  definitions rendered before it), the seeded context bundle, and a moving
+  marker on the newest user message. Exploration turns therefore re-read the
+  growing conversation at ~0.1× input price instead of reprocessing it.
+
   Failure path
   ────────────
   Raises ReasonerError after retries exhausted. run_entry_cycle catches this
@@ -57,10 +74,19 @@ from options_agent.risk.limits import Limits
 
 log = logging.getLogger(__name__)
 
-# Sonnet 4.6 list pricing — used for the per-call cost estimate in log output.
-# Update if model or pricing tier changes.
-_INPUT_COST_PER_TOKEN: float = 3e-6  # $3.00 / 1M input tokens
-_OUTPUT_COST_PER_TOKEN: float = 15e-6  # $15.00 / 1M output tokens
+# List pricing per token, keyed by model_id — used only for the per-call cost
+# estimate in log output. Unknown models log token counts without a $ figure.
+# Cache reads bill at ~0.1× the input price; cache writes at ~1.25×.
+_MODEL_PRICING: dict[str, tuple[float, float]] = {
+    "claude-sonnet-4-6": (3e-6, 15e-6),
+    "claude-sonnet-5": (3e-6, 15e-6),
+    "claude-opus-4-6": (5e-6, 25e-6),
+    "claude-opus-4-7": (5e-6, 25e-6),
+    "claude-opus-4-8": (5e-6, 25e-6),
+    "claude-haiku-4-5": (1e-6, 5e-6),
+}
+_CACHE_READ_MULTIPLIER = 0.1
+_CACHE_WRITE_MULTIPLIER = 1.25
 
 # Type alias for a tool implementation callable.
 # Mirrors tools_mock.ToolImpl — kept local so reasoner.py has no import
@@ -96,6 +122,44 @@ def _fmt_input(tool_input: dict[str, Any], max_len: int = 60) -> str:
     return s if len(s) <= max_len else s[: max_len - 1] + "…"
 
 
+def _with_moving_cache_marker(messages: list[Any]) -> list[Any]:
+    """Return a shallow copy of *messages* with a cache breakpoint on the tail.
+
+    Prompt caching is a prefix match; marking the last content block of the
+    final user message caches the whole conversation up to that point, so
+    the next turn re-reads it at ~0.1× input price instead of reprocessing.
+    The marker is applied to a per-call copy — the stored messages list is
+    never mutated, so the marker "moves" forward each turn and the request
+    never accumulates more than the 4-breakpoint limit (system + context
+    seed + this moving marker = 3).
+
+    Assistant-tail messages (SDK content blocks) are left unmarked — the
+    following call re-marks the newest user message instead.
+    """
+    if not messages:
+        return messages
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get("role") != "user":
+        return messages
+    content = last.get("content")
+    if isinstance(content, str):
+        marked_content: list[Any] = [
+            {
+                "type": "text",
+                "text": content,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+    elif isinstance(content, list) and content and isinstance(content[-1], dict):
+        marked_content = [
+            *content[:-1],
+            {**content[-1], "cache_control": {"type": "ephemeral"}},
+        ]
+    else:
+        return messages
+    return [*messages[:-1], {**last, "content": marked_content}]
+
+
 def _serialize_tool_result(result: Any) -> str:
     """Serialize a tool return value to a JSON string for the messages list."""
     if result is None:
@@ -126,6 +190,8 @@ def reason(
     max_turns: int = 10,
     max_tokens: int = 2048,
     max_tokens_explore: int = 1024,
+    validation_feedback: Callable[[TradeProposal], str | None] | None = None,
+    max_feedback_retries: int = 1,
 ) -> TradeProposal:
     """Run the agent reasoning loop and return a validated TradeProposal.
 
@@ -158,6 +224,19 @@ def reason(
                              a text block before the tool_use JSON, causing the
                              tool call to be truncated mid-stream. 1024 keeps
                              the budget tight while eliminating that failure.
+        validation_feedback: Optional callback run on each schema-valid
+                             proposal during the commit phase. Returns a
+                             human-readable rejection summary (the proposal
+                             would fail deterministic validation) or None
+                             (would pass). On a non-None return the text is
+                             fed back as a tool_result error and the model
+                             gets another commit attempt, up to
+                             max_feedback_retries times. After the budget is
+                             exhausted the proposal is returned as-is — the
+                             orchestrator's authoritative validation then
+                             journals the rejection.
+        max_feedback_retries: Revision attempts granted for validation
+                             feedback. Independent of the schema-retry budget.
 
     Returns:
         A pyright-clean TradeProposal on success (including action=NO_ACTION).
@@ -170,28 +249,59 @@ def reason(
                        uncaught — run_entry_cycle owns the error handling policy.
     """
     client = anthropic.Anthropic()
-    system_prompt = build_system_prompt(playbook=playbook, limits=limits)
+    # System prompt carries a cache breakpoint: tools render before system in
+    # the prompt prefix, so this one marker caches tools + system together.
+    system_blocks: list[Any] = [
+        {
+            "type": "text",
+            "text": build_system_prompt(playbook=playbook, limits=limits),
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
 
-    # Seed the conversation with the assembled context bundle.
+    # Seed the conversation with the assembled context bundle. The bundle is
+    # the largest stable prefix in the conversation, so it carries a permanent
+    # cache breakpoint — every subsequent turn reads it from cache.
     messages: list[Any] = [
         {
             "role": "user",
-            "content": (
-                "Here is the assembled market context for this reasoning cycle:\n\n"
-                + json.dumps(context.assembled_context, indent=2, default=str)
-                + "\n\nThe context above already contains portfolio state, universe "
-                "snapshot, events calendar, and recent journal history — do not "
-                "re-fetch any of those. Use the read-only tools only for targeted "
-                "drill-ins not available above (e.g. get_filtered_chain to inspect "
-                "specific strikes and expiries before committing to a structure). "
-                "Then call submit_trade_proposal with your final decision."
-            ),
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Here is the assembled market context for this reasoning"
+                        " cycle:\n\n"
+                        + json.dumps(context.assembled_context, indent=2, default=str)
+                        + "\n\nThe context above already contains portfolio state,"
+                        " universe snapshot, events calendar, and recent journal"
+                        " history — do not re-fetch any of those. Use the read-only"
+                        " tools only for targeted drill-ins not available above"
+                        " (e.g. get_filtered_chain to inspect specific strikes and"
+                        " expiries before committing to a structure). Then call"
+                        " submit_trade_proposal with your final decision."
+                    ),
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
         }
     ]
 
     tool_calls_transcript: list[ToolCallRecord] = []
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    total_cache_read_tokens: int = 0
+    total_cache_write_tokens: int = 0
+
+    def _track_usage(usage: Any) -> tuple[int, int]:
+        nonlocal total_input_tokens, total_output_tokens
+        nonlocal total_cache_read_tokens, total_cache_write_tokens
+        total_input_tokens += usage.input_tokens
+        total_output_tokens += usage.output_tokens
+        total_cache_read_tokens += getattr(usage, "cache_read_input_tokens", 0) or 0
+        total_cache_write_tokens += (
+            getattr(usage, "cache_creation_input_tokens", 0) or 0
+        )
+        return usage.input_tokens, usage.output_tokens
 
     _reason_t0 = time.monotonic()
     log.info(
@@ -210,19 +320,18 @@ def reason(
         response = client.messages.create(
             model=model_id,
             max_tokens=max_tokens_explore,
-            system=system_prompt,
+            system=system_blocks,
             tools=AGENT_TOOLS,  # type: ignore[arg-type]
             tool_choice={"type": "auto"},
-            messages=messages,  # type: ignore[arg-type]
+            messages=_with_moving_cache_marker(messages),  # type: ignore[arg-type]
         )
-        total_input_tokens += response.usage.input_tokens
-        total_output_tokens += response.usage.output_tokens
+        _in_tok, _out_tok = _track_usage(response.usage)
         log.info(
             "  exploration turn %d response — %.1fs (%d in, %d out tokens)",
             _turn + 1,
             time.monotonic() - _t0,
-            response.usage.input_tokens,
-            response.usage.output_tokens,
+            _in_tok,
+            _out_tok,
         )
 
         messages.append({"role": "assistant", "content": response.content})
@@ -340,31 +449,33 @@ def reason(
             }
         )
 
-    for attempt in range(max_schema_retries + 1):
-        log.info(
-            "  commit attempt %d/%d — waiting for model response",
-            attempt + 1,
-            max_schema_retries + 1,
+    schema_attempts = 0
+    feedback_attempts = 0
+    while True:
+        _attempt_label = (
+            f"schema {schema_attempts}/{max_schema_retries},"
+            f" feedback {feedback_attempts}/{max_feedback_retries}"
         )
+        log.info("  commit attempt (%s) — waiting for model response", _attempt_label)
         _t0 = time.monotonic()
         commit_response = client.messages.create(
             model=model_id,
             max_tokens=max_tokens,
-            system=system_prompt,
+            system=system_blocks,
             tools=[SUBMIT_TRADE_PROPOSAL],  # type: ignore[arg-type]
             tool_choice={"type": "tool", "name": TOOL_SUBMIT_TRADE_PROPOSAL},
-            messages=commit_messages,  # type: ignore[arg-type]
+            messages=_with_moving_cache_marker(  # type: ignore[arg-type]
+                commit_messages
+            ),
         )
 
-        total_input_tokens += commit_response.usage.input_tokens
-        total_output_tokens += commit_response.usage.output_tokens
+        _in_tok, _out_tok = _track_usage(commit_response.usage)
         log.info(
-            "  commit attempt %d/%d response — %.1fs (%d in, %d out tokens)",
-            attempt + 1,
-            max_schema_retries + 1,
+            "  commit attempt (%s) response — %.1fs (%d in, %d out tokens)",
+            _attempt_label,
             time.monotonic() - _t0,
-            commit_response.usage.input_tokens,
-            commit_response.usage.output_tokens,
+            _in_tok,
+            _out_tok,
         )
         proposal_block = next(
             (b for b in commit_response.content if b.type == "tool_use"),
@@ -372,8 +483,8 @@ def reason(
         )
         if proposal_block is None:
             raise ReasonerError(
-                f"Commit attempt {attempt + 1}: forced tool_choice produced no "
-                "tool_use block. This is an Anthropic SDK contract violation."
+                f"Commit attempt ({_attempt_label}): forced tool_choice produced "
+                "no tool_use block. This is an Anthropic SDK contract violation."
             )
 
         try:
@@ -381,7 +492,8 @@ def reason(
                 cast(dict[str, Any], proposal_block.input)
             )
         except ValidationError as exc:
-            if attempt == max_schema_retries:
+            schema_attempts += 1
+            if schema_attempts > max_schema_retries:
                 raise ReasonerError(
                     f"Schema validation failed after"
                     f" {max_schema_retries + 1} attempt(s). Last error: {exc}",
@@ -391,7 +503,7 @@ def reason(
             error_detail = str(exc)
             log.warning(
                 "Schema retry %d/%d: validation failed — %s",
-                attempt + 1,
+                schema_attempts,
                 max_schema_retries,
                 error_detail,
             )
@@ -417,18 +529,75 @@ def reason(
             ]
             continue
 
+        # Schema-valid — offer the deterministic-validation feedback loop.
+        # A proposal that would be rejected gets one revision opportunity;
+        # after the budget is exhausted it is returned as-is and the caller's
+        # authoritative validation journals the rejection.
+        if validation_feedback is not None and feedback_attempts < max_feedback_retries:
+            feedback_text = validation_feedback(proposal)
+            if feedback_text is not None:
+                feedback_attempts += 1
+                log.info(
+                    "  validation feedback (attempt %d/%d): %s",
+                    feedback_attempts,
+                    max_feedback_retries,
+                    feedback_text,
+                )
+                commit_messages = commit_messages + [
+                    {"role": "assistant", "content": commit_response.content},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": proposal_block.id,
+                                "is_error": True,
+                                "content": (
+                                    "Your proposal failed deterministic validation"
+                                    " and will be rejected as-is. Reasons:\n\n"
+                                    f"{feedback_text}\n\n"
+                                    "Revise the proposal to address these reasons"
+                                    " and call submit_trade_proposal again — or"
+                                    " return action=NO_ACTION if the trade cannot"
+                                    " be fixed this cycle."
+                                ),
+                            }
+                        ],
+                    },
+                ]
+                continue
+
         # Success — stamp the exploration transcript onto the context snapshot
         # so the caller can persist it with the journal record.
-        est_cost = (
-            total_input_tokens * _INPUT_COST_PER_TOKEN
-            + total_output_tokens * _OUTPUT_COST_PER_TOKEN
-        )
-        log.info(
-            "reason() done — %d in + %d out tokens, est. $%.4f (Sonnet 4.6)",
-            total_input_tokens,
-            total_output_tokens,
-            est_cost,
-        )
+        pricing = _MODEL_PRICING.get(model_id)
+        if pricing is not None:
+            input_price, output_price = pricing
+            est_cost = (
+                total_input_tokens * input_price
+                + total_cache_read_tokens * input_price * _CACHE_READ_MULTIPLIER
+                + total_cache_write_tokens * input_price * _CACHE_WRITE_MULTIPLIER
+                + total_output_tokens * output_price
+            )
+            log.info(
+                "reason() done — %d in + %d cache-read + %d cache-write + %d out"
+                " tokens, est. $%.4f (%s)",
+                total_input_tokens,
+                total_cache_read_tokens,
+                total_cache_write_tokens,
+                total_output_tokens,
+                est_cost,
+                model_id,
+            )
+        else:
+            log.info(
+                "reason() done — %d in + %d cache-read + %d cache-write + %d out"
+                " tokens (no pricing entry for %s)",
+                total_input_tokens,
+                total_cache_read_tokens,
+                total_cache_write_tokens,
+                total_output_tokens,
+                model_id,
+            )
         log.info(
             "  commit success — action=%s strategy=%r underlying=%s (total %.1fs)",
             proposal.action,
@@ -438,8 +607,3 @@ def reason(
         )
         context.tool_calls_transcript = tool_calls_transcript
         return proposal
-
-    # Unreachable: the retry loop raises ReasonerError on exhaustion above.
-    raise ReasonerError(  # pragma: no cover
-        "reason() exited the retry loop without returning or raising"
-    )

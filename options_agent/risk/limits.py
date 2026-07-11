@@ -13,7 +13,9 @@ class ChainFilterLimits(BaseModel):
     min_open_interest: int = Field(default=500, ge=0)
     max_spread_pct_of_mid: float = Field(default=0.10, gt=0, le=1.0)
     max_spread_abs_floor: float = Field(default=0.05, ge=0)
-    min_dte: int = Field(default=20, ge=0)
+    # min_dte must clear the 21-DTE time-stop default by a useful margin —
+    # a 20-DTE entry would be time-stopped immediately (limits 0.4.0).
+    min_dte: int = Field(default=30, ge=0)
     max_dte: int = Field(default=45, ge=0)
     # Absolute value of delta; covers both calls (positive) and puts (negative).
     min_abs_delta: float = Field(default=0.15, ge=0, le=1.0)
@@ -166,7 +168,7 @@ class Limits(BaseModel):
     exact limits active at the time. Bump it whenever any threshold changes.
     """
 
-    limits_version: str = "0.3.0"
+    limits_version: str = "0.4.0"
 
     # Risk / sizing
     max_loss_per_trade_pct: float = Field(default=0.01, gt=0, le=1.0)
@@ -186,6 +188,8 @@ class Limits(BaseModel):
     # rejected by validate_structural() with UNKNOWN_STRATEGY. The playbook in
     # agent/prompts.py (WP-6.3) must import these same names so it is
     # impossible for the agent to propose a strategy the validator will reject.
+    # covered_call / cash_secured_put removed (playbook 1.1.0) — the
+    # naked-short check rejected them unconditionally anyway.
     allowed_strategies: frozenset[str] = Field(
         default=frozenset(
             {
@@ -195,8 +199,6 @@ class Limits(BaseModel):
                 "bear_put_spread",
                 "iron_condor",
                 "iron_butterfly",
-                "covered_call",
-                "cash_secured_put",
             }
         )
     )

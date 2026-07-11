@@ -8,10 +8,12 @@ import exchange_calendars as xcals
 from sqlalchemy.engine import Engine
 
 from options_agent.agent.reasoner import ReasonerError, reason
+from options_agent.agent.tools import TOOL_GET_FILTERED_CHAIN
 from options_agent.agent.tools_mock import MOCK_TOOL_IMPLS, ToolImpl
 from options_agent.config import Config
 from options_agent.context.assembler import assemble_context, to_context_snapshot
 from options_agent.contracts.alerts import AlertEvent, AlertEventType, AlertSeverity
+from options_agent.contracts.data import FilteredChain
 from options_agent.contracts.journal import (
     JournalRecord,
     OutcomeEventType,
@@ -23,6 +25,13 @@ from options_agent.contracts.orchestrator import (
     CycleStage,
     MonitorResult,
     ShortCircuitReason,
+)
+from options_agent.contracts.proposal import TradeProposal
+from options_agent.contracts.results import (
+    RejectionReason,
+    Severity,
+    ValidationResult,
+    ValidationRuleId,
 )
 from options_agent.contracts.state import (
     ActionTaken,
@@ -43,6 +52,10 @@ from options_agent.data.iv_rank import record_daily_iv
 from options_agent.data.providers.alpaca_data import AlpacaDataClient
 from options_agent.data.tools import build_real_tool_impls, load_universe
 from options_agent.execution.broker import BrokerClient
+from options_agent.execution.orders import (
+    compute_limit_price,
+    compute_multi_leg_limit_price,
+)
 from options_agent.execution.reconcile import reconcile as _reconcile
 from options_agent.monitor.exits import (
     MarkStaleError,
@@ -50,6 +63,7 @@ from options_agent.monitor.exits import (
     check_stop_loss,
     check_time_stop,
     flatten_position,
+    reprice_stale_close_orders,
 )
 from options_agent.obs.alerts import AlertDispatcher
 from options_agent.obs.killswitch import (
@@ -65,7 +79,16 @@ from options_agent.risk.gates import (
     within_blackout_window,
 )
 from options_agent.risk.sizing import size as _size
-from options_agent.risk.validator import validate_structural
+from options_agent.risk.structure import (
+    StructureMetrics,
+    apply_structure_metrics,
+    compute_structure_metrics,
+)
+from options_agent.risk.validator import (
+    validate_market_access,
+    validate_risk_caps,
+    validate_structural,
+)
 from options_agent.state.crud import (
     get_closing_order,
     insert_order,
@@ -135,6 +158,52 @@ def _build_tool_impls(
         "Using MOCK_TOOL_IMPLS (use_real_data_tools=False, paper=True — dev/CI mode)"
     )
     return MOCK_TOOL_IMPLS
+
+
+def _fetch_chain_and_metrics(
+    tool_impls: dict[str, ToolImpl],
+    proposal: TradeProposal,
+) -> tuple[FilteredChain | None, StructureMetrics | None]:
+    """Fetch the filtered chain for a proposal and compute deterministic metrics.
+
+    Uses the same tool implementation the agent called during exploration —
+    AlpacaDataClient caches chain fetches within the cycle, so this re-fetch
+    is served from the cycle cache and sees identical data.
+
+    Returns (None, None) on fetch failure and (chain, None) when a leg is
+    absent from the chain. Both cases are rejected downstream by
+    validate_market_access's fail-closed liquidity check.
+    """
+    try:
+        chain = tool_impls[TOOL_GET_FILTERED_CHAIN]({"symbol": proposal.underlying})
+    except Exception as exc:
+        logger.warning(
+            "chain fetch for %s failed during validation — %s (failing closed)",
+            proposal.underlying,
+            exc,
+        )
+        return None, None
+    if not isinstance(chain, FilteredChain):
+        return None, None
+    return chain, compute_structure_metrics(proposal.legs, chain)
+
+
+def _enrich_proposal(
+    proposal: TradeProposal,
+    metrics: StructureMetrics | None,
+    log_context: str,
+) -> TradeProposal:
+    """Override the proposal's self-reported risk metrics with computed values."""
+    if metrics is None:
+        return proposal
+    updates = apply_structure_metrics(
+        {},
+        metrics,
+        agent_est_max_loss=proposal.est_max_loss,
+        agent_est_max_profit=proposal.est_max_profit,
+        log_context=log_context,
+    )
+    return proposal.model_copy(update=updates)
 
 
 def _journal_gated(
@@ -363,10 +432,17 @@ def run_entry_cycle(
     4.  TEMPORAL GATES — market_is_open → within_blackout_window (cheap; no portfolio)
     5.  ASSEMBLE      — context/assembler.py with stub tool_impls (WP-3 swap: WP-8.5)
     6.  PORTFOLIO GATES — has_buying_power → under_position_cap (uses bundle.portfolio)
-    7.  REASON        — agent/reasoner.py; catch ReasonerError → CycleError(REASON)
-    8.  VALIDATE      — risk/validator.py; rejection journals + REJECTION alert
+    7.  REASON        — agent/reasoner.py; catch ReasonerError → CycleError(REASON).
+                        A validation-feedback closure gives the agent one shot at
+                        revising a proposal that would fail deterministic checks.
+    8.  ENRICH+VALIDATE — recompute est_max_loss/est_max_profit/net Greeks from
+                        chain quotes (risk/structure.py), then validate_structural
+                        + validate_market_access; rejection journals + alert
     9.  SIZE          — risk/sizing.py; uses bundle.portfolio
-    10. EXECUTE       — broker.submit_multi_leg(); fill alert on success; JOURNAL
+    9b. RISK CAPS     — validate_risk_caps (max-loss cap, Greek bands,
+                        concentration) with the sized contract count
+    10. EXECUTE       — limit price from chain combo mid ± offset;
+                        broker.submit / submit_multi_leg; fill alert; JOURNAL
 
     Optional DI parameters:
         broker:     BrokerClient — built from config when absent. Required for
@@ -677,6 +753,35 @@ def run_entry_cycle(
         )
 
     # ── Step 7: REASON ───────────────────────────────────────────────────────
+    def _validation_feedback(p: TradeProposal) -> str | None:
+        """Pre-validate a candidate proposal so the agent can revise once.
+
+        Runs the same structural + market-access checks as step 8 (with
+        computed metrics overriding the agent's numbers) and returns the
+        rejection reasons as text, or None when the proposal would pass.
+        This is advisory — step 8 remains the authoritative gate; kill-switch
+        state is re-checked there, not here.
+        """
+        if p.action != "OPEN":
+            return None
+        fb_chain, fb_metrics = _fetch_chain_and_metrics(_tool_impls, p)
+        checked = _enrich_proposal(p, fb_metrics, f"cycle {cycle_id} feedback")
+        result = validate_structural(checked, config.limits)
+        reasons = list(result.reasons)
+        if result.passed:
+            reasons = validate_market_access(
+                checked,
+                config.limits,
+                bundle.universe.symbol_snapshots.get(checked.underlying),
+                _portfolio,
+                KillSwitchState.NONE,
+                fb_chain,
+                bundle.events.get(checked.underlying),
+            )
+        if not reasons:
+            return None
+        return "; ".join(f"[{r.rule_id.value}] {r.human_message}" for r in reasons)
+
     try:
         proposal = reason(
             context_snapshot,
@@ -686,6 +791,7 @@ def run_entry_cycle(
             model_id=_model_id,
             max_schema_retries=config.max_schema_retries,
             max_turns=config.max_reasoning_turns,
+            validation_feedback=_validation_feedback,
         )
     except ReasonerError as exc:
         logger.error("cycle %s: REASON failed — %s", cycle_id, exc)
@@ -754,8 +860,57 @@ def run_entry_cycle(
             journal_record_id=cycle_id,
         )
 
-    # ── Step 8: VALIDATE ─────────────────────────────────────────────────────
+    # ── Step 8: ENRICH + VALIDATE ────────────────────────────────────────────
+    # Recompute risk metrics deterministically from the chain, then run the
+    # full validation stack: structural (playbook, naked-short), then
+    # market-access (liquidity, exit-plan bounds, event blackout, buying
+    # power, duplicates/conflicts). Risk caps run after sizing in step 9.
+    _chain, _metrics = _fetch_chain_and_metrics(_tool_impls, proposal)
+    proposal = _enrich_proposal(proposal, _metrics, f"cycle {cycle_id}")
+
     validation = validate_structural(proposal, config.limits)
+    if validation.passed:
+        # Re-read the kill switch — the LLM call takes long enough that the
+        # step-1 read may be stale. Fail closed (treat as HALT) on read error.
+        try:
+            with get_connection(engine) as _ks_conn2:
+                _ks_state2 = get_current_state(_ks_conn2)
+        except Exception:
+            logger.critical(
+                "cycle %s: kill-switch re-read failed pre-validation — "
+                "failing closed (treating as HALT)",
+                cycle_id,
+            )
+            _ks_state2 = KillSwitchState.HALT
+        _ma_reasons = validate_market_access(
+            proposal,
+            config.limits,
+            bundle.universe.symbol_snapshots.get(proposal.underlying),
+            _portfolio,
+            _ks_state2,
+            _chain,
+            bundle.events.get(proposal.underlying),
+        )
+        if _ma_reasons:
+            validation = ValidationResult(passed=False, reasons=_ma_reasons)
+
+    # Defensive: execution prices off _metrics.leg_quotes. Market access
+    # fails closed when the chain or a leg is missing, so this only fires if
+    # that invariant is ever broken.
+    if validation.passed and (_chain is None or _metrics is None):
+        validation = ValidationResult(
+            passed=False,
+            reasons=[
+                RejectionReason(
+                    rule_id=ValidationRuleId.LIQUIDITY_SPREAD,
+                    severity=Severity.ERROR,
+                    human_message=(
+                        "chain quotes unavailable for execution pricing; failing closed"
+                    ),
+                )
+            ],
+        )
+
     logger.info(
         "cycle %s: validation %s",
         cycle_id,
@@ -851,11 +1006,90 @@ def run_entry_cycle(
             journal_record_id=cycle_id,
         )
 
+    # ── Step 9b: RISK CAPS ───────────────────────────────────────────────────
+    # Post-sizing portfolio-level checks: max-loss cap, Greek bands,
+    # concentration. Steps 8's fail-closed guard guarantees _chain is present.
+    assert _chain is not None and _metrics is not None  # guarded in step 8
+    risk_validation = validate_risk_caps(
+        proposal,
+        _portfolio,
+        config.limits,
+        contracts=sizing.contracts,
+        underlying_price=_chain.underlying_price,
+    )
+    if not risk_validation.passed:
+        rejection_ids = [r.rule_id for r in risk_validation.reasons]
+        logger.info("cycle %s: risk caps REJECTED %s", cycle_id, rejection_ids)
+        _dispatch(
+            dispatcher,
+            AlertEvent(
+                event_type=AlertEventType.REJECTION,
+                severity=AlertSeverity.WARN,
+                symbol=proposal.underlying,
+                detail=(
+                    f"Proposal rejected by risk caps: {rejection_ids}. "
+                    f"strategy={proposal.strategy} underlying={proposal.underlying}"
+                ),
+            ),
+        )
+        decision = Decision(
+            proposal=proposal,
+            validation_result=risk_validation,
+            sizing_result=sizing,
+            action_taken=ActionTaken.REJECTED,
+        )
+        journal_record = JournalRecord(
+            cycle_id=cycle_id,
+            timestamp=now,
+            action_taken=ActionTaken.REJECTED,
+            decision=decision,
+            context_snapshot=context_snapshot,
+            rejection_rule_ids=rejection_ids,
+            limits_version=config.limits.limits_version,
+            prompt_version=_prompt_version,
+            model_id=_model_id,
+            strategy=proposal.strategy,
+            underlying=proposal.underlying,
+            conviction=proposal.conviction,
+        )
+        with get_connection(engine) as conn:
+            write_journal_record(conn, journal_record)
+        return CycleResult(
+            cycle_id=cycle_id,
+            action_taken=ActionTaken.REJECTED,
+            proposal=proposal,
+            validation=risk_validation,
+            sizing=sizing,
+            journal_record_id=cycle_id,
+        )
+
     # ── Step 10: EXECUTE + JOURNAL ───────────────────────────────────────────
-    limit_price = config.slice_limit_price
+    # Limit price comes from live chain quotes: combo mid (conservative tick
+    # rounding) nudged toward fill by order_limit_offset_from_mid. This
+    # replaces the former fixed slice_limit_price, which priced every entry
+    # at the same net credit regardless of what the structure was worth.
     position_id = str(uuid.uuid4())
-    order = broker.submit_multi_leg(
-        proposal, sizing.contracts, limit_price, position_id
+    if len(proposal.legs) == 1:
+        _bid, _ask = _metrics.leg_quotes[0]
+        limit_price = compute_limit_price(
+            _bid, _ask, proposal.legs[0].side, config.order_limit_offset_from_mid
+        )
+        order = broker.submit(proposal, sizing.contracts, limit_price, position_id)
+    else:
+        limit_price = compute_multi_leg_limit_price(
+            proposal.legs,
+            _metrics.leg_quotes,
+            offset_toward_fill=config.order_limit_offset_from_mid,
+        )
+        order = broker.submit_multi_leg(
+            proposal, sizing.contracts, limit_price, position_id
+        )
+    logger.info(
+        "cycle %s: limit price %.2f (combo mid %.2f, offset %.2f)",
+        cycle_id,
+        limit_price,
+        _metrics.net_entry_mid,
+        config.order_limit_offset_from_mid,
     )
     logger.info(
         "cycle %s: order submitted broker_id=%s status=%s",
@@ -1142,7 +1376,9 @@ def run_monitor_cycle(
     _calendar = xcals.get_calendar(config.exchange_calendar)
     _market_open, _market_reason = market_is_open(now, _calendar)
     if not _market_open:
-        logger.info("run_monitor_cycle: SKIP (market closed) — %s", _market_reason)
+        # DEBUG, not INFO: this fires every monitor interval all night and
+        # weekend — thousands of no-op lines per week at INFO.
+        logger.debug("run_monitor_cycle: SKIP (market closed) — %s", _market_reason)
         return MonitorResult(
             positions_evaluated=0,
             exits_triggered=[],
@@ -1181,6 +1417,44 @@ def run_monitor_cycle(
             set_by="orchestrator.run_monitor_cycle",
         )
         # Do NOT return here — monitor continues with remaining options positions.
+
+    # ── Step 3b: REPRICE STALE CLOSE ORDERS ─────────────────────────────────
+    # A close limit that missed its market (gap through a stop) would sit
+    # WORKING forever while has_pending_close skips the position. Cancel and
+    # replace such orders at a fresh mark, widening toward the market each
+    # pass. Runs right after reconcile so current_mark is fresh.
+    _race_filled: list[Position] = []
+    try:
+        with get_connection(engine) as _rp_conn:
+            _repriced, _race_filled = reprice_stale_close_orders(
+                _rp_conn,
+                broker,
+                now,
+                stale_after=timedelta(minutes=config.exit_reprice_after_minutes),
+                offset_step=config.exit_reprice_offset_step,
+                max_widenings=config.exit_reprice_max_widenings,
+            )
+        for _new_order in _repriced:
+            _dispatch(
+                dispatcher,
+                AlertEvent(
+                    event_type=AlertEventType.EXIT_SUBMITTED,
+                    severity=AlertSeverity.WARN,
+                    order_id=_new_order.broker_order_id,
+                    detail=(
+                        f"Stale exit order repriced: {_new_order.exit_reason} "
+                        f"position={_new_order.position_id} new limit="
+                        f"{_new_order.limit_price} broker_id="
+                        f"{_new_order.broker_order_id}"
+                    ),
+                ),
+            )
+    except Exception as exc:
+        logger.error(
+            "run_monitor_cycle: reprice pass failed — %s (continuing; exits "
+            "still evaluated this cycle)",
+            exc,
+        )
 
     # ── Step 4: FRESH POSITIONS ──────────────────────────────────────────────
     # Re-read after reconcile so marks are current. The positions parameter was
@@ -1257,12 +1531,15 @@ def run_monitor_cycle(
             )
 
     # ── Step 6: FINALIZE — write OutcomeRecords for fills detected this cycle ─
-    # These are positions whose closing orders filled during step 3's reconcile.
-    # We write the OutcomeRecord NOW (not at trigger time) so realized_pnl uses
-    # the actual fill price, not a placeholder. The exit_reason is carried on
-    # the closing Order written at trigger time. FILL alert fires here — at the
+    # These are positions whose closing orders filled during step 3's reconcile,
+    # plus any closed by a fill-race during the step-3b reprice pass. We write
+    # the OutcomeRecord NOW (not at trigger time) so realized_pnl uses the
+    # actual fill price, not a placeholder. The exit_reason is carried on the
+    # closing Order written at trigger time. FILL alert fires here — at the
     # moment the position is confirmed CLOSED with known realized_pnl.
-    _finalize_closed_positions(engine, now, state_diff.closed_positions, dispatcher)
+    _finalize_closed_positions(
+        engine, now, [*state_diff.closed_positions, *_race_filled], dispatcher
+    )
 
     return MonitorResult(
         positions_evaluated=len(open_positions),

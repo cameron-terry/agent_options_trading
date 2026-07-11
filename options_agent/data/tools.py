@@ -26,9 +26,12 @@ from options_agent.agent.tools import (
     JOURNAL_MAX_RECORDS,
     TOOL_GET_EVENTS,
     TOOL_GET_FILTERED_CHAIN,
+    TOOL_GET_HELD_LEG_GREEKS,
     TOOL_GET_JOURNAL_BY_SYMBOL,
+    TOOL_GET_OUTCOME_STATS,
     TOOL_GET_PORTFOLIO_STATE,
     TOOL_GET_POSITION_HISTORY,
+    TOOL_GET_PRICE_HISTORY,
     TOOL_GET_UNIVERSE_SNAPSHOT,
     PositionHistory,
 )
@@ -41,10 +44,12 @@ from options_agent.contracts.data import (
 )
 from options_agent.contracts.journal import JournalRecord
 from options_agent.data.chains import get_filtered_chain as _chain_impl
+from options_agent.data.chains import get_held_leg_greeks as _held_leg_greeks_impl
 from options_agent.data.events import get_events as _events_impl
 from options_agent.data.greeks_iv import get_atm_iv
 from options_agent.data.iv_rank import compute_iv_percentile, compute_iv_rank
 from options_agent.data.market import get_universe_snapshot as _universe_impl
+from options_agent.data.price_history import get_price_history as _price_history_impl
 from options_agent.data.providers.alpaca_data import AlpacaDataClient
 from options_agent.data.providers.yfinance_provider import YFinanceProvider
 from options_agent.data.providers.yfinance_volatility_provider import (
@@ -53,7 +58,11 @@ from options_agent.data.providers.yfinance_volatility_provider import (
 from options_agent.execution.broker import BrokerClient
 from options_agent.state.crud import get_position, list_open_positions
 from options_agent.state.db import get_connection
-from options_agent.state.journal import query_journal, query_outcome_records
+from options_agent.state.journal import (
+    query_journal,
+    query_outcome_records,
+    query_outcome_stats_by_symbol,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +207,26 @@ def build_real_tool_impls(
             provider=event_provider,
         )
 
+    def _price_history(tool_input: dict[str, Any]) -> Any:
+        return _price_history_impl(
+            symbol=tool_input["symbol"],
+            provider=data_provider,
+        )
+
+    def _outcome_stats(_tool_input: dict[str, Any]) -> Any:
+        # Internal assembler key (TOOL_GET_OUTCOME_STATS) — per-symbol realized
+        # track record pre-loaded into the context bundle.
+        with get_connection(engine) as conn:
+            return query_outcome_stats_by_symbol(conn)
+
+    def _held_leg_greeks(tool_input: dict[str, Any]) -> Any:
+        # Internal assembler key (TOOL_GET_HELD_LEG_GREEKS) — never exposed to
+        # the LLM. tool_input["positions"] is a list[Position].
+        return _held_leg_greeks_impl(
+            positions=tool_input["positions"],
+            provider=data_provider,
+        )
+
     def _journal_by_symbol(tool_input: dict[str, Any]) -> list[JournalRecord]:
         symbol: str = tool_input["symbol"]
         with get_connection(engine) as conn:
@@ -227,4 +256,7 @@ def build_real_tool_impls(
         TOOL_GET_EVENTS: _events,
         TOOL_GET_JOURNAL_BY_SYMBOL: _journal_by_symbol,
         TOOL_GET_POSITION_HISTORY: _position_history,
+        TOOL_GET_PRICE_HISTORY: _price_history,
+        TOOL_GET_HELD_LEG_GREEKS: _held_leg_greeks,
+        TOOL_GET_OUTCOME_STATS: _outcome_stats,
     }

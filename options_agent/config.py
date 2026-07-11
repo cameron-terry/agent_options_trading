@@ -43,16 +43,16 @@ class PlaybookConfig(BaseModel):
     vix_low_vol_threshold: float = Field(default=15.0, gt=0.0)
 
     # Strategy sets per IV band — high/low are hard-enforced; medium is permissive.
-    # covered_call and cash_secured_put appear in high/medium only (selling premium
-    # in low-IV environments has little premium to capture); the prompt additionally
-    # gates them on holding/cash conditions.
+    # covered_call and cash_secured_put were removed (playbook 1.1.0): the
+    # validator's unconditional naked-short check rejects any short leg without
+    # a covering long leg, so both strategies were guaranteed rejections that
+    # only wasted reasoning cycles. Re-add only if the validator gains
+    # share-coverage / cash-reservation checks.
     high_iv_strategies: frozenset[str] = Field(
         default=frozenset(
             {
                 "bear_call_spread",
                 "bull_put_spread",
-                "cash_secured_put",
-                "covered_call",
                 "iron_butterfly",
                 "iron_condor",
             }
@@ -65,8 +65,6 @@ class PlaybookConfig(BaseModel):
                 "bear_put_spread",
                 "bull_call_spread",
                 "bull_put_spread",
-                "cash_secured_put",
-                "covered_call",
                 "iron_butterfly",
                 "iron_condor",
             }
@@ -191,13 +189,23 @@ class Config(BaseModel):
     order_poll_timeout_secs: float = Field(default=30.0, gt=0)
     order_limit_offset_from_mid: float = Field(default=0.0, ge=0)
 
-    # WP-0.5 slice entry limit price (net combo price; negative = credit received).
-    # The default -1.50 is used in normal paper runs. Override to -0.01 in the
-    # smoke test to guarantee fill independent of live market levels — a near-zero
-    # credit limit fills trivially on paper. WP-3/WP-8 replaces this field with
-    # real mid-price pricing logic.
+    # DEPRECATED (kept for the WP-0.5 smoke-test path only): fixed net combo
+    # limit price. The production entry cycle now prices every order from live
+    # chain quotes (combo mid ± order_limit_offset_from_mid) — this field is no
+    # longer read by run_entry_cycle. Remove once the smoke test migrates.
     # Guard: may only be changed from default on alpaca_paper=True runs.
     slice_limit_price: float = Field(default=-1.50)
+
+    # Monitor exit-order repricing (stale close orders).
+    # A WORKING CLOSE order older than exit_reprice_after_minutes is cancelled
+    # and resubmitted at a fresh mark, widened toward the market by
+    # 0.01 + widenings × exit_reprice_offset_step, where widenings counts prior
+    # CLOSE orders for the position and is capped at exit_reprice_max_widenings.
+    # The escalation guarantees a gapped stop-loss keeps chasing the market
+    # instead of sitting unfilled while losses grow.
+    exit_reprice_after_minutes: int = Field(default=10, ge=1, le=120)
+    exit_reprice_offset_step: float = Field(default=0.05, ge=0.0, le=1.0)
+    exit_reprice_max_widenings: int = Field(default=5, ge=0, le=20)
 
     # Agent / reasoner settings
     # model_id is stamped on ContextSnapshot so before/after model comparisons

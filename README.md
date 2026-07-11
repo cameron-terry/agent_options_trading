@@ -28,10 +28,10 @@ Apply migrations before first use (creates `options_agent.db` when using SQLite)
 uv run alembic upgrade head
 ```
 
-To use Postgres locally, start the bundled container first:
+To use Postgres locally, start the bundled container first (behind the `test` profile — it's not part of the default `docker compose up -d`):
 
 ```bash
-docker compose up -d
+docker compose --profile test up -d postgres
 DB_URL=postgresql://postgres:postgres@localhost/options_agent_test uv run alembic upgrade head
 ```
 
@@ -65,15 +65,13 @@ docker compose logs -f options-agent
 Migrations (`alembic upgrade head`) run automatically on container start via
 `docker-entrypoint.sh` before the scheduler launches.
 
-### Ops console
-
-A read-only web console runs beside the scheduler — no broker credentials in its
-environment, one write path (the kill switch, WP-9.7+). See
-[docs/features/ops-console.md](docs/features/ops-console.md) for details.
+The container reports `unhealthy` if the scheduler's monitor loop stops
+touching its heartbeat file for 600s (5x the 2min monitor interval) — a
+wedged/dead scheduler thread shows up in `docker ps` instead of looking
+falsely "Up". Check with:
 
 ```bash
-docker compose up -d --build console
-curl http://127.0.0.1:8000/api/health
+docker inspect --format='{{.State.Health.Status}}' agent_options_trading-options-agent-1
 ```
 
 ## Lint / type-check

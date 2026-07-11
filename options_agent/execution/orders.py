@@ -60,6 +60,7 @@ def compute_multi_leg_limit_price(
     legs: list[Leg],
     quotes: list[tuple[float, float]],
     tick_size: float = 0.01,
+    offset_toward_fill: float = 0.0,
 ) -> float:
     """Compute a net combo limit price at mid-or-better for a multi-leg order.
 
@@ -73,14 +74,25 @@ def compute_multi_leg_limit_price(
         net credit (negative): floor to tick  → receive slightly more than mid
     In both cases: floor(net / tick_size) × tick_size.
 
+    offset_toward_fill (non-negative) is a slippage allowance applied AFTER
+    the conservative rounding, moving the limit toward the market so the
+    order fills: a net debit pays up to offset more than mid; a net credit
+    accepts up to offset less than mid. Both directions are net + offset
+    (a credit is negative, so adding the offset moves it toward zero).
+
     This is the last validation gate before the order builder.  The chain
     filter (WP-3) is the primary liquidity screen; this function asserts
     sanity and fails loudly rather than silently pricing off a broken quote.
 
     Raises:
-        ValueError: if len(quotes) != len(legs), or any leg quote is
-                    pathological (bid < 0, ask ≤ 0, or bid ≥ ask).
+        ValueError: if len(quotes) != len(legs), any leg quote is
+                    pathological (bid < 0, ask ≤ 0, or bid ≥ ask), or
+                    offset_toward_fill is negative.
     """
+    if offset_toward_fill < 0:
+        raise ValueError(
+            f"offset_toward_fill must be non-negative; got {offset_toward_fill}"
+        )
     if len(quotes) != len(legs):
         raise ValueError(
             f"quotes length {len(quotes)} does not match legs length {len(legs)}"
@@ -109,7 +121,7 @@ def compute_multi_leg_limit_price(
     #   negative net (credit) → floor rounds more negative → we receive more than mid.
     # round(net / tick_size, 8) first to suppress floating-point noise at boundaries.
     ticks = math.floor(round(net / tick_size, 8))
-    return round(ticks * tick_size, 2)
+    return round(ticks * tick_size + offset_toward_fill, 2)
 
 
 def build_multi_leg_request(

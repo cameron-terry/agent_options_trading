@@ -229,6 +229,7 @@ def test_agent_tool_names_is_exactly_read_only_set() -> None:
         "get_journal_by_symbol",
         "get_portfolio_state",
         "get_position_history",
+        "get_price_history",
         "get_universe_snapshot",
     }
     assert set(AGENT_TOOL_NAMES) == expected, (

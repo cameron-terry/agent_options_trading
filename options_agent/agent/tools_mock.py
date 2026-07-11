@@ -39,9 +39,12 @@ from options_agent.agent.tools import (
     JOURNAL_MAX_RECORDS,
     TOOL_GET_EVENTS,
     TOOL_GET_FILTERED_CHAIN,
+    TOOL_GET_HELD_LEG_GREEKS,
     TOOL_GET_JOURNAL_BY_SYMBOL,
+    TOOL_GET_OUTCOME_STATS,
     TOOL_GET_PORTFOLIO_STATE,
     TOOL_GET_POSITION_HISTORY,
+    TOOL_GET_PRICE_HISTORY,
     TOOL_GET_UNIVERSE_SNAPSHOT,
     PositionHistory,
 )
@@ -54,6 +57,7 @@ from options_agent.contracts.data import (
     MarketRegime,
     OptionContract,
     PortfolioState,
+    PriceHistorySummary,
     SymbolSnapshot,
     UniverseSnapshot,
 )
@@ -305,6 +309,50 @@ _SPY_CHAIN_CONTRACTS = [
         dte=34,
         greek_source="alpaca",
     ),
+    # September quarterly expiry — matches the stub_reasoner proposal
+    # (sell 560P / buy 555P exp 2026-09-18) so the enrich+validate entry-cycle
+    # path can price and liquidity-check the stub's legs against this chain.
+    # Mids are chosen so the recomputed metrics equal the stub's stated
+    # est_max_loss=350 / est_max_profit=150 (credit = 12.00 − 10.50 = 1.50).
+    OptionContract(
+        symbol="SPY260918P00560000",
+        strike=560.0,
+        expiration=date(2026, 9, 18),
+        right="put",
+        bid=11.95,
+        ask=12.05,
+        mid=12.00,
+        volume=1800,
+        open_interest=8600,
+        # −0.60 keeps the stub structure's net delta at +0.05 so the happy
+        # path stays inside the 20%-of-equity delta band on top of the mock
+        # portfolio's existing exposure.
+        delta=-0.60,
+        theta=-0.09,
+        vega=0.52,
+        iv=0.19,
+        spread_width=0.10,
+        dte=96,
+        greek_source="alpaca",
+    ),
+    OptionContract(
+        symbol="SPY260918P00555000",
+        strike=555.0,
+        expiration=date(2026, 9, 18),
+        right="put",
+        bid=10.45,
+        ask=10.55,
+        mid=10.50,
+        volume=1500,
+        open_interest=7200,
+        delta=-0.55,
+        theta=-0.085,
+        vega=0.50,
+        iv=0.188,
+        spread_width=0.10,
+        dte=96,
+        greek_source="alpaca",
+    ),
 ]
 
 _SPY_FILTER_PARAMS = ChainFilterParams(
@@ -488,6 +536,125 @@ def _get_position_history(tool_input: dict[str, Any]) -> PositionHistory | None:
     return _MOCK_POSITION_HISTORIES.get(position_id)
 
 
+_MOCK_PRICE_HISTORIES: dict[str, PriceHistorySummary] = {
+    # SPY: steady uptrend near the highs — consistent with the bullish stub.
+    "SPY": PriceHistorySummary(
+        symbol="SPY",
+        as_of=_AS_OF,
+        price=545.20,
+        sma_20=538.40,
+        sma_50=530.10,
+        price_vs_sma_20_pct=1.26,
+        price_vs_sma_50_pct=2.85,
+        high_52w=548.90,
+        low_52w=442.30,
+        pct_from_52w_high=-0.67,
+        pct_from_52w_low=23.26,
+        atr_14=4.85,
+        atr_14_pct=0.89,
+        return_5d_pct=0.8,
+        return_21d_pct=2.4,
+        return_63d_pct=6.1,
+        recent_closes=[
+            538.1,
+            539.4,
+            541.2,
+            540.8,
+            542.5,
+            543.1,
+            542.9,
+            544.0,
+            544.7,
+            545.2,
+        ],
+        bars_available=252,
+    ),
+    # AAPL: pullback below the 20-day into earnings — trend caution state.
+    "AAPL": PriceHistorySummary(
+        symbol="AAPL",
+        as_of=_AS_OF,
+        price=212.80,
+        sma_20=216.50,
+        sma_50=210.20,
+        price_vs_sma_20_pct=-1.71,
+        price_vs_sma_50_pct=1.24,
+        high_52w=237.50,
+        low_52w=164.10,
+        pct_from_52w_high=-10.4,
+        pct_from_52w_low=29.68,
+        atr_14=4.10,
+        atr_14_pct=1.93,
+        return_5d_pct=-2.1,
+        return_21d_pct=-0.6,
+        return_63d_pct=8.3,
+        recent_closes=[
+            218.2,
+            217.5,
+            216.9,
+            215.3,
+            214.8,
+            215.6,
+            214.2,
+            213.5,
+            213.1,
+            212.8,
+        ],
+        bars_available=252,
+    ),
+    # NVDA: short listing history — most indicators unavailable, mirroring the
+    # warm-up state its IV rank is in.
+    "NVDA": PriceHistorySummary(
+        symbol="NVDA",
+        as_of=_AS_OF,
+        price=131.50,
+        sma_20=128.70,
+        sma_50=None,
+        price_vs_sma_20_pct=2.18,
+        price_vs_sma_50_pct=None,
+        high_52w=135.20,
+        low_52w=118.60,
+        pct_from_52w_high=-2.74,
+        pct_from_52w_low=10.88,
+        atr_14=3.95,
+        atr_14_pct=3.0,
+        return_5d_pct=1.9,
+        return_21d_pct=None,
+        return_63d_pct=None,
+        recent_closes=[
+            127.4,
+            128.1,
+            129.6,
+            128.8,
+            130.2,
+            129.5,
+            130.8,
+            131.1,
+            130.6,
+            131.5,
+        ],
+        bars_available=28,
+    ),
+}
+
+
+def _get_price_history(tool_input: dict[str, Any]) -> PriceHistorySummary | None:
+    symbol: str = tool_input["symbol"]
+    return _MOCK_PRICE_HISTORIES.get(symbol)
+
+
+def _get_outcome_stats(_tool_input: dict[str, Any]) -> dict[str, Any]:
+    # Internal assembler key: the mock system has no closed positions yet, so
+    # the track record is empty — matching a fresh paper account.
+    return {}
+
+
+def _get_held_leg_greeks(_tool_input: dict[str, Any]) -> dict[Any, Any]:
+    # Internal assembler key: the mock chain covers all mock position legs,
+    # so no held-leg fallback data is needed — an empty dict means "no extra
+    # coverage" and aggregation falls back to the chain lookup.
+    return {}
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Exported mock tool implementation map
 # ──────────────────────────────────────────────────────────────────────────────
@@ -505,6 +672,9 @@ MOCK_TOOL_IMPLS: dict[str, ToolImpl] = {
     TOOL_GET_EVENTS: _get_events,
     TOOL_GET_JOURNAL_BY_SYMBOL: _get_journal_by_symbol,
     TOOL_GET_POSITION_HISTORY: _get_position_history,
+    TOOL_GET_PRICE_HISTORY: _get_price_history,
+    TOOL_GET_HELD_LEG_GREEKS: _get_held_leg_greeks,
+    TOOL_GET_OUTCOME_STATS: _get_outcome_stats,
 }
 
 
@@ -716,6 +886,7 @@ def make_low_iv_bullish_tool_impls() -> dict[str, ToolImpl]:
         TOOL_GET_EVENTS: _get_qqq_events,
         TOOL_GET_JOURNAL_BY_SYMBOL: _get_empty_journal,
         TOOL_GET_POSITION_HISTORY: _get_no_position_history,
+        TOOL_GET_PRICE_HISTORY: _get_price_history,
     }
 
 
@@ -760,6 +931,7 @@ def make_earnings_blackout_tool_impls() -> dict[str, ToolImpl]:
         TOOL_GET_EVENTS: _get_aapl_events,
         TOOL_GET_JOURNAL_BY_SYMBOL: _get_empty_journal,
         TOOL_GET_POSITION_HISTORY: _get_no_position_history,
+        TOOL_GET_PRICE_HISTORY: _get_price_history,
     }
 
 
@@ -801,6 +973,7 @@ def make_no_iv_history_tool_impls() -> dict[str, ToolImpl]:
         TOOL_GET_EVENTS: _get_nvda_events,
         TOOL_GET_JOURNAL_BY_SYMBOL: _get_empty_journal,
         TOOL_GET_POSITION_HISTORY: _get_no_position_history,
+        TOOL_GET_PRICE_HISTORY: _get_price_history,
     }
 
 
@@ -847,4 +1020,5 @@ def make_portfolio_aware_tool_impls() -> dict[str, ToolImpl]:
         TOOL_GET_EVENTS: _get_spy_events,
         TOOL_GET_JOURNAL_BY_SYMBOL: _get_journal_by_symbol,  # has SPY opening record
         TOOL_GET_POSITION_HISTORY: _get_position_history,  # has pos-001 history
+        TOOL_GET_PRICE_HISTORY: _get_price_history,
     }
