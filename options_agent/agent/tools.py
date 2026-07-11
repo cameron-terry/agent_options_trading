@@ -36,6 +36,14 @@ TOOL_GET_EVENTS = "get_events"
 TOOL_GET_JOURNAL_BY_SYMBOL = "get_journal_by_symbol"
 TOOL_GET_POSITION_HISTORY = "get_position_history"
 
+# Internal (assembler-only) impl keys — NOT part of AGENT_TOOLS; the LLM never
+# sees these. They ride in the same tool_impls map so the DI pattern stays
+# uniform between mock and real backings.
+# get_held_leg_greeks: unfiltered Greeks for held position legs, so legs that
+# have aged outside the entry chain filter still contribute to net portfolio
+# Greeks instead of silently counting as 0.0.
+TOOL_GET_HELD_LEG_GREEKS = "get_held_leg_greeks"
+
 # Maximum number of JournalRecords returned by get_journal_by_symbol.
 # WP-2 (state/journal.py query_journal) must enforce the same limit so the
 # two sides stay in sync without relying on prose-only documentation.

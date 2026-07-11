@@ -137,7 +137,9 @@ def test_all_allowed_strategies_is_union_of_bands() -> None:
     assert pb.all_allowed_strategies == union
 
 
-def test_all_allowed_strategies_contains_all_eight_defaults() -> None:
+def test_all_allowed_strategies_contains_all_six_defaults() -> None:
+    # covered_call / cash_secured_put removed in playbook 1.1.0 — the
+    # naked-short check rejected them unconditionally.
     pb = PlaybookConfig()
     expected = {
         "bull_put_spread",
@@ -146,8 +148,6 @@ def test_all_allowed_strategies_contains_all_eight_defaults() -> None:
         "bear_put_spread",
         "iron_condor",
         "iron_butterfly",
-        "covered_call",
-        "cash_secured_put",
     }
     assert pb.all_allowed_strategies == expected
 
@@ -254,7 +254,7 @@ def test_config_round_trip_with_playbook() -> None:
 def test_config_from_toml_populates_playbook() -> None:
     config = Config.from_toml(Path("config.toml"))
     assert isinstance(config.playbook, PlaybookConfig)
-    assert config.playbook.playbook_version == "1.0.0"
+    assert config.playbook.playbook_version == "1.1.0"
     assert config.playbook.iv_rank_high_threshold == 0.50
     assert config.playbook.iv_rank_low_threshold == 0.25
     assert "iron_condor" in config.playbook.high_iv_strategies

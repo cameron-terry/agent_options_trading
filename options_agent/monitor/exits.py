@@ -63,7 +63,15 @@ from options_agent.contracts.state import (
     PositionStatus,
 )
 from options_agent.execution.broker import BrokerClient
-from options_agent.state.crud import has_pending_close, insert_order, update_position
+from options_agent.state.crud import (
+    count_close_orders,
+    get_position,
+    has_pending_close,
+    insert_order,
+    list_pending_orders,
+    patch_order,
+    update_position,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -560,6 +568,184 @@ def check_time_stop(
     update_position(conn, updated_pos)
 
     return order
+
+
+def reprice_stale_close_orders(
+    conn: Connection,
+    broker: BrokerClient,
+    now: datetime,
+    *,
+    stale_after: timedelta,
+    offset_step: float,
+    max_widenings: int,
+    base_offset: float = 0.01,
+) -> tuple[list[Order], list[Position]]:
+    """Cancel-and-replace WORKING close orders that have gone stale.
+
+    An exit trigger (stop-loss especially) submits a limit order at the
+    cached mark ± a small offset. If the market gapped through the trigger,
+    that limit may never fill — and without this pass the position would sit
+    in PENDING_CLOSE indefinitely while has_pending_close skips it every
+    cycle. This is the CLOSE-side counterpart of the entry cycle's stale
+    WORKING-OPEN cancellation.
+
+    For each WORKING CLOSE order older than *stale_after*:
+      1. Cancel at the broker. A fill-race (cancel returns FILLED) closes the
+         position here; the caller must finalize it (OutcomeRecord + alert).
+      2. Resubmit the close at a fresh limit derived from the reconciled
+         current_mark, widened toward the market by
+         base_offset + widenings × offset_step, where widenings is the count
+         of prior CLOSE orders capped at max_widenings. The offset therefore
+         escalates each pass until it is effectively marketable, but never
+         exceeds base_offset + max_widenings × offset_step.
+      3. Carry the original exit_reason onto the replacement order so
+         OutcomeRecord attribution survives repricing.
+
+    PARTIALLY_FILLED close orders are left alone — replacing one at full
+    position quantity would over-close; reconcile tracks their progress.
+
+    Cancel failures are logged and skipped; the order is retried on the next
+    monitor cycle. Errors never propagate — one bad order must not block
+    exits for other positions.
+
+    Returns (replacement orders submitted, positions closed by fill-race).
+    Callers must run reconcile before this pass so current_mark is fresh.
+    """
+    repriced: list[Order] = []
+    race_filled: list[Position] = []
+
+    for order in list_pending_orders(conn):
+        if order.role != OrderRole.CLOSE or order.status != OrderStatus.WORKING:
+            continue
+
+        submitted_at = (
+            order.submitted_at
+            if order.submitted_at.tzinfo is not None
+            else order.submitted_at.replace(tzinfo=UTC)
+        )
+        if now - submitted_at <= stale_after:
+            continue
+
+        pos = get_position(conn, order.position_id)
+        if pos is None or pos.status != PositionStatus.PENDING_CLOSE:
+            continue
+        if pos.exit_plan is None:
+            continue
+
+        widenings = min(count_close_orders(conn, pos.id), max_widenings)
+        offset = round(base_offset + widenings * offset_step, 2)
+
+        try:
+            cancelled = broker.cancel(order)
+        except Exception as exc:
+            logger.error(
+                "reprice_stale_close_orders: cancel failed for order %s "
+                "(position %s) — %s; will retry next cycle",
+                order.broker_order_id,
+                pos.id,
+                exc,
+            )
+            continue
+
+        patch_order(
+            conn,
+            order.id,
+            status=cancelled.status,
+            broker_status_raw=cancelled.broker_status_raw,
+            filled_at=cancelled.filled_at,
+            net_fill_price=cancelled.net_fill_price,
+            filled_qty=cancelled.filled_qty,
+        )
+
+        if cancelled.status == OrderStatus.FILLED:
+            # Fill raced the cancel — the position is genuinely closed.
+            closed_pos = pos.model_copy(
+                update={
+                    "status": PositionStatus.CLOSED,
+                    "closed_at": cancelled.filled_at or now,
+                }
+            )
+            update_position(conn, closed_pos)
+            race_filled.append(closed_pos)
+            logger.info(
+                "reprice_stale_close_orders: close order %s race-filled for "
+                "position %s — no reprice needed",
+                order.broker_order_id,
+                pos.id,
+            )
+            continue
+
+        if cancelled.status not in (OrderStatus.CANCELLED, OrderStatus.EXPIRED):
+            logger.warning(
+                "reprice_stale_close_orders: order %s in unexpected state %s "
+                "after cancel — skipping reprice this cycle",
+                order.broker_order_id,
+                cancelled.status,
+            )
+            continue
+
+        close_proposal = _close_proposal(
+            pos, thesis=f"Monitor exit reprice (widening {widenings})"
+        )
+        limit_price = _closing_limit_price(pos, offset)
+
+        try:
+            if len(pos.legs) == 1:
+                new_order = broker.submit(
+                    close_proposal,
+                    pos.quantity,
+                    limit_price,
+                    pos.id,
+                    role=OrderRole.CLOSE,
+                )
+            else:
+                new_order = broker.submit_multi_leg(
+                    close_proposal,
+                    pos.quantity,
+                    limit_price,
+                    pos.id,
+                    role=OrderRole.CLOSE,
+                )
+        except Exception as exc:
+            # The old order is cancelled and no replacement exists. Revert the
+            # position to OPEN — PENDING_CLOSE is in _SKIPPABLE_STATUSES, so
+            # leaving it there would strand the position with no live close
+            # order. As OPEN, the next cycle's exit evaluation re-triggers.
+            logger.error(
+                "reprice_stale_close_orders: resubmit failed for position %s — %s; "
+                "reverting to OPEN so the exit re-triggers next cycle",
+                pos.id,
+                exc,
+            )
+            update_position(
+                conn, pos.model_copy(update={"status": PositionStatus.OPEN})
+            )
+            continue
+
+        new_order = new_order.model_copy(update={"exit_reason": order.exit_reason})
+        if new_order.status == OrderStatus.FILLED:
+            closed_pos = pos.model_copy(
+                update={
+                    "status": PositionStatus.CLOSED,
+                    "closed_at": new_order.filled_at or now,
+                }
+            )
+            update_position(conn, closed_pos)
+            race_filled.append(closed_pos)
+        insert_order(conn, new_order)
+
+        logger.warning(
+            "reprice_stale_close_orders: position %s close repriced to %.2f "
+            "(widening %d, offset %.2f, was broker_id=%s)",
+            pos.id,
+            limit_price,
+            widenings,
+            offset,
+            order.broker_order_id,
+        )
+        repriced.append(new_order)
+
+    return repriced, race_filled
 
 
 def flatten_position(

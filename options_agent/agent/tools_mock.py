@@ -39,6 +39,7 @@ from options_agent.agent.tools import (
     JOURNAL_MAX_RECORDS,
     TOOL_GET_EVENTS,
     TOOL_GET_FILTERED_CHAIN,
+    TOOL_GET_HELD_LEG_GREEKS,
     TOOL_GET_JOURNAL_BY_SYMBOL,
     TOOL_GET_PORTFOLIO_STATE,
     TOOL_GET_POSITION_HISTORY,
@@ -305,6 +306,50 @@ _SPY_CHAIN_CONTRACTS = [
         dte=34,
         greek_source="alpaca",
     ),
+    # September quarterly expiry — matches the stub_reasoner proposal
+    # (sell 560P / buy 555P exp 2026-09-18) so the enrich+validate entry-cycle
+    # path can price and liquidity-check the stub's legs against this chain.
+    # Mids are chosen so the recomputed metrics equal the stub's stated
+    # est_max_loss=350 / est_max_profit=150 (credit = 12.00 − 10.50 = 1.50).
+    OptionContract(
+        symbol="SPY260918P00560000",
+        strike=560.0,
+        expiration=date(2026, 9, 18),
+        right="put",
+        bid=11.95,
+        ask=12.05,
+        mid=12.00,
+        volume=1800,
+        open_interest=8600,
+        # −0.60 keeps the stub structure's net delta at +0.05 so the happy
+        # path stays inside the 20%-of-equity delta band on top of the mock
+        # portfolio's existing exposure.
+        delta=-0.60,
+        theta=-0.09,
+        vega=0.52,
+        iv=0.19,
+        spread_width=0.10,
+        dte=96,
+        greek_source="alpaca",
+    ),
+    OptionContract(
+        symbol="SPY260918P00555000",
+        strike=555.0,
+        expiration=date(2026, 9, 18),
+        right="put",
+        bid=10.45,
+        ask=10.55,
+        mid=10.50,
+        volume=1500,
+        open_interest=7200,
+        delta=-0.55,
+        theta=-0.085,
+        vega=0.50,
+        iv=0.188,
+        spread_width=0.10,
+        dte=96,
+        greek_source="alpaca",
+    ),
 ]
 
 _SPY_FILTER_PARAMS = ChainFilterParams(
@@ -488,6 +533,13 @@ def _get_position_history(tool_input: dict[str, Any]) -> PositionHistory | None:
     return _MOCK_POSITION_HISTORIES.get(position_id)
 
 
+def _get_held_leg_greeks(_tool_input: dict[str, Any]) -> dict[Any, Any]:
+    # Internal assembler key: the mock chain covers all mock position legs,
+    # so no held-leg fallback data is needed — an empty dict means "no extra
+    # coverage" and aggregation falls back to the chain lookup.
+    return {}
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Exported mock tool implementation map
 # ──────────────────────────────────────────────────────────────────────────────
@@ -505,6 +557,7 @@ MOCK_TOOL_IMPLS: dict[str, ToolImpl] = {
     TOOL_GET_EVENTS: _get_events,
     TOOL_GET_JOURNAL_BY_SYMBOL: _get_journal_by_symbol,
     TOOL_GET_POSITION_HISTORY: _get_position_history,
+    TOOL_GET_HELD_LEG_GREEKS: _get_held_leg_greeks,
 }
 
 

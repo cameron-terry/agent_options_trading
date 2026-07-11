@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -44,6 +45,7 @@ from pydantic import BaseModel
 from options_agent.agent.tools import (
     TOOL_GET_EVENTS,
     TOOL_GET_FILTERED_CHAIN,
+    TOOL_GET_HELD_LEG_GREEKS,
     TOOL_GET_JOURNAL_BY_SYMBOL,
     TOOL_GET_PORTFOLIO_STATE,
     TOOL_GET_UNIVERSE_SNAPSHOT,
@@ -57,6 +59,8 @@ from options_agent.contracts.data import (
 )
 from options_agent.contracts.journal import JournalRecord
 from options_agent.contracts.state import ContextSnapshot
+
+logger = logging.getLogger(__name__)
 
 ToolImpl = Callable[[dict[str, Any]], Any]
 
@@ -194,9 +198,26 @@ def assemble_context(
         else:
             excluded[sym] = "chain_unavailable"
 
+    # ── 5b. Held-leg Greek fallback ──────────────────────────────────────────────
+    # The entry-filtered chain omits legs that have aged below min_dte (or
+    # drifted outside the delta band); without this fallback those legs would
+    # contribute 0.0 and the Greek-band gates would soften exactly when
+    # positions are oldest. The impl key is optional so older tool maps and
+    # partial test fixtures keep working (they fall back to warnings-only).
+    held_leg_greeks = None
+    held_impl = tool_impls.get(TOOL_GET_HELD_LEG_GREEKS)
+    if held_impl is not None and portfolio_raw.positions:
+        try:
+            held_leg_greeks = held_impl({"positions": portfolio_raw.positions})
+        except Exception as exc:
+            logger.warning(
+                "held-leg Greek fetch failed — %s; aged legs fall back to 0.0",
+                exc,
+            )
+
     # ── 6. Portfolio Greek aggregation ───────────────────────────────────────────
     portfolio, greek_warnings = aggregate_portfolio_greeks(
-        portfolio_raw, chains_for_greeks
+        portfolio_raw, chains_for_greeks, held_leg_greeks
     )
 
     # ── 7. Hash + bundle ─────────────────────────────────────────────────────────

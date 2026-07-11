@@ -16,7 +16,7 @@ def test_chain_filter_defaults() -> None:
     assert cf.min_open_interest == 500
     assert cf.max_spread_pct_of_mid == 0.10
     assert cf.max_spread_abs_floor == 0.05
-    assert cf.min_dte == 20
+    assert cf.min_dte == 30
     assert cf.max_dte == 45
     assert cf.min_abs_delta == 0.15
     assert cf.max_abs_delta == 0.45
@@ -67,7 +67,7 @@ def test_exit_plan_round_trip() -> None:
 
 def test_limits_defaults() -> None:
     limits = Limits()
-    assert limits.limits_version == "0.3.0"
+    assert limits.limits_version == "0.4.0"
     assert limits.max_loss_per_trade_pct == 0.01
     assert limits.max_open_positions == 5
     assert limits.max_dollar_delta_pct == 0.20

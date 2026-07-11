@@ -2,7 +2,12 @@ import math
 
 from pydantic import ValidationError
 
-from options_agent.contracts.data import FilteredChain, PortfolioState, SymbolSnapshot
+from options_agent.contracts.data import (
+    EventInfo,
+    FilteredChain,
+    PortfolioState,
+    SymbolSnapshot,
+)
 from options_agent.contracts.proposal import ExitPlan, Leg, TradeProposal
 from options_agent.contracts.results import (
     RejectionReason,
@@ -24,8 +29,6 @@ from options_agent.risk.limits import Limits
 _STRATEGY_DELTA_SIGN: dict[str, int] = {
     "bull_put_spread": 1,
     "bull_call_spread": 1,
-    "cash_secured_put": 1,
-    "covered_call": 1,
     "bear_call_spread": -1,
     "bear_put_spread": -1,
     "iron_condor": 0,
@@ -99,6 +102,7 @@ def validate_market_access(
     portfolio: PortfolioState,
     kill_switch_state: KillSwitchState,
     filtered_chain: FilteredChain | None,
+    event_info: EventInfo | None = None,
 ) -> list[RejectionReason]:
     """Run market-access checks on an already structurally-valid TradeProposal.
 
@@ -114,6 +118,11 @@ def validate_market_access(
     filtered_chain:
         FilteredChain for proposal.underlying. Pass None if unavailable;
         all liquidity checks will fail closed with LIQUIDITY_SPREAD.
+    event_info:
+        EventInfo for proposal.underlying (from the same fetch that populated
+        symbol_snapshot.days_to_earnings). None or data_available=False fails
+        closed with EVENT_DATA_MISSING; earnings=None with data_available=True
+        passes — the normal, permanent state for ETFs.
     """
     # 1. Kill-switch — short-circuit if halted; no new entries permitted.
     if kill_switch_state in (KillSwitchState.HALT, KillSwitchState.FLATTEN):
@@ -137,7 +146,9 @@ def validate_market_access(
     reasons.extend(_check_exit_plan_bounds(proposal.exit_plan, limits))
 
     # 4. Event proximity blackout.
-    event_reason = _check_event_gate(proposal.underlying, limits, symbol_snapshot)
+    event_reason = _check_event_gate(
+        proposal.underlying, limits, symbol_snapshot, event_info
+    )
     if event_reason is not None:
         reasons.append(event_reason)
 
@@ -584,13 +595,22 @@ def _check_event_gate(
     underlying: str,
     limits: Limits,
     symbol_snapshot: SymbolSnapshot | None,
+    event_info: EventInfo | None,
 ) -> RejectionReason | None:
     """Reject if earnings are within the blackout window; fail closed on missing data.
 
-    None days_to_earnings means the earnings date is unknown — that is NOT the
-    same as 'no earnings coming'. Missing event data must block trading because
-    an unknown earnings situation is exactly the IV-crush failure mode the
-    catalyst_check machinery exists to prevent.
+    "No earnings found" and "earnings unknown" are different states and must
+    be treated differently (Limits docstring: the null case must pass):
+
+      event_info None or data_available=False → the provider failed; an
+        unknown earnings situation is exactly the IV-crush failure mode this
+        gate exists to prevent — fail closed (EVENT_DATA_MISSING).
+      earnings=None with data_available=True → the provider succeeded and
+        found no earnings in the lookahead window. This is the permanent,
+        normal state for ETFs (SPY/QQQ/IWM) — pass.
+      earnings present → enforce the blackout window via
+        symbol_snapshot.days_to_earnings (derived from the same fetch); a
+        missing derivation is an internal inconsistency — fail closed.
     """
     if symbol_snapshot is None:
         return RejectionReason(
@@ -603,13 +623,30 @@ def _check_event_gate(
             field_affected="underlying",
         )
 
-    if symbol_snapshot.days_to_earnings is None:
+    if event_info is None or not event_info.data_available:
         return RejectionReason(
             rule_id=ValidationRuleId.EVENT_DATA_MISSING,
             severity=Severity.ERROR,
             human_message=(
-                f"earnings date unknown for {underlying};"
-                " cannot verify proximity — failing closed"
+                f"event data unavailable for {underlying};"
+                " cannot verify earnings proximity — failing closed"
+            ),
+            field_affected="underlying",
+        )
+
+    if event_info.earnings is None:
+        # Provider succeeded, no earnings within the lookahead window.
+        return None
+
+    if symbol_snapshot.days_to_earnings is None:
+        # Earnings exist but the snapshot derivation is missing — internal
+        # inconsistency between EventInfo and SymbolSnapshot; fail closed.
+        return RejectionReason(
+            rule_id=ValidationRuleId.EVENT_DATA_MISSING,
+            severity=Severity.ERROR,
+            human_message=(
+                f"earnings exist for {underlying} but days_to_earnings is"
+                " unset; snapshot/event derivation inconsistent — failing closed"
             ),
             field_affected="underlying",
         )
