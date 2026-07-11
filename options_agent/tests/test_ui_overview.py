@@ -15,10 +15,12 @@ from options_agent.contracts.journal import (
 )
 from options_agent.contracts.proposal import ExitPlan, Leg, TradeProposal
 from options_agent.contracts.state import (
+    EQUITY_NEVER_EXPIRES,
     ActionTaken,
     AssetClass,
     ContextSnapshot,
     Decision,
+    EquityLeg,
     KillSwitchState,
     LegStatus,
     Position,
@@ -31,7 +33,13 @@ from options_agent.state.crud import insert_position
 from options_agent.state.db import build_engine, get_connection, metadata
 from options_agent.state.journal import write_journal_record, write_outcome_record
 from options_agent.ui.app import create_app
-from options_agent.ui.overview import distance_to_trigger, get_activity, get_tiles
+from options_agent.ui.overview import (
+    distance_to_trigger,
+    get_activity,
+    get_equity_curve,
+    get_positions,
+    get_tiles,
+)
 
 _NOW = datetime(2026, 6, 19, 14, 0, 0, tzinfo=UTC)
 _EXIT_PLAN = ExitPlan(
@@ -52,6 +60,7 @@ def _make_position(
     status: PositionStatus = PositionStatus.OPEN,
     nearest_expiration: date = date(2026, 8, 15),
     legs: list[PositionLeg] | None = None,
+    equity_legs: list[EquityLeg] | None = None,
 ) -> Position:
     if legs is None:
         legs = [
@@ -92,6 +101,7 @@ def _make_position(
         est_max_profit=est_max_profit,
         opening_order_id="open-ord-001",
         asset_class=asset_class,
+        equity_legs=equity_legs or [],
     )
 
 
@@ -323,6 +333,62 @@ def test_strikes_summary_integer_strikes_render_without_decimal() -> None:
     assert _strikes_summary(pos) == "205/200.5"
 
 
+def test_strikes_summary_equity_position_reflects_assigned_shares() -> None:
+    """Post-assignment EQUITY positions have empty legs — the strike detail
+    must come from equity_legs instead, not render blank (regression: the
+    original implementation read only pos.legs, silently producing "" for
+    any EQUITY row)."""
+    from options_agent.ui.overview import _strikes_summary
+
+    pos = _make_position(
+        strategy="assigned_equity",
+        asset_class=AssetClass.EQUITY,
+        exit_plan=None,
+        legs=[],
+        equity_legs=[EquityLeg(symbol="SPY", qty=100, avg_price=205.0)],
+        nearest_expiration=EQUITY_NEVER_EXPIRES,
+    )
+    assert _strikes_summary(pos) == "+100 sh @ 205.00"
+
+
+def test_strikes_summary_equity_position_short_shares() -> None:
+    from options_agent.ui.overview import _strikes_summary
+
+    pos = _make_position(
+        strategy="assigned_equity",
+        asset_class=AssetClass.EQUITY,
+        exit_plan=None,
+        legs=[],
+        equity_legs=[EquityLeg(symbol="SPY", qty=-100, avg_price=530.0)],
+        nearest_expiration=EQUITY_NEVER_EXPIRES,
+    )
+    assert _strikes_summary(pos) == "-100 sh @ 530.00"
+
+
+def test_get_positions_renders_equity_position_with_no_dte_or_meter(engine) -> None:
+    """End-to-end: an assigned EQUITY position must render with strikes
+    reflecting the assignment, dte=None (no expiration applies), and no
+    distance-to-trigger meter (no exit_plan) — exercising the same guards
+    _position_dte and distance_to_trigger already had, that _strikes_summary
+    was missing."""
+    pos = _make_position(
+        strategy="assigned_equity",
+        asset_class=AssetClass.EQUITY,
+        exit_plan=None,
+        legs=[],
+        equity_legs=[EquityLeg(symbol="SPY", qty=100, avg_price=205.0)],
+        nearest_expiration=EQUITY_NEVER_EXPIRES,
+    )
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        summaries = get_positions(conn, now=_NOW)
+
+    assert len(summaries) == 1
+    assert summaries[0].strikes == "+100 sh @ 205.00"
+    assert summaries[0].dte is None
+    assert summaries[0].distance_to_trigger is None
+
+
 # ---------------------------------------------------------------------------
 # get_tiles
 # ---------------------------------------------------------------------------
@@ -474,6 +540,98 @@ def test_activity_rejected_headline_includes_rule_ids(engine) -> None:
 
     assert "AAPL" in items[0].headline
     assert "EVENT_BLACKOUT" in items[0].headline
+
+
+# ---------------------------------------------------------------------------
+# get_equity_curve
+# ---------------------------------------------------------------------------
+
+
+def _insert_closed_position(conn, position_id: str) -> None:
+    pos = _make_position(status=PositionStatus.CLOSED).model_copy(
+        update={"id": position_id}
+    )
+    insert_position(conn, pos)
+
+
+def test_equity_curve_empty_without_outcomes(engine) -> None:
+    with get_connection(engine) as conn:
+        curve = get_equity_curve(conn)
+
+    assert curve == []
+
+
+def test_equity_curve_cumulative_sum_ascending_by_recorded_at(engine) -> None:
+    with get_connection(engine) as conn:
+        _insert_closed_position(conn, "pos-001")
+        # Written out of chronological order — get_equity_curve must sort by
+        # recorded_at, not insertion order (query_outcome_records already
+        # guarantees this, but the curve's running sum depends on it).
+        write_outcome_record(
+            conn,
+            _make_outcome_record(
+                id="o2", recorded_at=_NOW.replace(hour=15), realized_pnl=50.0
+            ),
+        )
+        write_outcome_record(
+            conn,
+            _make_outcome_record(
+                id="o1", recorded_at=_NOW.replace(hour=10), realized_pnl=100.0
+            ),
+        )
+        curve = get_equity_curve(conn)
+
+    assert [p.cumulative_realized_pnl for p in curve] == [100.0, 150.0]
+    assert curve[0].timestamp < curve[1].timestamp
+
+
+def test_equity_curve_equity_is_none_without_account_equity_reading(engine) -> None:
+    """No JournalRecord exists yet — cumulative_realized_pnl is always
+    computable from outcomes alone, but the dollar-anchored `equity` field
+    has no baseline to anchor to and must be None, not a guessed value."""
+    with get_connection(engine) as conn:
+        _insert_closed_position(conn, "pos-001")
+        write_outcome_record(conn, _make_outcome_record(realized_pnl=100.0))
+        curve = get_equity_curve(conn)
+
+    assert len(curve) == 1
+    assert curve[0].cumulative_realized_pnl == 100.0
+    assert curve[0].equity is None
+
+
+def test_equity_curve_anchored_to_latest_account_equity(engine) -> None:
+    """equity must be offset so the *last* point equals the current
+    account-equity tile exactly: offset = latest_equity - total_realized."""
+    with get_connection(engine) as conn:
+        _insert_closed_position(conn, "pos-001")
+        _insert_closed_position(conn, "pos-002")
+        write_outcome_record(
+            conn,
+            _make_outcome_record(
+                id="o1",
+                position_id="pos-001",
+                recorded_at=_NOW.replace(hour=10),
+                realized_pnl=100.0,
+            ),
+        )
+        write_outcome_record(
+            conn,
+            _make_outcome_record(
+                id="o2",
+                position_id="pos-002",
+                recorded_at=_NOW.replace(hour=15),
+                realized_pnl=50.0,
+            ),
+        )
+        write_journal_record(
+            conn,
+            _make_journal_record(cycle_id="c1", timestamp=_NOW, account_equity=51305.0),
+        )
+        curve = get_equity_curve(conn)
+
+    # total_realized = 150.0; offset = 51305.0 - 150.0 = 51155.0
+    assert curve[0].equity == pytest.approx(51255.0)  # 51155 + 100
+    assert curve[1].equity == pytest.approx(51305.0)  # 51155 + 150 == latest_equity
 
 
 # ---------------------------------------------------------------------------

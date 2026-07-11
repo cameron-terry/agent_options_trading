@@ -170,7 +170,16 @@ def _strikes_summary(pos: Position) -> str:
     are joined in the order they first appear, matching the put-then-call
     convention the design reference uses. A single-leg position (e.g. a cash-
     secured put) renders as just its strike.
+
+    EQUITY positions (post-assignment shares, strategy="assigned_equity") have
+    empty pos.legs — the assignment detail lives in pos.equity_legs instead.
+    Mirrors that case as "<signed qty> sh @ <avg_price>" rather than falling
+    through to an empty string.
     """
+    if pos.asset_class != AssetClass.OPTION_STRATEGY:
+        return " · ".join(
+            f"{el.qty:+d} sh @ {el.avg_price:.2f}" for el in pos.equity_legs
+        )
     groups: dict[str, list[str]] = {}
     for pos_leg in pos.legs:
         strike = pos_leg.leg.strike
@@ -230,6 +239,10 @@ def get_tiles(conn: Connection, *, now: datetime) -> Tiles:
     open_positions = list_open_positions(conn)
     unrealized_total = sum(p.unrealized_pnl for p in open_positions)
 
+    # UTC midnight, not exchange-local midnight — benign today because US
+    # market hours (13:30-21:00 UTC) never straddle a UTC day boundary, but
+    # would need ET-based boundaries (see monitor/exits.py's _MARKET_TZ) if
+    # a future WP adds off-hours cycles.
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_records = query_journal(conn, date_from=today_start, date_to=now)
     by_action: dict[str, int] = {}
