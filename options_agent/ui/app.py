@@ -1,0 +1,65 @@
+"""FastAPI app factory — WP-9.1 skeleton.
+
+Ships /api/health and static SPA serving only; data endpoints (/api/overview,
+/api/cycles, etc.) land in later WP-9 cards. The engine passed to create_app
+must be read-only (see state.db.build_engine(url, read_only=True)) — this
+module does not itself enforce that, it trusts its caller.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+
+import sqlalchemy as sa
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy.engine import Engine
+
+from options_agent.config import Config
+from options_agent.state.db import build_engine
+
+logger = logging.getLogger(__name__)
+
+STATIC_DIR = Path(__file__).parent / "static"
+
+
+def create_app(
+    *, config: Config | None = None, engine: Engine | None = None
+) -> FastAPI:
+    """Build the console FastAPI app.
+
+    engine is injectable for tests; production callers (__main__.py) pass a
+    loaded Config and let this factory build the read-only engine from
+    DB_URL/config.db_url.
+    """
+    if engine is None:
+        config = config or Config()
+        db_url = os.environ.get("DB_URL", config.db_url)
+        engine = build_engine(db_url, read_only=True)
+
+    app = FastAPI(title="Options Agent Console")
+    app.state.engine = engine
+
+    @app.get("/api/health")
+    def health() -> JSONResponse:
+        # Query alembic's own bookkeeping table rather than a bare `SELECT 1`
+        # — a constant expression touches no table and reports healthy even
+        # against a completely unmigrated, zero-table DB. alembic_version is
+        # written by the migration framework itself, so its presence doesn't
+        # couple this check to any particular application table (WP-9.2+ can
+        # add/remove tables without touching this).
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text("SELECT version_num FROM alembic_version"))
+        except Exception:
+            logger.exception("Health check query failed")
+            return JSONResponse({"status": "error"}, status_code=503)
+        return JSONResponse({"status": "ok"})
+
+    if STATIC_DIR.exists():
+        app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="spa")
+
+    return app

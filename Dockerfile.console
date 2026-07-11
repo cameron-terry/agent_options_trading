@@ -1,0 +1,30 @@
+FROM node:22-slim AS frontend-build
+
+WORKDIR /app/frontend
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+
+# Install dependencies first so this layer is cached across source changes.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+COPY options_agent ./options_agent
+COPY README.md ./
+
+RUN uv sync --frozen --no-dev
+
+COPY --from=frontend-build /app/frontend/dist ./options_agent/ui/static
+
+ENV PATH="/app/.venv/bin:$PATH"
+
+CMD ["python", "-m", "options_agent.ui", "--host", "0.0.0.0", "--port", "8000"]

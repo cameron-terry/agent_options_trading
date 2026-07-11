@@ -65,6 +65,17 @@ docker compose logs -f options-agent
 Migrations (`alembic upgrade head`) run automatically on container start via
 `docker-entrypoint.sh` before the scheduler launches.
 
+### Ops console
+
+A read-only web console runs beside the scheduler — no broker credentials in its
+environment, one write path (the kill switch, WP-9.7+). See
+[docs/features/ops-console.md](docs/features/ops-console.md) for details.
+
+```bash
+docker compose up -d --build console
+curl http://127.0.0.1:8000/api/health
+```
+
 ## Lint / type-check
 
 ```bash
@@ -88,3 +99,4 @@ uv run pyright
 | Orchestration & scheduling | `options_agent/orchestrator.py`, `options_agent/scheduler.py` | No (needs Alpaca keys) — [docs](docs/features/orchestrator.md) |
 | Monitor — exit rules | `options_agent/monitor/` | Yes — [docs](docs/features/monitor.md) |
 | Vertical slice | `options_agent/orchestrator.py` | No (needs Alpaca keys) — [docs](docs/features/vertical-slice.md) |
+| Ops console | `options_agent/ui/`, `frontend/` | Yes (SQLite) — [docs](docs/features/ops-console.md) |

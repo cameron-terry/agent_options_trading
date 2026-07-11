@@ -23,6 +23,8 @@ dependencies = [
     "lxml>=5.0",
     "rich>=13.0",
     "apscheduler>=3.10,<4.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
 ]
 
 [dependency-groups]
