@@ -34,9 +34,11 @@ Market-hours enforcement:
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import threading
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import exchange_calendars as xcals
 import pandas as pd
@@ -61,6 +63,25 @@ from options_agent.state.db import build_engine, get_connection
 logger = logging.getLogger(__name__)
 
 _SKIP_WARN_THRESHOLD = 3
+
+
+def _touch_heartbeat() -> None:
+    """Touch the liveness heartbeat file, if configured.
+
+    The Docker HEALTHCHECK watches this file's mtime: a scheduler thread that
+    dies (or wedges) stops touching it and the container goes unhealthy
+    instead of sitting "Up" forever. Touched from the monitor runner — the
+    highest-frequency job — regardless of market state, because it proves the
+    scheduler is alive, not that the market is open. No-op when
+    HEARTBEAT_FILE is unset (non-container runs).
+    """
+    path = os.environ.get("HEARTBEAT_FILE")
+    if not path:
+        return
+    try:
+        Path(path).touch()
+    except OSError as exc:
+        logger.warning("CycleScheduler: heartbeat touch failed — %s", exc)
 
 
 def _dispatch_safe(dispatcher: AlertDispatcher | None, event: AlertEvent) -> None:
@@ -225,6 +246,7 @@ class CycleScheduler:
     # ── Cycle runners ────────────────────────────────────────────────────────
 
     def _run_monitor(self) -> None:
+        _touch_heartbeat()
         if not self._monitor_lock.acquire(blocking=False):
             self._monitor_skip_count += 1
             logger.warning(

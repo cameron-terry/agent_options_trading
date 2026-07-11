@@ -915,8 +915,9 @@ def test_to_context_snapshot_round_trip_hash() -> None:
     )
     snapshot = to_context_snapshot(bundle)
 
-    # The context_hash is over portfolio/universe/events/journal/excluded/model_id/
-    # prompt_version (NOT limits_version or assembled_at — see _compute_context_hash).
+    # The context_hash is over portfolio/universe/events/journal/outcome_stats/
+    # excluded/model_id/prompt_version (NOT limits_version or assembled_at —
+    # see _compute_context_hash).
     payload = {
         "portfolio": bundle.portfolio.model_dump(mode="json"),
         "universe": bundle.universe.model_dump(mode="json"),
@@ -926,6 +927,9 @@ def test_to_context_snapshot_round_trip_hash() -> None:
         "journal": {
             sym: [r.model_dump(mode="json") for r in records]
             for sym, records in bundle.journal.items()
+        },
+        "outcome_stats": {
+            sym: st.model_dump(mode="json") for sym, st in bundle.outcome_stats.items()
         },
         "excluded": bundle.excluded,
         "model_id": bundle.model_id,

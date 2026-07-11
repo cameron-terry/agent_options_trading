@@ -20,16 +20,23 @@ import logging
 import os
 import random
 import time
-from datetime import date
-from typing import Any, Literal
+from datetime import UTC, date, datetime, timedelta
+from typing import Any, Literal, cast
 
 from alpaca.common.exceptions import APIError
+from alpaca.data.enums import Adjustment
 from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.models.snapshots import OptionsSnapshot
-from alpaca.data.requests import OptionChainRequest, StockLatestBarRequest
+from alpaca.data.requests import (
+    OptionChainRequest,
+    StockBarsRequest,
+    StockLatestBarRequest,
+)
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from options_agent.data.providers import (
+    DailyBar,
     DataAuthError,
     DataUnavailableError,
     RawOptionContract,
@@ -182,6 +189,49 @@ class AlpacaDataClient:
         price = float(raw[symbol].close)
         self._cache[cache_key] = price
         return price
+
+    def fetch_daily_bars(self, symbol: str, lookback_days: int = 380) -> list[DailyBar]:
+        """Return split-adjusted daily bars for *symbol*, oldest first.
+
+        380 calendar days of lookback yields ~252 trading sessions — enough
+        for 52-week range and 50-day SMA computation with headroom for
+        holidays. Cached within the cycle like all other fetches.
+        """
+        cache_key = ("fetch_daily_bars", symbol, lookback_days)
+        if cache_key in self._cache:
+            return self._cache[cache_key]  # type: ignore[return-value]
+
+        start = datetime.now(UTC) - timedelta(days=lookback_days)
+
+        def _call() -> Any:
+            return self._stock_client.get_stock_bars(
+                StockBarsRequest(
+                    symbol_or_symbols=symbol,
+                    # Constructed explicitly — TimeFrame.Day is a classproperty
+                    # that pyright cannot type through (and TimeFrameUnit
+                    # members type as plain str in alpaca-py's stubs).
+                    timeframe=TimeFrame(1, cast(TimeFrameUnit, TimeFrameUnit.Day)),
+                    start=start,
+                    adjustment=Adjustment.SPLIT,
+                )
+            )
+
+        raw = self._with_retry(_call, "fetch_daily_bars", symbol)
+        bars = raw[symbol] if symbol in raw.data else []
+        result = [
+            DailyBar(
+                day=bar.timestamp.date(),
+                open=float(bar.open),
+                high=float(bar.high),
+                low=float(bar.low),
+                close=float(bar.close),
+                volume=float(bar.volume) if bar.volume is not None else None,
+            )
+            for bar in bars
+        ]
+        result.sort(key=lambda b: b.day)
+        self._cache[cache_key] = result
+        return result
 
     def _with_retry(
         self,

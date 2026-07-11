@@ -905,8 +905,7 @@ def run_entry_cycle(
                     rule_id=ValidationRuleId.LIQUIDITY_SPREAD,
                     severity=Severity.ERROR,
                     human_message=(
-                        "chain quotes unavailable for execution pricing;"
-                        " failing closed"
+                        "chain quotes unavailable for execution pricing; failing closed"
                     ),
                 )
             ],
@@ -1377,7 +1376,9 @@ def run_monitor_cycle(
     _calendar = xcals.get_calendar(config.exchange_calendar)
     _market_open, _market_reason = market_is_open(now, _calendar)
     if not _market_open:
-        logger.info("run_monitor_cycle: SKIP (market closed) — %s", _market_reason)
+        # DEBUG, not INFO: this fires every monitor interval all night and
+        # weekend — thousands of no-op lines per week at INFO.
+        logger.debug("run_monitor_cycle: SKIP (market closed) — %s", _market_reason)
         return MonitorResult(
             positions_evaluated=0,
             exits_triggered=[],

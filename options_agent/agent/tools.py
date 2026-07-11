@@ -10,13 +10,14 @@ Architecture (DI pattern):
     at call time. Mocks live in agent/tools_mock.py (development/test only).
     See tools_mock.py module docstring for the production guard.
 
-Tool surface (6 read-only tools):
+Tool surface (7 read-only tools):
     get_portfolio_state      — full account + position snapshot
     get_universe_snapshot    — per-symbol market state for the configured universe
     get_filtered_chain       — pre-filtered options chain for one underlying
     get_events               — per-symbol earnings and ex-dividend events (batch)
     get_journal_by_symbol    — recent journal records for one underlying
     get_position_history     — full lifecycle of one specific position
+    get_price_history        — daily-bar trend summary for one underlying
 """
 
 from anthropic.types import ToolParam
@@ -35,6 +36,7 @@ TOOL_GET_FILTERED_CHAIN = "get_filtered_chain"
 TOOL_GET_EVENTS = "get_events"
 TOOL_GET_JOURNAL_BY_SYMBOL = "get_journal_by_symbol"
 TOOL_GET_POSITION_HISTORY = "get_position_history"
+TOOL_GET_PRICE_HISTORY = "get_price_history"
 
 # Internal (assembler-only) impl keys — NOT part of AGENT_TOOLS; the LLM never
 # sees these. They ride in the same tool_impls map so the DI pattern stays
@@ -43,6 +45,10 @@ TOOL_GET_POSITION_HISTORY = "get_position_history"
 # have aged outside the entry chain filter still contribute to net portfolio
 # Greeks instead of silently counting as 0.0.
 TOOL_GET_HELD_LEG_GREEKS = "get_held_leg_greeks"
+# get_outcome_stats: per-symbol realized track record (win rate, P&L by
+# strategy) pre-loaded into the context bundle so past results inform new
+# proposals.
+TOOL_GET_OUTCOME_STATS = "get_outcome_stats"
 
 # Maximum number of JournalRecords returned by get_journal_by_symbol.
 # WP-2 (state/journal.py query_journal) must enforce the same limit so the
@@ -257,6 +263,35 @@ _DESC_GET_POSITION_HISTORY = (
     " get_portfolio_state — each open position has an 'id' field."
 )
 
+_DESC_GET_PRICE_HISTORY = (
+    "Return a compact trend summary computed from ~1 year of split-adjusted"
+    " daily bars for one underlying: current price vs 20/50-day SMAs,"
+    " position within the 52-week range, ATR-14 (absolute and as % of"
+    " price), trailing 5/21/63-session returns, and the last 10 closes."
+    "\n\n"
+    "USE THIS BEFORE FORMING A DIRECTIONAL THESIS. The universe snapshot"
+    " carries only a spot price and IV metrics — it says nothing about"
+    " trend. Choosing between bullish structures (bull_put_spread /"
+    " bull_call_spread) and bearish ones (bear_call_spread /"
+    " bear_put_spread), or judging whether a neutral structure"
+    " (iron_condor / iron_butterfly) has room, requires this data.\n"
+    "\n"
+    "FIELD SEMANTICS:\n"
+    "  price_vs_sma_20_pct / price_vs_sma_50_pct — percent above (+) or"
+    " below (-) the moving average; both positive with 20 > 50 suggests"
+    " an uptrend, both negative a downtrend.\n"
+    "  pct_from_52w_high — always ≤ 0; near 0 means at the highs (little"
+    " overhead resistance), strongly negative means deep in the range.\n"
+    "  atr_14_pct — realized daily range as % of price; compare against"
+    " the distance to your proposed short strikes (a strike 2 ATRs away"
+    " is much safer than one 0.5 ATRs away).\n"
+    "  return_5d/21d/63d_pct — null when history is shorter than the"
+    " window; bars_available reports how many sessions backed the summary.\n"
+    "  A null result for the whole tool means no price history is"
+    " available — do not fabricate a trend view from the spot price alone."
+)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Tool definitions
 # ──────────────────────────────────────────────────────────────────────────────
@@ -355,6 +390,23 @@ GET_JOURNAL_BY_SYMBOL: ToolParam = {
     },
 }
 
+GET_PRICE_HISTORY: ToolParam = {
+    "name": TOOL_GET_PRICE_HISTORY,
+    "description": _DESC_GET_PRICE_HISTORY,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "symbol": {
+                "type": "string",
+                "description": (
+                    "Underlying ticker symbol to summarize (e.g. 'SPY', 'AAPL')."
+                ),
+            },
+        },
+        "required": ["symbol"],
+    },
+}
+
 GET_POSITION_HISTORY: ToolParam = {
     "name": TOOL_GET_POSITION_HISTORY,
     "description": _DESC_GET_POSITION_HISTORY,
@@ -389,6 +441,7 @@ AGENT_TOOLS: list[ToolParam] = [
     GET_EVENTS,
     GET_JOURNAL_BY_SYMBOL,
     GET_POSITION_HISTORY,
+    GET_PRICE_HISTORY,
 ]
 
 # Frozen set of all tool names — used by tests and by reasoner.py to validate

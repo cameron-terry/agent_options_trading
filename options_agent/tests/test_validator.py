@@ -35,9 +35,9 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from options_agent.contracts.data import (
+    ChainFilterParams,
     EarningsEvent,
     EventInfo,
-    ChainFilterParams,
     FilteredChain,
     OptionContract,
     PortfolioState,

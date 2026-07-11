@@ -28,6 +28,11 @@ def _setup_logging() -> None:
         level=getattr(logging, level, logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s — %(message)s",
     )
+    # APScheduler logs three INFO lines per job firing — with the 2-minute
+    # monitor interval that is thousands of no-op lines per day. Keep them
+    # only when explicitly debugging.
+    if level != "DEBUG":
+        logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 
 def main() -> None:
