@@ -274,10 +274,20 @@ def build_engine(url: str, *, read_only: bool = False) -> Engine:
     SQLite connections get check_same_thread=False so the engine can be shared
     across the main thread and any background tasks (e.g. AlertDispatcher's
     worker thread), and foreign_keys=ON so FK constraints are enforced
-    (matching Postgres behaviour). File-based SQLite connections also get
-    journal_mode=WAL so a writer (the scheduler) doesn't block a reader (the
-    WP-9 console) — setting it is idempotent and persists in the DB file, so
-    it only needs to happen on some connection, not specifically the first.
+    (matching Postgres behaviour). Writable, file-based SQLite connections
+    also get journal_mode=WAL so a writer (the scheduler) doesn't block a
+    reader (the WP-9 console) — setting it is idempotent and persists in the
+    DB file, so it only needs to happen on some writable connection, not
+    specifically the first: the scheduler's own build_engine(db_url) call
+    (read_only=False) runs on every startup, ahead of the console.
+
+    read_only=True engines never issue journal_mode=WAL (or any other pragma
+    that changes the file) — only PRAGMA query_only, so this engine performs
+    no write of its own. Note this is not an absolute read-only guarantee:
+    opening a *brand new* SQLite file still creates it on connect regardless
+    of query_only (a SQLite driver behaviour, not a statement we issue) — in
+    practice this never happens because the writable/scheduler engine always
+    creates the file first.
 
     :memory: URLs additionally use StaticPool so that all engine.connect()
     calls share the same DBAPI connection. Without StaticPool, each new
@@ -301,10 +311,10 @@ def build_engine(url: str, *, read_only: bool = False) -> Engine:
         def _set_sqlite_pragma(dbapi_conn, _record):  # type: ignore[misc]
             cursor = dbapi_conn.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
-            if ":memory:" not in url:
-                cursor.execute("PRAGMA journal_mode=WAL")
             if read_only:
                 cursor.execute("PRAGMA query_only=ON")
+            elif ":memory:" not in url:
+                cursor.execute("PRAGMA journal_mode=WAL")
             cursor.close()
 
         return engine

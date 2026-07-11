@@ -26,7 +26,7 @@ A read-only web console over the trading journal, served by a FastAPI service th
 
 A write attempted through a `read_only=True` engine raises `sqlalchemy.exc.DBAPIError` for both backends (both DDL and DML).
 
-File-based SQLite connections (from *either* engine — this is a DB-wide setting, not a per-engine one) also get `PRAGMA journal_mode=WAL`, so the scheduler's writes don't block the console's reads. `:memory:` URLs skip WAL (unsupported by SQLite for in-memory databases) but still honor `read_only`.
+Writable, file-based SQLite connections also get `PRAGMA journal_mode=WAL`, so the scheduler's writes don't block the console's reads — this is a DB-wide, idempotent setting, so it only needs to happen on *some* writable connection, not specifically the first. `read_only=True` engines deliberately never issue this pragma (or any other file-modifying statement) so they perform no write of their own — an earlier version ran `journal_mode=WAL` unconditionally before `query_only`, so a read-only engine connecting first to a brand-new file would flip it to WAL before read-only was ever applied. (This isn't an absolute read-only guarantee: SQLite creates a brand-new file on connect regardless of `query_only` — a driver behaviour, not a statement this code issues. In practice this never happens because the writable/scheduler engine always creates the file first.) `:memory:` URLs skip WAL (unsupported by SQLite for in-memory databases) but still honor `read_only`.
 
 ```python
 from options_agent.state.db import build_engine
@@ -48,7 +48,7 @@ app = create_app(config=Config.from_toml("config.toml"))
 app = create_app(engine=my_test_engine)
 ```
 
-`GET /api/health` runs a real `SELECT 1` against the engine (not just a connection open) — a mid-migration or unreachable DB surfaces as a `503 {"status": "error"}` at request time instead of silently serving broken data from later endpoints.
+`GET /api/health` queries the `alembic_version` table (not a bare `SELECT 1`, which is a constant expression that touches no table and would report healthy against a completely unmigrated, zero-table DB) — an unmigrated or unreachable DB surfaces as a `503 {"status": "error"}` at request time instead of silently serving broken data from later endpoints. Querying `alembic_version` rather than a specific application table keeps the check decoupled from WP-9.2+ schema changes.
 
 If `options_agent/ui/static/` exists (populated by the Docker build), the app mounts it at `/` via `StaticFiles(html=True)` so the SPA's `index.html` serves client-side routes. In source form (no build run), `/` 404s — the skeleton doesn't crash without a built frontend.
 

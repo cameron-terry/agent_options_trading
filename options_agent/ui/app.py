@@ -45,12 +45,15 @@ def create_app(
 
     @app.get("/api/health")
     def health() -> JSONResponse:
-        # A real query, not just a connect attempt — surfaces a mid-migration
-        # or otherwise unreachable DB at request time rather than serving
-        # broken data from later endpoints.
+        # Query alembic's own bookkeeping table rather than a bare `SELECT 1`
+        # — a constant expression touches no table and reports healthy even
+        # against a completely unmigrated, zero-table DB. alembic_version is
+        # written by the migration framework itself, so its presence doesn't
+        # couple this check to any particular application table (WP-9.2+ can
+        # add/remove tables without touching this).
         try:
             with engine.connect() as conn:
-                conn.execute(sa.text("SELECT 1"))
+                conn.execute(sa.text("SELECT version_num FROM alembic_version"))
         except Exception:
             logger.exception("Health check query failed")
             return JSONResponse({"status": "error"}, status_code=503)

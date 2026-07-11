@@ -72,6 +72,23 @@ def test_sqlite_file_backed_engine_enables_wal(tmp_path):
     engine.dispose()
 
 
+def test_sqlite_read_only_engine_never_enables_wal_even_as_first_connection(
+    tmp_path,
+):
+    # A read-only engine must issue no write of its own. Prior bug: the WAL
+    # pragma ran unconditionally before the query_only pragma, so a
+    # read_only=True engine connecting first to a brand-new file would flip
+    # it to WAL mode — a write — before read-only was ever applied.
+    url = f"sqlite:///{tmp_path / 'first_conn_ro.db'}"
+
+    engine = build_engine(url, read_only=True)
+    with engine.connect() as conn:
+        mode = conn.exec_driver_sql("PRAGMA journal_mode").scalar()
+
+    assert mode != "wal"
+    engine.dispose()
+
+
 def test_sqlite_memory_engine_does_not_enable_wal():
     # WAL mode is unsupported for :memory: databases; build_engine must skip
     # the pragma there rather than issuing a pointless/confusing statement.

@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+import sqlalchemy as sa
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import DBAPIError
 
@@ -12,14 +13,20 @@ from options_agent.state.db import build_engine, metadata
 from options_agent.ui.app import create_app
 
 
-def _memory_engine():
+def _migrated_engine():
+    """A schema-complete engine, including the alembic_version bookkeeping
+    table health() checks for — metadata.create_all() alone (SQLAlchemy DDL
+    from the Table objects) does not create it; only alembic itself does."""
     engine = build_engine("sqlite:///:memory:")
     metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR(32))"))
+        conn.execute(sa.text("INSERT INTO alembic_version VALUES ('test-head')"))
     return engine
 
 
 def test_health_ok_when_db_reachable():
-    app = create_app(engine=_memory_engine())
+    app = create_app(engine=_migrated_engine())
     client = TestClient(app)
 
     resp = client.get("/api/health")
@@ -41,10 +48,26 @@ def test_health_error_when_db_unreachable():
     assert resp.json() == {"status": "error"}
 
 
+def test_health_error_when_db_has_no_schema():
+    # A reachable DB that has never been migrated (or crashed mid-migration
+    # before alembic_version was written): SELECT 1 would report this as
+    # healthy since it touches no table. health() must not.
+    engine = build_engine("sqlite:///:memory:")
+    metadata.create_all(engine)  # app tables exist; alembic_version does not
+
+    app = create_app(engine=engine)
+    client = TestClient(app)
+
+    resp = client.get("/api/health")
+
+    assert resp.status_code == 503
+    assert resp.json() == {"status": "error"}
+
+
 def test_root_returns_404_when_spa_not_built():
     # No options_agent/ui/static/ in the source tree — it's produced by the
     # Docker multi-stage build. The skeleton must not crash without it.
-    app = create_app(engine=_memory_engine())
+    app = create_app(engine=_migrated_engine())
     client = TestClient(app)
 
     resp = client.get("/")
@@ -57,7 +80,7 @@ def test_root_serves_built_spa(monkeypatch, tmp_path):
     index.write_text("<html><body>console shell</body></html>")
     monkeypatch.setattr("options_agent.ui.app.STATIC_DIR", tmp_path)
 
-    app = create_app(engine=_memory_engine())
+    app = create_app(engine=_migrated_engine())
     client = TestClient(app)
 
     resp = client.get("/")
