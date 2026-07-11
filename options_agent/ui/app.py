@@ -1,16 +1,19 @@
-"""FastAPI app factory — WP-9.1 skeleton.
+"""FastAPI app factory — WP-9.1 skeleton, extended with WP-9.2's Overview API.
 
-Ships /api/health and static SPA serving only; data endpoints (/api/overview,
-/api/cycles, etc.) land in later WP-9 cards. The engine passed to create_app
-must be read-only (see state.db.build_engine(url, read_only=True)) — this
-module does not itself enforce that, it trusts its caller.
+Ships /api/health, /api/overview, /api/positions, and static SPA serving.
+Further data endpoints (/api/cycles, etc.) land in later WP-9 cards. The
+engine passed to create_app must be read-only (see
+state.db.build_engine(url, read_only=True)) — this module does not itself
+enforce that, it trusts its caller.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 import sqlalchemy as sa
 from fastapi import FastAPI
@@ -19,7 +22,13 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.engine import Engine
 
 from options_agent.config import Config
-from options_agent.state.db import build_engine
+from options_agent.state.db import build_engine, get_connection
+from options_agent.ui.overview import (
+    OverviewResponse,
+    PositionSummary,
+    get_overview,
+    get_positions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +48,8 @@ def create_app(
         config = config or Config()
         db_url = os.environ.get("DB_URL", config.db_url)
         engine = build_engine(db_url, read_only=True)
+    config = config or Config()
+    mode: Literal["paper", "live"] = "paper" if config.alpaca_paper else "live"
 
     app = FastAPI(title="Options Agent Console")
     app.state.engine = engine
@@ -58,6 +69,16 @@ def create_app(
             logger.exception("Health check query failed")
             return JSONResponse({"status": "error"}, status_code=503)
         return JSONResponse({"status": "ok"})
+
+    @app.get("/api/overview")
+    def overview() -> OverviewResponse:
+        with get_connection(engine) as conn:
+            return get_overview(conn, now=datetime.now(UTC), mode=mode)
+
+    @app.get("/api/positions")
+    def positions() -> list[PositionSummary]:
+        with get_connection(engine) as conn:
+            return get_positions(conn, now=datetime.now(UTC))
 
     if STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="spa")

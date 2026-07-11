@@ -9,6 +9,7 @@ import sqlalchemy as sa
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import DBAPIError
 
+from options_agent.config import Config
 from options_agent.state.db import build_engine, metadata
 from options_agent.ui.app import create_app
 
@@ -101,3 +102,26 @@ def test_create_app_engine_is_read_only_by_default_wiring(monkeypatch, tmp_path)
             metadata.create_all(engine)
     finally:
         engine.dispose()
+
+
+def test_overview_mode_defaults_to_paper_when_no_config_given():
+    # Config.alpaca_paper defaults to True — the safe default when a test
+    # injects only an engine, matching create_app's own fallback.
+    app = create_app(engine=_migrated_engine())
+    client = TestClient(app)
+
+    resp = client.get("/api/overview")
+
+    assert resp.json()["mode"] == "paper"
+
+
+def test_overview_mode_reflects_config_alpaca_paper_false():
+    app = create_app(
+        engine=_migrated_engine(),
+        config=Config(alpaca_paper=False, use_real_data_tools=True),
+    )
+    client = TestClient(app)
+
+    resp = client.get("/api/overview")
+
+    assert resp.json()["mode"] == "live"

@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/ui/` (backend), `frontend/` (React SPA source)
 **Credentials required:** none — reads the DB only; `ANTHROPIC_API_KEY` becomes required starting WP-9.8 (ask-the-journal)
-**Status:** skeleton complete (WP-9.1) — `/api/health` + static SPA shell + read-only engine + compose wiring. Data endpoints land in WP-9.2+.
+**Status:** Overview screen complete (WP-9.2) — `/api/overview` + `/api/positions` + the Overview screen (tiles, equity curve, activity feed, open-positions table). Skeleton (`/api/health` + static SPA shell + read-only engine + compose wiring) landed in WP-9.1. Further screens land in later WP-9 cards.
 
 A read-only web console over the trading journal, served by a FastAPI service that runs beside the scheduler in docker-compose. Zero changes to the trading loop; the only planned write path (kill switch, WP-9.7) reuses `obs/killswitch.py` verbatim.
 
@@ -10,7 +10,8 @@ A read-only web console over the trading journal, served by a FastAPI service th
 
 | File | Responsibility |
 |---|---|
-| `ui/app.py` | FastAPI app factory: `/api/health`, static SPA mount, engine wiring |
+| `ui/app.py` | FastAPI app factory: `/api/health`, `/api/overview`, `/api/positions`, static SPA mount, engine wiring |
+| `ui/overview.py` | Overview API aggregation (WP-9.2): tiles, equity curve, activity feed, distance-to-trigger meter |
 | `ui/__main__.py` | CLI entry point: `python -m options_agent.ui [--config path] [--host] [--port]` |
 | `frontend/` | Vite + React + TypeScript SPA source; builds to `dist/`, copied into the image at `options_agent/ui/static/` |
 | `Dockerfile.console` | Multi-stage build: Node stage builds the SPA, Python stage serves it |
@@ -62,18 +63,51 @@ Same `--config` / logging conventions as `python -m options_agent`.
 
 ---
 
-## Frontend (WP-9.1)
+## Overview API (WP-9.2)
+
+`GET /api/overview` and `GET /api/positions` back the landing screen — kill-switch state, four summary tiles, an equity curve, a recent-activity feed, and the open-positions table with distance-to-trigger meters. Both are pure reads over existing tables; no broker or market-data call anywhere in `ui/overview.py` (enforced by a static import-check test).
+
+```python
+from options_agent.state.db import get_connection
+from options_agent.ui.overview import get_overview, get_positions
+
+with get_connection(engine) as conn:
+    overview = get_overview(conn)     # kill_switch, tiles, equity_curve, activity
+    positions = get_positions(conn)   # list[PositionSummary], one per open position
+```
+
+**Portfolio Greeks are not a tile.** The design reference's "Net Δ/θ per day" tile requires `context.portfolio.aggregate_portfolio_greeks`, which needs a live `FilteredChain` per underlying — a market-data fetch this read-only service must not make, and there is no cached per-leg Greeks store on `Position`/`PositionLeg` today. Adding one is a WP-0 contract change; out of scope for this card. (WP-9 epic decision, 2026-07-03.)
+
+**Distance-to-trigger** reuses `monitor.exits.stop_loss_threshold` / `profit_target_threshold` directly — two pure functions extracted from `check_stop_loss`/`check_profit_target` in WP-9.2 so the console's meter can never drift from the monitor's actual trigger math. Direction follows the sign of `unrealized_pnl`: non-negative measures distance toward the profit target, negative measures distance toward the stop. `pct` is `unrealized_pnl / threshold`, uncapped (a position that hasn't yet been closed by the monitor can show `>1.0`); the frontend clamps the bar width but shows the true percentage as text.
+
+**Account equity** reads `assembled_context["portfolio"]["account_equity"]` off the most recent `JournalRecord` — a stable, documented key (`PortfolioState.model_dump(mode="json")`, see `context/assembler.py:to_context_snapshot`), not an arbitrary blob lookup. It only updates once per entry cycle (a few times/day), so the tile can lag real account state between cycles; there is no live-broker alternative available to a read-only service. `null` when no `JournalRecord` exists yet.
+
+**Equity curve** is cumulative realized P&L from `query_outcome_records`, anchored so the last point equals the current account-equity tile (`offset = latest_equity - total_realized_pnl`). Falls back to un-anchored cumulative P&L (`equity: null` on every point) when no `account_equity` reading exists yet.
+
+**Activity feed** merges `query_journal` and `query_outcome_records`, newest first, capped at 20 rows. Two mockup rows from the design reference are not sourced from this card's data: alert-delivery events (`FILL alert delivered → Discord` — belongs to WP-9.7's `alert_delivery_failures` panel) and synthetic "armed" events on a position nearing its trigger (nothing persists that state; it would have to be recomputed and re-synthesized on every poll). `NO_ACTION_GATED` rows have no gate-reason text — the orchestrator writes that `JournalRecord` with `decision.validation_result=None`, so there's nothing stored to report beyond the action type.
+
+**Trading mode** (`mode: "paper" | "live"` on `OverviewResponse`) reads `Config.alpaca_paper`, resolved once in `create_app` and threaded into `get_overview`. Not fabricated — the design reference's `/ paper` header badge is real deployment config, not a placeholder.
+
+**Strike detail** (`PositionSummary.strikes`, e.g. `"530/525"` or `"485/480 · 560/565"` for an iron condor) groups `pos.legs` by option right, preserving each leg's original order — short-leg-then-long-leg by construction, since every strategy in this codebase opens the short leg first per right. Groups join in first-seen order; a single-leg position (cash-secured put) renders as just its strike.
+
+---
+
+## Frontend (WP-9.1, WP-9.2)
 
 Vite + React + TypeScript, scaffolded via `npm create vite@latest -- --template react-ts`. Source lives at the repo root in `frontend/` (not under `options_agent/`) so Node tooling stays out of the Python package tree.
 
 ```bash
 cd frontend
 npm install
-npm run dev      # local dev server, proxies nothing yet — /api/health is same-origin only when served by FastAPI
+npm run dev      # local dev server; proxies /api/* to http://127.0.0.1:8000 (see vite.config.ts)
 npm run build    # -> frontend/dist/
 ```
 
-The current shell (`frontend/src/App.tsx`) is a placeholder that pings `/api/health` and renders the result — real screens (Overview, Decision explorer, Performance & bias, Ask the journal) land in later WP-9 cards per the [design reference](https://claude.ai/code/artifact/ba602f8d-fd08-4c36-8fc5-93fa8a3efd3a).
+`frontend/src/App.tsx` renders the Overview screen: kill-switch chip, four tiles (`components/Tiles.tsx`), an inline-SVG equity curve (`components/EquityCurve.tsx`, no chart library dependency), the activity feed (`components/ActivityFeed.tsx`), and the open-positions table with distance-to-trigger bars (`components/PositionsTable.tsx`). `src/api.ts` is a hand-written typed client mirroring `ui/overview.py`'s Pydantic models field-for-field — keep the two in sync by hand until a schema generator is wired up.
+
+**Refresh strategy (v1):** plain client polling every 20s (`App.tsx`'s `POLL_INTERVAL_MS`). WP-9.4's SSE stream isn't built yet; swapping the poll for a push subscription later shouldn't require touching the components, only the fetch trigger in `App.tsx`.
+
+Remaining screens (Decision explorer, Performance & bias, Ask the journal) land in later WP-9 cards per the [design reference](https://claude.ai/code/artifact/ba602f8d-fd08-4c36-8fc5-93fa8a3efd3a).
 
 ---
 

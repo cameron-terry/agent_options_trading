@@ -5,9 +5,15 @@ Public contract
 check_stop_loss(pos, conn, broker, now, max_mark_age) -> Order | None
 check_profit_target(pos, conn, broker, now, max_mark_age) -> Order | None
 check_time_stop(pos, conn, broker, now, max_mark_age) -> Order | None
+stop_loss_threshold(pos) -> float       # pure; WP-9.2 distance-to-trigger meter
+profit_target_threshold(pos) -> float   # pure; WP-9.2 distance-to-trigger meter
 
-All three share the same (pos, conn, broker, now, max_mark_age, limit_offset)
-signature so WP-5.5 / WP-8 can call them uniformly through one interface.
+All three check_* functions share the same (pos, conn, broker, now,
+max_mark_age, limit_offset) signature so WP-5.5 / WP-8 can call them
+uniformly through one interface. check_stop_loss/check_profit_target compute
+their trigger thresholds via the two pure functions above, so the console's
+distance-to-trigger meter (WP-9.2) importing them directly cannot drift from
+the monitor's actual trigger math.
 
 Callers (WP-5.5 / WP-8) MUST run reconcile before calling this module so
 that pos.marked_at reflects the current cycle. check_stop_loss and
@@ -142,6 +148,32 @@ def _close_proposal(
     )
 
 
+def stop_loss_threshold(pos: Position) -> float:
+    """Return the stop-loss trigger threshold (a negative P&L value) for pos.
+
+    trigger condition: pos.unrealized_pnl <= stop_loss_threshold(pos)
+
+    Requires pos.exit_plan is not None — callers (check_stop_loss, WP-9.2
+    distance-to-trigger) must guard that themselves, since the guard differs
+    (log-and-skip in the monitor vs. omit-the-meter in the console).
+    """
+    assert pos.exit_plan is not None
+    return -(
+        pos.exit_plan.stop_loss_max_loss_fraction * pos.est_max_loss * pos.quantity
+    )
+
+
+def profit_target_threshold(pos: Position) -> float:
+    """Return the profit-target trigger threshold (a positive P&L value) for pos.
+
+    trigger condition: pos.unrealized_pnl >= profit_target_threshold(pos)
+
+    Requires pos.exit_plan is not None — see stop_loss_threshold docstring.
+    """
+    assert pos.exit_plan is not None
+    return pos.exit_plan.profit_target_pct * pos.est_max_profit * pos.quantity
+
+
 def _closing_limit_price(pos: Position, offset: float) -> float:
     """Estimate closing limit price from the cached position mark.
 
@@ -242,9 +274,7 @@ def check_stop_loss(
         )
         return None
 
-    threshold = -(
-        pos.exit_plan.stop_loss_max_loss_fraction * pos.est_max_loss * pos.quantity
-    )
+    threshold = stop_loss_threshold(pos)
     if pos.unrealized_pnl > threshold:
         return None
 
@@ -395,7 +425,7 @@ def check_profit_target(
         )
         return None
 
-    threshold = pos.exit_plan.profit_target_pct * pos.est_max_profit * pos.quantity
+    threshold = profit_target_threshold(pos)
     if pos.unrealized_pnl < threshold:
         return None
 
