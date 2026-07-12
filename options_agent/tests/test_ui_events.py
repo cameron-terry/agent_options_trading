@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import UTC, date, datetime, timedelta
 
+import pytest
 from starlette.routing import Route
 
 from options_agent.contracts.journal import JournalRecord
@@ -274,3 +276,31 @@ def test_event_stream_emits_update_after_new_journal_record(monkeypatch):
 
     chunk = asyncio.run(run())
     assert chunk == 'event: update\ndata: {"kind": "journal"}\n\n'
+
+
+def test_event_stream_logs_and_reraises_poll_failure(monkeypatch, caplog):
+    monkeypatch.setattr(events_module, "POLL_INTERVAL_SECONDS", 0.01)
+    engine = _engine()
+
+    def _boom(_engine: object, _marks: object) -> tuple[list[str], dict[str, object]]:
+        raise RuntimeError("db unreachable")
+
+    monkeypatch.setattr(events_module, "_poll_for_changes", _boom)
+
+    # Alembic's Config(alembic.ini) (exercised by test_schema.py, which runs
+    # earlier in file order) calls logging.config.fileConfig() under the
+    # hood, which disables every logger that already exists at that point —
+    # including this module's, created at import time. monkeypatch reverts
+    # it after the test regardless of which value it holds now.
+    events_logger = logging.getLogger("options_agent.ui.events")
+    monkeypatch.setattr(events_logger, "disabled", False)
+
+    async def run() -> None:
+        gen = event_stream(engine, _FakeRequest())
+        with pytest.raises(RuntimeError, match="db unreachable"):
+            await asyncio.wait_for(gen.__anext__(), timeout=2)
+
+    with caplog.at_level(logging.ERROR, logger="options_agent.ui.events"):
+        asyncio.run(run())
+
+    assert "SSE poll failed" in caplog.text

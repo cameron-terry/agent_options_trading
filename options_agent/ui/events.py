@@ -123,7 +123,16 @@ async def event_stream(
         if await request.is_disconnected():
             return
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
-        changed, marks = await asyncio.to_thread(_poll_for_changes, engine, marks)
+        try:
+            changed, marks = await asyncio.to_thread(_poll_for_changes, engine, marks)
+        except Exception:
+            # Let the generator end (closing the connection) rather than
+            # retry inline — the browser's EventSource auto-reconnects
+            # (~3s default), which re-establishes a fresh baseline via
+            # _read_high_water_marks. Logged so a transient DB blip is
+            # visible instead of a silently-dropped connection.
+            logger.exception("SSE poll failed; ending stream for client to reconnect")
+            raise
         if changed:
             for kind in changed:
                 yield f"event: update\ndata: {json.dumps({'kind': kind})}\n\n"
