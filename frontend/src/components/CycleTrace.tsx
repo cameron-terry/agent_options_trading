@@ -1,5 +1,5 @@
 import type { CycleDetail, OrderLink, PositionLink, ToolCallRecord } from '../api'
-import { formatCurrency, formatSignedCurrency, formatTime } from '../format'
+import { formatCurrency, formatPct, formatSignedCurrency, formatTime } from '../format'
 
 const GIST_MAX_CHARS = 64
 
@@ -231,7 +231,8 @@ function SizingPanel({ detail }: { detail: CycleDetail }) {
               {detail.sizing_result.contracts} contract
               {detail.sizing_result.contracts === 1 ? '' : 's'}
             </b>{' '}
-            — max loss {formatCurrency(detail.sizing_result.sized_max_loss)}
+            — max loss {formatCurrency(detail.sizing_result.sized_max_loss)} ={' '}
+            {formatPct(detail.sizing_result.risk_budget_used)} of equity
             {detail.sizing_result.binding_constraint
               ? ` (${detail.sizing_result.binding_constraint})`
               : ''}

@@ -71,6 +71,22 @@ After Phase 2 completes and you have the PR body, extract and run **all three fo
 
 **If the PR body contains none of the above forms:** write "No author verification steps found." in the Verification results section and proceed.
 
+### Phase 2.6 — Visual verification against the design reference (UI cards only)
+
+Skip this phase entirely if the card has no `area:ui` label and touches no files under `frontend/` or `options_agent/ui/`.
+
+1. **Locate the reference artifact.** Search `docs/WORKSTREAMS.md` for a "Design reference:" line in the card's parent WP section (e.g. WP-9 has a `claude.ai/code/artifact/...` mock covering all four console screens) and `docs/features/*.md` for the same link. Fetch it with `WebFetch`, prompting for an exhaustive description of the specific screen this card implements — layout/grid, colors, chip/state semantics, typography, and interaction affordances (expand/collapse indicators, hover states, filter controls). `WebFetch` works on `claude.ai/code/artifact/{uuid}` URLs even though it can't reach most external sites.
+
+2. **Stand up a live instance.** Check `scripts/` for an existing seed/demo-data fixture before writing a one-off. Seed a scratch DB, build the frontend (`cd frontend && npm run build`), copy `frontend/dist/*` into `options_agent/ui/static/` (gitignored — safe to write, never commit), and run `DB_URL=sqlite:///<scratch-db> uv run python -m options_agent.ui --port <port>` in the background.
+
+3. **Drive it with Playwright MCP** (`mcp__playwright__browser_navigate`, `browser_click`, `browser_snapshot`, `browser_take_screenshot`) — load the screen this card implements, exercise its stated interactions (filters, selection, expand/collapse), and use `browser_snapshot` (accessibility tree) as the primary signal for exact text/values; screenshots are a secondary check.
+
+   **If the Playwright browser is already in use** (error: `"Browser is already in use for ... use --isolated"` — a concurrent session holds the shared profile lock): do not kill that Chrome process, it may belong to another active session. Fall back to a static comparison: diff the reference artifact's inline `<style>`/HTML for the relevant screen (already fetched via WebFetch) against the PR diff's component and CSS code. State plainly in the review output that this was a static fallback, not a live render.
+
+4. **Compare against the reference**, dimension by dimension: layout structure (grid columns, pane widths), color/chip semantics (which states map to which color), interaction affordances the mock implies (expand/collapse indicators, hover cursors, disabled states), and any field the API response includes that the mock displays but the component silently drops. A deviation that's documented — in the PR's "Decisions resolved" table or a code comment explaining a real constraint (e.g. "no schema exists to summarize this") — is not a bug. An *undocumented* fidelity gap, especially one that drops already-fetched data or removes a usability affordance the mock relied on, is a legitimate finding for this review.
+
+5. **Tear down** — kill the background server, delete the scratch DB, and remove any `options_agent/ui/static/` build output you copied in.
+
 ### Phase 3 — Deliver the review
 
 Output a structured review using exactly this template:
@@ -91,6 +107,9 @@ Output a structured review using exactly this template:
 - **Contract alignment** — check Produces / types / schemas against the contracts in options-agent-plan.md; flag mismatches
 - **Edge cases and error paths** — unhandled inputs, missing guards, silent failures
 - **Test coverage** — missing cases, wrong assertions, tests that pass vacuously
+
+### Design fidelity vs. reference artifact
+<Only for cards touched by Phase 2.6. State whether the comparison was live (Playwright) or static (fallback), then list findings: layout/color/interaction deviations from the reference mock, distinguishing documented (fine) from undocumented (a finding) gaps. If Phase 2.6 was skipped because this isn't a UI card, write "N/A — not a UI card.">
 
 ### Cross-WP clarifications needed
 <Decisions the implementer and other WP owners must align on before this merges. For each item, name the affected downstream WP. If none, write "None identified.">
