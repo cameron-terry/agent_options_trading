@@ -1,10 +1,10 @@
-"""FastAPI app factory — WP-9.1 skeleton, extended with WP-9.2's Overview API
-and WP-9.3's Decision explorer API.
+"""FastAPI app factory — WP-9.1 skeleton, extended with WP-9.2's Overview API,
+WP-9.3's Decision explorer API, and WP-9.4's live activity stream.
 
 Ships /api/health, /api/overview, /api/positions, /api/cycles,
-/api/cycles/{cycle_id}, and static SPA serving. Further data endpoints
-(/api/review/*, etc.) land in later WP-9 cards. The engine passed to
-create_app must be read-only (see state.db.build_engine(url,
+/api/cycles/{cycle_id}, /api/events, and static SPA serving. Further data
+endpoints (/api/review/*, etc.) land in later WP-9 cards. The engine passed
+to create_app must be read-only (see state.db.build_engine(url,
 read_only=True)) — this module does not itself enforce that, it trusts its
 caller.
 """
@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Literal
 
 import sqlalchemy as sa
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.engine import Engine
 
@@ -32,6 +32,7 @@ from options_agent.ui.cycles import (
     get_cycle_detail,
     get_cycles,
 )
+from options_agent.ui.events import event_stream
 from options_agent.ui.overview import (
     OverviewResponse,
     PositionSummary,
@@ -113,6 +114,14 @@ def create_app(
         if detail is None:
             raise HTTPException(status_code=404, detail="cycle not found")
         return detail
+
+    @app.get("/api/events")
+    def events(request: Request) -> StreamingResponse:
+        return StreamingResponse(
+            event_stream(engine, request),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     if STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="spa")

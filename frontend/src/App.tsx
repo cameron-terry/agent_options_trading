@@ -7,11 +7,6 @@ import { KillSwitchChip } from './components/KillSwitchChip'
 import { PositionsTable } from './components/PositionsTable'
 import { Tiles } from './components/Tiles'
 
-// v1 refresh strategy (WP-9.2 decision, 2026-07-03): simple client polling.
-// WP-9.4's SSE stream isn't built yet — this interval is swapped for a push
-// subscription once it lands, with no change to the components above.
-const POLL_INTERVAL_MS = 20_000
-
 // Screen switching is local state, not a router — matches the design
 // reference's presentational tabs (WP-9.2 decision). Performance/Ask aren't
 // built yet so their tabs stay inert. Both this and the selected cycle live
@@ -44,11 +39,20 @@ function App() {
         })
     }
 
-    load()
-    const interval = setInterval(load, POLL_INTERVAL_MS)
+    // WP-9.4: the server pushes a lightweight "table X changed" tick over
+    // SSE rather than the row itself — the client already has full-state
+    // fetchers (fetchOverview/fetchPositions), so a tick just re-triggers
+    // those instead of duplicating response-shaping logic in two places.
+    // EventSource.onopen fires both on the initial connect and after every
+    // browser-driven auto-reconnect, so one handler covers first load and
+    // resync-after-drop — no Last-Event-ID bookkeeping needed (WP-9.4
+    // decision, 2026-07-12).
+    const source = new EventSource('/api/events')
+    source.onopen = load
+    source.addEventListener('update', load)
     return () => {
       cancelled = true
-      clearInterval(interval)
+      source.close()
     }
   }, [])
 
