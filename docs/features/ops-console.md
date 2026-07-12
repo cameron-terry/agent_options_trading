@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/ui/` (backend), `frontend/` (React SPA source)
 **Credentials required:** none — reads the DB only; `ANTHROPIC_API_KEY` becomes required starting WP-9.8 (ask-the-journal)
-**Status:** Overview screen complete (WP-9.2) — `/api/overview` + `/api/positions` + the Overview screen (tiles, equity curve, activity feed, open-positions table). Skeleton (`/api/health` + static SPA shell + read-only engine + compose wiring) landed in WP-9.1. Further screens land in later WP-9 cards.
+**Status:** Overview (WP-9.2) and Decision explorer (WP-9.3) screens complete. Skeleton (`/api/health` + static SPA shell + read-only engine + compose wiring) landed in WP-9.1. Further screens (Performance & bias, Ask the journal) land in later WP-9 cards.
 
 A read-only web console over the trading journal, served by a FastAPI service that runs beside the scheduler in docker-compose. Zero changes to the trading loop; the only planned write path (kill switch, WP-9.7) reuses `obs/killswitch.py` verbatim.
 
@@ -10,11 +10,13 @@ A read-only web console over the trading journal, served by a FastAPI service th
 
 | File | Responsibility |
 |---|---|
-| `ui/app.py` | FastAPI app factory: `/api/health`, `/api/overview`, `/api/positions`, static SPA mount, engine wiring |
+| `ui/app.py` | FastAPI app factory: `/api/health`, `/api/overview`, `/api/positions`, `/api/cycles`, `/api/cycles/{cycle_id}`, static SPA mount, engine wiring |
 | `ui/overview.py` | Overview API aggregation (WP-9.2): tiles, equity curve, activity feed, distance-to-trigger meter |
+| `ui/cycles.py` | Decision explorer API (WP-9.3): filtered cycle list + full-trace detail, with position/order/outcome joins |
 | `ui/__main__.py` | CLI entry point: `python -m options_agent.ui [--config path] [--host] [--port]` |
 | `frontend/` | Vite + React + TypeScript SPA source; builds to `dist/`, copied into the image at `options_agent/ui/static/` |
 | `Dockerfile.console` | Multi-stage build: Node stage builds the SPA, Python stage serves it |
+| `scripts/seed_console_demo_data.py` | Reusable demo-data fixture for docker visual verification (not part of the image) |
 
 ---
 
@@ -92,7 +94,30 @@ with get_connection(engine) as conn:
 
 ---
 
-## Frontend (WP-9.1, WP-9.2)
+## Decision explorer API (WP-9.3)
+
+`GET /api/cycles` (filtered list) and `GET /api/cycles/{cycle_id}` (full trace) back the flagship replay screen — every entry cycle's tool-call transcript, proposal, validation verdict, sizing, and linked position/order/outcome, rendered from `JournalRecord` alone.
+
+```python
+from options_agent.state.db import get_connection
+from options_agent.ui.cycles import get_cycles, get_cycle_detail
+
+with get_connection(engine) as conn:
+    cycles = get_cycles(conn, symbol="SPY", action_type=ActionTaken.REJECTED)  # slim list, newest first
+    detail = get_cycle_detail(conn, "c-2026-07-11-1435-a7f3")                  # full CycleDetail | None
+```
+
+**List vs. detail payload shape.** `CycleListItem` is a slim projection (`cycle_id`, `timestamp`, `action_taken`, `underlying`, `strategy`, `conviction`) — the full record's `assembled_context` blob and tool-call transcript aren't fetched for every row, only for the one cycle the detail panel renders. This keeps the list endpoint cheap regardless of journal size.
+
+**Default lookback.** `GET /api/cycles` defaults `date_from` to 30 days before `now` when the caller passes no date filter — the same reasoning as `get_activity`'s cap in `overview.py`: `query_journal` has no `LIMIT`/`OFFSET`, so an unbounded list grows with the journal. Passing `date_from` explicitly overrides the default.
+
+**Position/order joins surface broken history rather than hiding or erroring on it.** `JournalRecord.position_ids`/`order_ids` are resolved via `state.crud.get_position`/`get_order`; when an id doesn't resolve to a stored row, the response includes it with `anomaly: true` and a `null` position/order rather than 500ing or silently dropping it — the explorer's job is to replay history faithfully, including anomalies. This mirrors `agent/tools.py`'s `PositionHistory` precedent (a missing opening record is a system anomaly to report), but deliberately does **not** reuse that agent-tool model — `PositionLink`/`OrderLink` are UI-response types defined in `ui/cycles.py`.
+
+**Validation rendering reflects what's actually stored, not a synthesized rule catalog.** `ValidationResult.reasons` only contains rules that fired (ERROR or WARNING severity) — there's no record of which rules were evaluated and passed silently. REJECTED cycles show every failing rule's `rule_id` + `human_message` (+ `observed`/`limit` when present); passing cycles with no WARNING reasons show "no rule reasons recorded" rather than fabricating a full green checklist.
+
+---
+
+## Frontend (WP-9.1, WP-9.2, WP-9.3)
 
 Vite + React + TypeScript, scaffolded via `npm create vite@latest -- --template react-ts`. Source lives at the repo root in `frontend/` (not under `options_agent/`) so Node tooling stays out of the Python package tree.
 
@@ -105,9 +130,13 @@ npm run build    # -> frontend/dist/
 
 `frontend/src/App.tsx` renders the Overview screen: kill-switch chip, four tiles (`components/Tiles.tsx`), an inline-SVG equity curve (`components/EquityCurve.tsx`, no chart library dependency), the activity feed (`components/ActivityFeed.tsx`), and the open-positions table with distance-to-trigger bars (`components/PositionsTable.tsx`). `src/api.ts` is a hand-written typed client mirroring `ui/overview.py`'s Pydantic models field-for-field — keep the two in sync by hand until a schema generator is wired up.
 
-**Refresh strategy (v1):** plain client polling every 20s (`App.tsx`'s `POLL_INTERVAL_MS`). WP-9.4's SSE stream isn't built yet; swapping the poll for a push subscription later shouldn't require touching the components, only the fetch trigger in `App.tsx`.
+**Refresh strategy (v1):** plain client polling every 20s (`App.tsx`'s `POLL_INTERVAL_MS`) for Overview. WP-9.4's SSE stream isn't built yet; swapping the poll for a push subscription later shouldn't require touching the components, only the fetch trigger in `App.tsx`. The Decision explorer fetches on demand (filter change, cycle selection) rather than polling — it's a historical replay view, not a live tick.
 
-Remaining screens (Decision explorer, Performance & bias, Ask the journal) land in later WP-9 cards per the [design reference](https://claude.ai/code/artifact/ba602f8d-fd08-4c36-8fc5-93fa8a3efd3a).
+**Screen switching (WP-9.3):** `App.tsx` holds `screen` (`'overview' | 'decisions'`) and `selectedCycleId` as local React state — the header tabs for built screens are wired to click handlers that flip `screen`; tabs for screens that don't exist yet (Performance, Ask) stay inert `<span>`s per the design reference. No client-side router yet; both pieces of state are centralized in `App.tsx` so the eventual router swap (likely landing with WP-9.9, whose citations must deep-link into the Decision explorer) is a contained change.
+
+`components/DecisionsScreen.tsx` orchestrates the Decision explorer: `components/CycleFilters.tsx` (symbol/action/date filters — symbol commits on blur/Enter rather than per-keystroke, since `query_journal`'s symbol filter is an exact match, not a substring search), `components/CycleList.tsx` (left-pane cycle list), and `components/CycleTrace.tsx` (right-pane trace renderer: header metadata, expandable tool-call transcript with a truncated result preview, proposal blockquotes + leg table, validation rule chips + reasons, and the sizing/order/position join, including the anomaly case). A filter change always re-selects the newest matching cycle rather than leaving a stale selection in place — otherwise reverting a filter can strand the view on a sparse cycle (e.g. a `NO_ACTION` cycle with no proposal) that reads as "the trace disappeared."
+
+Remaining screens (Performance & bias, Ask the journal) land in later WP-9 cards per the [design reference](https://claude.ai/code/artifact/ba602f8d-fd08-4c36-8fc5-93fa8a3efd3a).
 
 ---
 

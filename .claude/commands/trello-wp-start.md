@@ -154,19 +154,25 @@ Equity-curve-chart-specific (inline-JS only, confirmed WP-9.2): gridline stroke 
 
 **Structure:** `.frame` (outer border + radius 12px + `box-shadow:0 24px 60px -32px rgba(0,0,0,.7)`) wraps an `.appbar` (header, `background:var(--raised)`, 48px tall) and a `.screen` (padded content, `background:var(--surface)`, 18px padding, 16px gap). Numeric table columns use a `.num` class (both `<th>` and `<td>`) for right-alignment + tabular-nums; everything else stays left-aligned.
 
-**Header tabs are presentational, not routed.** The reference's `.apptabs` are plain `<span>` elements (`Overview Decisions Performance Ask`), not `<a>` links — there's no client-side router in this codebase yet. Keep replicating that: a static tab list with the current screen marked `.on`, no navigation wired up, until a WP actually adds routing (not yet scheduled as of WP-9.2).
+**Header tabs are presentational, not routed — but screens can still be reachable.** The reference's `.apptabs` are plain `<span>` elements (`Overview Decisions Performance Ask`), not `<a>` links, and there's still no client-side router in this codebase (not yet scheduled — likely lands with WP-9.9, whose citations must deep-link into the Decision explorer). As of WP-9.3, tabs for *built* screens are wired to local React state in `App.tsx` (`screen`, plus `selectedCycleId` for cross-screen deep-linking later) that swaps which screen renders — no URL change, no router. Tabs for screens that don't exist yet stay inert `<span>`s. Keep both state variables centralized in `App.tsx` so the eventual router swap is contained.
 
-**Visual verification workflow (docker, since no browser exists in this sandbox):**
+**Visual verification workflow (docker):**
 1. `docker compose build console && docker compose up -d console` — rebuilds and restarts the *real* service. Confirms no crashes, but `agent_data` is the live trading DB and is usually sparse/empty — not useful for a populated screenshot.
-2. For a populated visual, run a **separate, non-compose container** against a seeded scratch SQLite DB — never write fixture rows into the real `agent_data` volume:
+2. For a populated visual, seed a **scratch SQLite DB** — never write fixture rows into the real `agent_data` volume. Use the checked-in, reusable fixture script rather than hand-rolling one per ticket:
+   ```bash
+   uv run python scripts/seed_console_demo_data.py <scratch-dir>/dev.db --force
+   ```
+   It migrates the target path via `alembic upgrade head` and seeds journal cycles (one of every `ActionTaken`, including a deliberately-broken position link to exercise anomaly rendering), open positions spanning the distance-to-trigger spread, and closed-position history for the equity curve — anchored to "now" so `Cycles Today` is always populated regardless of when it's run. Add more seed data to that script rather than a scratch one-off if a future screen needs a shape it doesn't cover yet.
+
+   Then run a **separate, non-compose container** against it:
    ```bash
    docker run -d --rm --name console-demo -p 127.0.0.1:8001:8000 \
      -v <scratch-dir>:/app/demo-data \
      -e DB_URL=sqlite:////app/demo-data/dev.db \
      agent_options_trading-console:latest
    ```
-3. **`docker restart` does not pick up a rebuilt image** — a container is pinned to the image snapshot from its `docker run`. After every rebuild, `docker rm -f console-demo` then re-`docker run` from the fresh tag. `docker stop` with `--rm` can race the name becoming free again — prefer `docker rm -f` immediately before recreating.
-4. **No headless-browser screenshot tool is available** in this sandbox (Playwright's Chromium is missing shared libs — `libnspr4.so` etc. — and there's no passwordless `sudo` to install them; confirmed dead end WP-9.2). Don't spend time re-attempting this — ask the user to open the URL and screenshot it themselves.
+3. **`docker restart` does not pick up a rebuilt image** — a container is pinned to the image snapshot from its `docker run`. After every rebuild (or reseed — a replaced DB file can leave stale connections in an already-running container), `docker rm -f console-demo` then re-`docker run` from the fresh tag/DB. `docker stop` with `--rm` can race the name becoming free again — prefer `docker rm -f` immediately before recreating.
+4. **A real browser is available via the Playwright MCP server** (`mcp__playwright__browser_navigate`, `browser_snapshot`, `browser_click`, etc.) — check `ToolSearch` for `mcp__playwright__*` tools before assuming otherwise; this was a confirmed dead end through WP-9.2/9.3 but was fixed mid-WP-9.3 by installing real Google Chrome as root (`apt` from Google's repo, landing at `/opt/google/chrome/chrome` — the path the MCP server's `channel: "chrome"` config looks for). If the tools are missing or `browser_navigate` errors with a Chrome-not-found message, ask the user to install it (see git history around WP-9.3 for the exact apt commands) rather than falling back to asking them to screenshot manually. `browser_snapshot` (accessibility tree, returned inline) is more reliable for verifying exact text/values than `browser_take_screenshot` — the latter's output file saves to whatever host actually runs the browser, which has **not** been reachable from this sandbox's Bash/Read tools in practice (a separate filesystem from where Claude Code itself runs, even though both happen to have Chrome at the same path). Use snapshots as the primary signal; treat screenshots as a bonus only if the user confirms they can see the saved file themselves.
 5. Stop the demo container when done (`docker rm -f console-demo`) — it's scratch/throwaway, not part of the compose lifecycle.
 
 ## Rules
