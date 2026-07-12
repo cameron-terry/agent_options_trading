@@ -1,10 +1,12 @@
-"""FastAPI app factory — WP-9.1 skeleton, extended with WP-9.2's Overview API.
+"""FastAPI app factory — WP-9.1 skeleton, extended with WP-9.2's Overview API
+and WP-9.3's Decision explorer API.
 
-Ships /api/health, /api/overview, /api/positions, and static SPA serving.
-Further data endpoints (/api/cycles, etc.) land in later WP-9 cards. The
-engine passed to create_app must be read-only (see
-state.db.build_engine(url, read_only=True)) — this module does not itself
-enforce that, it trusts its caller.
+Ships /api/health, /api/overview, /api/positions, /api/cycles,
+/api/cycles/{cycle_id}, and static SPA serving. Further data endpoints
+(/api/review/*, etc.) land in later WP-9 cards. The engine passed to
+create_app must be read-only (see state.db.build_engine(url,
+read_only=True)) — this module does not itself enforce that, it trusts its
+caller.
 """
 
 from __future__ import annotations
@@ -16,13 +18,20 @@ from pathlib import Path
 from typing import Literal
 
 import sqlalchemy as sa
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.engine import Engine
 
 from options_agent.config import Config
+from options_agent.contracts.state import ActionTaken
 from options_agent.state.db import build_engine, get_connection
+from options_agent.ui.cycles import (
+    CycleDetail,
+    CycleListItem,
+    get_cycle_detail,
+    get_cycles,
+)
 from options_agent.ui.overview import (
     OverviewResponse,
     PositionSummary,
@@ -79,6 +88,31 @@ def create_app(
     def positions() -> list[PositionSummary]:
         with get_connection(engine) as conn:
             return get_positions(conn, now=datetime.now(UTC))
+
+    @app.get("/api/cycles")
+    def cycles(
+        symbol: str | None = None,
+        action_type: ActionTaken | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ) -> list[CycleListItem]:
+        with get_connection(engine) as conn:
+            return get_cycles(
+                conn,
+                symbol=symbol,
+                action_type=action_type,
+                date_from=date_from,
+                date_to=date_to,
+                now=datetime.now(UTC),
+            )
+
+    @app.get("/api/cycles/{cycle_id}")
+    def cycle_detail(cycle_id: str) -> CycleDetail:
+        with get_connection(engine) as conn:
+            detail = get_cycle_detail(conn, cycle_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="cycle not found")
+        return detail
 
     if STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="spa")

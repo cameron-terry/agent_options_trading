@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { fetchOverview, fetchPositions, type OverviewResponse, type PositionSummary } from './api'
 import { ActivityFeed } from './components/ActivityFeed'
+import { DecisionsScreen } from './components/DecisionsScreen'
 import { EquityCurve } from './components/EquityCurve'
 import { KillSwitchChip } from './components/KillSwitchChip'
 import { PositionsTable } from './components/PositionsTable'
@@ -11,7 +12,17 @@ import { Tiles } from './components/Tiles'
 // subscription once it lands, with no change to the components above.
 const POLL_INTERVAL_MS = 20_000
 
+// Screen switching is local state, not a router — matches the design
+// reference's presentational tabs (WP-9.2 decision). Performance/Ask aren't
+// built yet so their tabs stay inert. Both this and the selected cycle live
+// here so WP-9.9's URL-addressable cycle requirement (citations must deep
+// link into the Decision explorer) is a contained swap to a router later,
+// not an unwind of state scattered across screens.
+type Screen = 'overview' | 'decisions'
+
 function App() {
+  const [screen, setScreen] = useState<Screen>('overview')
+  const [selectedCycleId, setSelectedCycleId] = useState<string | null>(null)
   const [overview, setOverview] = useState<OverviewResponse | null>(null)
   const [positions, setPositions] = useState<PositionSummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -48,8 +59,18 @@ function App() {
           OPTIONS AGENT {overview && <span>/ {overview.mode}</span>}
         </span>
         <nav className="apptabs">
-          <span className="on">Overview</span>
-          <span>Decisions</span>
+          <span
+            className={screen === 'overview' ? 'on' : undefined}
+            onClick={() => setScreen('overview')}
+          >
+            Overview
+          </span>
+          <span
+            className={screen === 'decisions' ? 'on' : undefined}
+            onClick={() => setScreen('decisions')}
+          >
+            Decisions
+          </span>
           <span>Performance</span>
           <span>Ask</span>
         </nav>
@@ -63,38 +84,45 @@ function App() {
         </div>
       </header>
 
-      <div className="console-screen">
-        {error && <div className="console-error">Failed to load: {error}</div>}
+      {screen === 'overview' && (
+        <div className="console-screen">
+          {error && <div className="console-error">Failed to load: {error}</div>}
 
-        {overview && (
-          <>
-            <Tiles tiles={overview.tiles} />
+          {overview && (
+            <>
+              <Tiles tiles={overview.tiles} />
 
-            <div className="console-panels">
-              <section className="panel">
-                <h2>
-                  Equity curve{' '}
-                  <small>{overview.equity_curve.length} sessions · realized + marked</small>
-                </h2>
-                <EquityCurve points={overview.equity_curve} />
-              </section>
-              <section className="panel">
-                <h2>
-                  Live activity <small>journal + alerts</small>
-                </h2>
-                <ActivityFeed items={overview.activity} />
-              </section>
-            </div>
-          </>
-        )}
+              <div className="console-panels">
+                <section className="panel">
+                  <h2>
+                    Equity curve{' '}
+                    <small>{overview.equity_curve.length} sessions · realized + marked</small>
+                  </h2>
+                  <EquityCurve points={overview.equity_curve} />
+                </section>
+                <section className="panel">
+                  <h2>
+                    Live activity <small>journal + alerts</small>
+                  </h2>
+                  <ActivityFeed items={overview.activity} />
+                </section>
+              </div>
+            </>
+          )}
 
-        <section className="panel">
-          <h2>
-            Open positions <small>marks from monitor cache — never fetched live by the UI</small>
-          </h2>
-          <PositionsTable positions={positions ?? []} />
-        </section>
-      </div>
+          <section className="panel">
+            <h2>
+              Open positions{' '}
+              <small>marks from monitor cache — never fetched live by the UI</small>
+            </h2>
+            <PositionsTable positions={positions ?? []} />
+          </section>
+        </div>
+      )}
+
+      {screen === 'decisions' && (
+        <DecisionsScreen selectedCycleId={selectedCycleId} onSelectCycle={setSelectedCycleId} />
+      )}
     </main>
   )
 }

@@ -16,3 +16,7 @@ build/
 # Frontend build tooling / output (frontend/dist is also covered by dist/ above)
 node_modules/
 options_agent/ui/static/
+
+# Playwright MCP scratch output (browser_take_screenshot etc. save relative
+# to repo root when the MCP server's cwd is here)
+.playwright-mcp/
