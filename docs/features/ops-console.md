@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/ui/` (backend), `frontend/` (React SPA source)
 **Credentials required:** none — reads the DB only; `ANTHROPIC_API_KEY` becomes required starting WP-9.8 (ask-the-journal)
-**Status:** Overview (WP-9.2) and Decision explorer (WP-9.3) screens complete. Skeleton (`/api/health` + static SPA shell + read-only engine + compose wiring) landed in WP-9.1. Further screens (Performance & bias, Ask the journal) land in later WP-9 cards.
+**Status:** Overview (WP-9.2), Decision explorer (WP-9.3), and the live activity stream (WP-9.4) are complete. Skeleton (`/api/health` + static SPA shell + read-only engine + compose wiring) landed in WP-9.1. Further screens (Performance & bias, Ask the journal) land in later WP-9 cards.
 
 A read-only web console over the trading journal, served by a FastAPI service that runs beside the scheduler in docker-compose. Zero changes to the trading loop; the only planned write path (kill switch, WP-9.7) reuses `obs/killswitch.py` verbatim.
 
@@ -10,9 +10,10 @@ A read-only web console over the trading journal, served by a FastAPI service th
 
 | File | Responsibility |
 |---|---|
-| `ui/app.py` | FastAPI app factory: `/api/health`, `/api/overview`, `/api/positions`, `/api/cycles`, `/api/cycles/{cycle_id}`, static SPA mount, engine wiring |
+| `ui/app.py` | FastAPI app factory: `/api/health`, `/api/overview`, `/api/positions`, `/api/cycles`, `/api/cycles/{cycle_id}`, `/api/events`, static SPA mount, engine wiring |
 | `ui/overview.py` | Overview API aggregation (WP-9.2): tiles, equity curve, activity feed, distance-to-trigger meter |
 | `ui/cycles.py` | Decision explorer API (WP-9.3): filtered cycle list + full-trace detail, with position/order/outcome joins |
+| `ui/events.py` | Live activity stream (WP-9.4): `GET /api/events` SSE body — polls journal_records/kill_switch_log/positions for high-water-mark changes |
 | `ui/__main__.py` | CLI entry point: `python -m options_agent.ui [--config path] [--host] [--port]` |
 | `frontend/` | Vite + React + TypeScript SPA source; builds to `dist/`, copied into the image at `options_agent/ui/static/` |
 | `Dockerfile.console` | Multi-stage build: Node stage builds the SPA, Python stage serves it |
@@ -117,7 +118,29 @@ with get_connection(engine) as conn:
 
 ---
 
-## Frontend (WP-9.1, WP-9.2, WP-9.3)
+## Live activity stream (WP-9.4)
+
+`GET /api/events` is an SSE endpoint that tells the browser *when* to re-fetch, not what changed. `ui/events.py` polls three high-water-mark columns every `POLL_INTERVAL_SECONDS` (5s, decoupled from `config.monitor_interval_minutes` — that setting is the scheduler's write cadence, not how often this read-only service should check): `journal_records.timestamp`, `kill_switch_log.created_at`, `positions.marked_at`. Each poll that finds an advanced max emits one `event: update\ndata: {"kind": "journal"|"killswitch"|"positions"}` per changed table; a poll with nothing new emits an SSE comment (`: heartbeat`) so intermediate proxies don't time out an idle connection.
+
+```python
+from options_agent.ui.events import event_stream
+
+# wired directly into GET /api/events in ui/app.py via StreamingResponse
+async for chunk in event_stream(engine, request):
+    ...
+```
+
+**Why a tick, not a payload (WP-9.4 decision, 2026-07-12).** The event never carries the changed row — the client already has typed REST fetchers (`fetchOverview`, `fetchPositions`, `fetchCycles`) built for WP-9.2/9.3's polling. Duplicating row-shaping logic into the SSE encoder would create a second source of truth for response shapes and dedup/ordering concerns on top of it; a tick just triggers the existing fetch.
+
+**Baseline established at connect, not at zero.** `_read_high_water_marks` snapshots the current max per table when a client subscribes, so pre-existing rows never generate a flood of ticks on first connect — only rows/updates *after* that baseline (including later polls) are reported.
+
+**Reconnect semantics: re-fetch, not replay.** There is no `Last-Event-ID` / server-side per-connection cursor. A dropped connection (the browser's `EventSource` auto-reconnects) is expected to re-fetch full state via the REST endpoints — the tick protocol carries no history, only "check now." On the frontend, `EventSource.onopen` (which fires on both the initial connect and every auto-reconnect) is the single trigger for `App.tsx`'s `load()`.
+
+**Poll-only, no LISTEN/NOTIFY.** A single code path across SQLite and Postgres; Postgres's `LISTEN`/`NOTIFY` would remove poll latency but was judged not worth a second code path for a v1 feature. `positions.marked_at` has no DB index — negligible at this system's open-position count (a handful at a time).
+
+---
+
+## Frontend (WP-9.1, WP-9.2, WP-9.3, WP-9.4)
 
 Vite + React + TypeScript, scaffolded via `npm create vite@latest -- --template react-ts`. Source lives at the repo root in `frontend/` (not under `options_agent/`) so Node tooling stays out of the Python package tree.
 
@@ -130,7 +153,7 @@ npm run build    # -> frontend/dist/
 
 `frontend/src/App.tsx` renders the Overview screen: kill-switch chip, four tiles (`components/Tiles.tsx`), an inline-SVG equity curve (`components/EquityCurve.tsx`, no chart library dependency), the activity feed (`components/ActivityFeed.tsx`), and the open-positions table with distance-to-trigger bars (`components/PositionsTable.tsx`). `src/api.ts` is a hand-written typed client mirroring `ui/overview.py`'s Pydantic models field-for-field — keep the two in sync by hand until a schema generator is wired up.
 
-**Refresh strategy (v1):** plain client polling every 20s (`App.tsx`'s `POLL_INTERVAL_MS`) for Overview. WP-9.4's SSE stream isn't built yet; swapping the poll for a push subscription later shouldn't require touching the components, only the fetch trigger in `App.tsx`. The Decision explorer fetches on demand (filter change, cycle selection) rather than polling — it's a historical replay view, not a live tick.
+**Refresh strategy (WP-9.4): SSE-triggered re-fetch, not polling.** `App.tsx` opens an `EventSource('/api/events')`; both `onopen` and the `update` event call the same `load()` used by WP-9.2's original 20s poll (now removed) — no component below `App.tsx` needed to change, only the fetch trigger. Because `overview` (and the kill-switch chip that reads `overview.kill_switch.state`) is fetched at the `App.tsx` level regardless of which screen is active, a `killswitch` tick updates the chip on every screen, not just Overview. The Decision explorer still fetches on demand (filter change, cycle selection) rather than reacting to ticks — it's a historical replay view, not a live one.
 
 **Screen switching (WP-9.3):** `App.tsx` holds `screen` (`'overview' | 'decisions'`) and `selectedCycleId` as local React state — the header tabs for built screens are wired to click handlers that flip `screen`; tabs for screens that don't exist yet (Performance, Ask) stay inert `<span>`s per the design reference. No client-side router yet; both pieces of state are centralized in `App.tsx` so the eventual router swap (likely landing with WP-9.9, whose citations must deep-link into the Decision explorer) is a contained change.
 
