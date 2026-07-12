@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
@@ -12,5 +13,15 @@ export default defineConfig({
     proxy: {
       '/api': 'http://127.0.0.1:8000',
     },
+  },
+  test: {
+    // jsdom gives component tests a DOM; the SSE-driven flow in App.tsx needs
+    // a real browser (EventSource) and is covered by Playwright, not here.
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+    // Test files live next to source under src/**; vite build never imports
+    // them, so they stay out of the production bundle.
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    css: false,
   },
 })
