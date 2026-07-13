@@ -258,3 +258,131 @@ export function fetchCycles(filters: CycleFilters = {}): Promise<CycleListItem[]
 export function fetchCycleDetail(cycleId: string): Promise<CycleDetail> {
   return getJSON<CycleDetail>(`/api/cycles/${encodeURIComponent(cycleId)}`)
 }
+
+// --- WP-9.5: Performance & bias -----------------------------------------
+// Field names mirror options_agent/ui/review.py's Pydantic models. Fields
+// that can be NaN in the underlying obs/review.py dataclasses (hit_rate,
+// avg_win, avg_loss, expectancy, mean_net_delta) are nulled server-side —
+// null here always means "not computed / insufficient", never zero.
+
+export interface ReviewFilters {
+  since?: string
+  prompt_version?: string
+}
+
+function reviewParams(filters: ReviewFilters): string {
+  const params = new URLSearchParams()
+  if (filters.since) params.set('since', filters.since)
+  if (filters.prompt_version) params.set('prompt_version', filters.prompt_version)
+  const qs = params.toString()
+  return qs ? `?${qs}` : ''
+}
+
+export interface RejectionRuleCount {
+  rule_id: string
+  count: number
+}
+
+export interface FunnelResponse {
+  total: number
+  gated: number
+  reasoned: number
+  no_action_agent: number
+  proposed: number
+  rejected: number
+  sized_to_zero: number
+  execution_failed: number
+  opened: number
+  rejections_by_rule: RejectionRuleCount[]
+}
+
+export interface StrategyStatsOut {
+  strategy: string
+  trade_count: number
+  hit_count: number
+  miss_count: number
+  hit_rate: number | null
+  avg_win: number | null
+  avg_loss: number | null
+  expectancy: number | null
+  total_pnl: number
+  sufficient: boolean
+}
+
+export interface OpenSummaryOut {
+  open_position_count: number
+  realized_to_date: number
+}
+
+export interface HitRateResponse {
+  by_strategy: Record<string, StrategyStatsOut>
+  overall: StrategyStatsOut
+  open_summary: OpenSummaryOut
+  min_sample_size: number
+}
+
+export interface UnderlyingPnLOut {
+  underlying: string
+  net_pnl: number
+  trade_count: number
+}
+
+export interface StrategyPnLOut {
+  strategy: string
+  net_pnl: number
+  trade_count: number
+}
+
+export interface AttributionResponse {
+  by_underlying: Record<string, UnderlyingPnLOut>
+  by_strategy: Record<string, StrategyPnLOut>
+  total_realized_pnl: number
+  open_summary: OpenSummaryOut
+}
+
+export interface DeltaSkewOut {
+  sample_size: number
+  mean_net_delta: number | null
+  sufficient: boolean
+  direction: 'bullish' | 'bearish' | 'neutral' | 'insufficient_data'
+}
+
+export interface DirectionWinRateOut {
+  direction: string
+  sample_size: number
+  sufficient: boolean
+  hit_rate: number | null
+  avg_win: number | null
+  avg_loss: number | null
+  expectancy: number | null
+  total_pnl: number
+}
+
+export interface EventProximityOut {
+  near_catalyst: DirectionWinRateOut
+  baseline: DirectionWinRateOut
+}
+
+export interface BiasResponse {
+  min_sample_size: number
+  window_start: string | null
+  delta_skew: DeltaSkewOut
+  by_direction: Record<string, DirectionWinRateOut>
+  event_proximity: EventProximityOut
+}
+
+export function fetchFunnel(filters: ReviewFilters = {}): Promise<FunnelResponse> {
+  return getJSON<FunnelResponse>(`/api/review/funnel${reviewParams(filters)}`)
+}
+
+export function fetchHitRate(filters: ReviewFilters = {}): Promise<HitRateResponse> {
+  return getJSON<HitRateResponse>(`/api/review/hit-rate${reviewParams(filters)}`)
+}
+
+export function fetchAttribution(filters: ReviewFilters = {}): Promise<AttributionResponse> {
+  return getJSON<AttributionResponse>(`/api/review/attribution${reviewParams(filters)}`)
+}
+
+export function fetchBias(filters: ReviewFilters = {}): Promise<BiasResponse> {
+  return getJSON<BiasResponse>(`/api/review/bias${reviewParams(filters)}`)
+}

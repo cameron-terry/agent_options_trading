@@ -1,7 +1,11 @@
 import { http, HttpResponse } from 'msw'
 import type {
+  AttributionResponse,
+  BiasResponse,
   CycleDetail,
   CycleListItem,
+  FunnelResponse,
+  HitRateResponse,
   OverviewResponse,
   PositionSummary,
 } from '../../api'
@@ -82,6 +86,118 @@ export const cycleDetailFixture: CycleDetail = {
   orders: [],
 }
 
+export const funnelFixture: FunnelResponse = {
+  total: 12,
+  gated: 2,
+  reasoned: 10,
+  no_action_agent: 6,
+  proposed: 4,
+  rejected: 1,
+  sized_to_zero: 0,
+  execution_failed: 0,
+  opened: 3,
+  rejections_by_rule: [{ rule_id: 'EVENT_BLACKOUT', count: 1 }],
+}
+
+export const hitRateFixture: HitRateResponse = {
+  by_strategy: {
+    bull_put_spread: {
+      strategy: 'bull_put_spread',
+      trade_count: 2,
+      hit_count: 1,
+      miss_count: 1,
+      hit_rate: null,
+      avg_win: null,
+      avg_loss: null,
+      expectancy: null,
+      total_pnl: 70,
+      sufficient: false,
+    },
+  },
+  overall: {
+    strategy: '_all',
+    trade_count: 2,
+    hit_count: 1,
+    miss_count: 1,
+    hit_rate: null,
+    avg_win: null,
+    avg_loss: null,
+    expectancy: null,
+    total_pnl: 70,
+    sufficient: false,
+  },
+  open_summary: { open_position_count: 0, realized_to_date: 0 },
+  min_sample_size: 10,
+}
+
+export const attributionFixture: AttributionResponse = {
+  by_underlying: {
+    SPY: { underlying: 'SPY', net_pnl: 150, trade_count: 1 },
+    QQQ: { underlying: 'QQQ', net_pnl: -80, trade_count: 1 },
+  },
+  by_strategy: {
+    bull_put_spread: { strategy: 'bull_put_spread', net_pnl: 150, trade_count: 1 },
+    iron_condor: { strategy: 'iron_condor', net_pnl: -80, trade_count: 1 },
+  },
+  total_realized_pnl: 70,
+  open_summary: { open_position_count: 0, realized_to_date: 0 },
+}
+
+export const biasFixture: BiasResponse = {
+  min_sample_size: 10,
+  window_start: null,
+  delta_skew: {
+    sample_size: 2,
+    mean_net_delta: null,
+    sufficient: false,
+    direction: 'insufficient_data',
+  },
+  by_direction: {
+    bullish: {
+      direction: 'bullish',
+      sample_size: 2,
+      sufficient: false,
+      hit_rate: null,
+      avg_win: null,
+      avg_loss: null,
+      expectancy: null,
+      total_pnl: 70,
+    },
+    bearish: {
+      direction: 'bearish',
+      sample_size: 0,
+      sufficient: false,
+      hit_rate: null,
+      avg_win: null,
+      avg_loss: null,
+      expectancy: null,
+      total_pnl: 0,
+    },
+  },
+  event_proximity: {
+    near_catalyst: {
+      direction: 'near_catalyst',
+      sample_size: 1,
+      sufficient: false,
+      hit_rate: null,
+      avg_win: null,
+      avg_loss: null,
+      expectancy: null,
+      total_pnl: -80,
+    },
+    baseline: {
+      direction: 'baseline',
+      sample_size: 1,
+      sufficient: false,
+      hit_rate: null,
+      avg_win: null,
+      avg_loss: null,
+      expectancy: null,
+      total_pnl: 150,
+    },
+  },
+}
+
 export const handlers = [
   http.get('/api/overview', () => HttpResponse.json(overviewFixture)),
   http.get('/api/positions', () => HttpResponse.json(positionsFixture)),
@@ -89,4 +205,8 @@ export const handlers = [
   http.get('/api/cycles/:cycleId', ({ params }) =>
     HttpResponse.json({ ...cycleDetailFixture, cycle_id: String(params.cycleId) }),
   ),
+  http.get('/api/review/funnel', () => HttpResponse.json(funnelFixture)),
+  http.get('/api/review/hit-rate', () => HttpResponse.json(hitRateFixture)),
+  http.get('/api/review/attribution', () => HttpResponse.json(attributionFixture)),
+  http.get('/api/review/bias', () => HttpResponse.json(biasFixture)),
 ]

@@ -4,16 +4,17 @@ import { ActivityFeed } from './components/ActivityFeed'
 import { DecisionsScreen } from './components/DecisionsScreen'
 import { EquityCurve } from './components/EquityCurve'
 import { KillSwitchChip } from './components/KillSwitchChip'
+import { PerformanceScreen } from './components/PerformanceScreen'
 import { PositionsTable } from './components/PositionsTable'
 import { Tiles } from './components/Tiles'
 
 // Screen switching is local state, not a router — matches the design
-// reference's presentational tabs (WP-9.2 decision). Performance/Ask aren't
-// built yet so their tabs stay inert. Both this and the selected cycle live
-// here so WP-9.9's URL-addressable cycle requirement (citations must deep
-// link into the Decision explorer) is a contained swap to a router later,
-// not an unwind of state scattered across screens.
-type Screen = 'overview' | 'decisions'
+// reference's presentational tabs (WP-9.2 decision). Ask isn't built yet so
+// its tab stays inert. Both this and the selected cycle live here so
+// WP-9.9's URL-addressable cycle requirement (citations must deep link into
+// the Decision explorer) is a contained swap to a router later, not an
+// unwind of state scattered across screens.
+type Screen = 'overview' | 'decisions' | 'performance'
 
 function App() {
   const [screen, setScreen] = useState<Screen>('overview')
@@ -75,7 +76,12 @@ function App() {
           >
             Decisions
           </span>
-          <span>Performance</span>
+          <span
+            className={screen === 'performance' ? 'on' : undefined}
+            onClick={() => setScreen('performance')}
+          >
+            Performance
+          </span>
           <span>Ask</span>
         </nav>
         <div className="console-header__right">
@@ -127,6 +133,8 @@ function App() {
       {screen === 'decisions' && (
         <DecisionsScreen selectedCycleId={selectedCycleId} onSelectCycle={setSelectedCycleId} />
       )}
+
+      {screen === 'performance' && <PerformanceScreen />}
     </main>
   )
 }

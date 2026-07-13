@@ -1,10 +1,22 @@
 import { describe, it, expect } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import { server } from './test/msw/server'
-import { cyclesFixture, overviewFixture, positionsFixture } from './test/msw/handlers'
 import {
+  attributionFixture,
+  biasFixture,
+  cyclesFixture,
+  funnelFixture,
+  hitRateFixture,
+  overviewFixture,
+  positionsFixture,
+} from './test/msw/handlers'
+import {
+  fetchAttribution,
+  fetchBias,
   fetchCycleDetail,
   fetchCycles,
+  fetchFunnel,
+  fetchHitRate,
   fetchOverview,
   fetchPositions,
 } from './api'
@@ -84,6 +96,53 @@ describe('fetchCycleDetail', () => {
 
     // The slash in the id is percent-encoded so it stays a single path segment.
     expect(requestPath).toBe('/api/cycles/a%2Fb')
+  })
+})
+
+describe('review endpoints', () => {
+  it('fetchFunnel returns the parsed funnel payload', async () => {
+    await expect(fetchFunnel()).resolves.toEqual(funnelFixture)
+  })
+
+  it('fetchHitRate returns the parsed hit-rate payload', async () => {
+    await expect(fetchHitRate()).resolves.toEqual(hitRateFixture)
+  })
+
+  it('fetchAttribution returns the parsed attribution payload', async () => {
+    await expect(fetchAttribution()).resolves.toEqual(attributionFixture)
+  })
+
+  it('fetchBias returns the parsed bias payload', async () => {
+    await expect(fetchBias()).resolves.toEqual(biasFixture)
+  })
+
+  it('sends no query string when no filters are given', async () => {
+    let requestUrl = ''
+    server.use(
+      http.get('/api/review/funnel', ({ request }) => {
+        requestUrl = request.url
+        return HttpResponse.json(funnelFixture)
+      }),
+    )
+
+    await fetchFunnel()
+
+    expect(new URL(requestUrl).search).toBe('')
+  })
+
+  it('serializes since and prompt_version into the query string', async () => {
+    let params = new URLSearchParams()
+    server.use(
+      http.get('/api/review/hit-rate', ({ request }) => {
+        params = new URL(request.url).searchParams
+        return HttpResponse.json(hitRateFixture)
+      }),
+    )
+
+    await fetchHitRate({ since: '2026-07-01T00:00:00Z', prompt_version: 'v1.0.0' })
+
+    expect(params.get('since')).toBe('2026-07-01T00:00:00Z')
+    expect(params.get('prompt_version')).toBe('v1.0.0')
   })
 })
 
