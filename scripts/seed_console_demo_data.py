@@ -27,10 +27,18 @@ override — see alembic/env.py), then seeds. --force removes an existing file
 at the target path before migrating; without it, an existing file is left
 alone and alembic runs its normal (idempotent) upgrade against it.
 
-Then point the console's demo container at it:
+Then point the console's demo container at it. Config is a plain pydantic
+BaseModel (not BaseSettings), so DB_URL alone does nothing here — the
+container ships no config.toml (Dockerfile.console doesn't COPY one), so
+options_agent.ui falls back to hardcoded defaults and silently ignores the
+env var. Mount a config.toml with db_url pointing at the mounted path
+instead:
+
+    cp config.toml <scratch-dir>/config.toml
+    # edit db_url in the copy to: sqlite:////app/demo-data/dev.db
     docker run -d --rm --name console-demo -p 127.0.0.1:8001:8000 \\
       -v <scratch-dir>:/app/demo-data \\
-      -e DB_URL=sqlite:////app/demo-data/dev.db \\
+      -v <scratch-dir>/config.toml:/app/config.toml:ro \\
       agent_options_trading-console:latest
 """
 
