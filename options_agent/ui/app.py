@@ -48,6 +48,7 @@ from options_agent.ui.review import (
     get_bias,
     get_funnel,
     get_hit_rate,
+    get_prompt_versions,
 )
 
 logger = logging.getLogger(__name__)
@@ -170,6 +171,11 @@ def create_app(
                 prompt_version=prompt_version,
                 min_sample_size=config.limits.bias_min_sample_size,
             )
+
+    @app.get("/api/review/prompt-versions")
+    def review_prompt_versions() -> list[str]:
+        with get_connection(engine) as conn:
+            return get_prompt_versions(conn)
 
     if STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="spa")

@@ -27,6 +27,20 @@ describe('FunnelPanel', () => {
     expect(within(openedRow).getByText('3')).toBeInTheDocument()
   })
 
+  it('shades each row a distinct color, lightest first', () => {
+    render(<FunnelPanel funnel={funnelData()} />)
+    const bars = document.querySelectorAll('.funnel__bar')
+    expect(bars).toHaveLength(5)
+    const colors = Array.from(bars).map((el) => (el as HTMLElement).style.background)
+    expect(colors).toEqual([
+      'var(--f1)',
+      'var(--f2)',
+      'var(--f3)',
+      'var(--f4)',
+      'var(--f5)',
+    ])
+  })
+
   it('renders the drop-off summary line', () => {
     render(<FunnelPanel funnel={funnelData()} />)
     expect(screen.getByText(/gated 2/)).toBeInTheDocument()
@@ -52,10 +66,20 @@ describe('FunnelPanel', () => {
 })
 
 describe('RejectionsByRulePanel', () => {
-  it('renders one row per rejection rule with its fire count', () => {
+  it('renders one row per rejection rule with its fire count and a reading', () => {
     render(<RejectionsByRulePanel funnel={funnelData()} />)
-    expect(screen.getByText('EVENT_BLACKOUT')).toBeInTheDocument()
-    expect(screen.getByText('1')).toBeInTheDocument()
+    const row = screen.getByText('EVENT_BLACKOUT').closest('tr') as HTMLElement
+    expect(within(row).getByText('1')).toBeInTheDocument()
+    expect(within(row).getByText(/earnings\/event blackout window/)).toBeInTheDocument()
+  })
+
+  it('falls back to a generic reading for an unmapped rule id', () => {
+    render(
+      <RejectionsByRulePanel
+        funnel={funnelData({ rejections_by_rule: [{ rule_id: 'SOME_NEW_RULE', count: 2 }] })}
+      />,
+    )
+    expect(screen.getByText('no reading available')).toBeInTheDocument()
   })
 
   it('shows an empty state when there are no rejections', () => {

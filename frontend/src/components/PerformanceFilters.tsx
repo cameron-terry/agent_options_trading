@@ -1,9 +1,9 @@
-import { useState } from 'react'
-import type { ReviewFilters } from '../api'
+import { useEffect, useState } from 'react'
+import { fetchPromptVersions, type ReviewFilters } from '../api'
 
-// Version picker (distinct prompt_version values from the journal) and the
-// side-by-side compare layout are WP-9.6 scope — this is a free-text filter
-// only, same as the CLI's --prompt-version flag.
+// Side-by-side compare layout is WP-9.6 scope — this is a single-version
+// filter only. The version list itself comes from GET /api/review/prompt-
+// versions (WP-9.5), which WP-9.6 should reuse rather than duplicate.
 const RANGE_OPTIONS: { label: string; days: number | null }[] = [
   { label: 'all time', days: null },
   { label: 'last 7 days', days: 7 },
@@ -29,6 +29,21 @@ export function PerformanceFilters({ filters, onChange }: PerformanceFiltersProp
   // <select> without trying to reverse-map an arbitrary ISO string back to
   // one of the four presets.
   const [rangeDays, setRangeDays] = useState<number | null>(null)
+  const [promptVersions, setPromptVersions] = useState<string[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    fetchPromptVersions()
+      .then((versions) => {
+        if (!cancelled) setPromptVersions(versions)
+      })
+      .catch(() => {
+        // Non-fatal: the filter row still works with "all versions" only.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   return (
     <div className="cycle-filters">
@@ -47,15 +62,20 @@ export function PerformanceFilters({ filters, onChange }: PerformanceFiltersProp
           </option>
         ))}
       </select>
-      <input
+      <select
         className="cycle-filters__input"
-        type="text"
-        placeholder="prompt_version — exact match"
         value={filters.prompt_version ?? ''}
         onChange={(e) =>
-          onChange({ ...filters, prompt_version: e.target.value.trim() || undefined })
+          onChange({ ...filters, prompt_version: e.target.value || undefined })
         }
-      />
+      >
+        <option value="">prompt_version: all</option>
+        {promptVersions.map((v) => (
+          <option key={v} value={v}>
+            {v}
+          </option>
+        ))}
+      </select>
     </div>
   )
 }

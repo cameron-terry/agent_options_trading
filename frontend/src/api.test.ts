@@ -9,6 +9,7 @@ import {
   hitRateFixture,
   overviewFixture,
   positionsFixture,
+  promptVersionsFixture,
 } from './test/msw/handlers'
 import {
   fetchAttribution,
@@ -19,6 +20,7 @@ import {
   fetchHitRate,
   fetchOverview,
   fetchPositions,
+  fetchPromptVersions,
 } from './api'
 
 describe('fetchOverview', () => {
@@ -114,6 +116,10 @@ describe('review endpoints', () => {
 
   it('fetchBias returns the parsed bias payload', async () => {
     await expect(fetchBias()).resolves.toEqual(biasFixture)
+  })
+
+  it('fetchPromptVersions returns the parsed version list', async () => {
+    await expect(fetchPromptVersions()).resolves.toEqual(promptVersionsFixture)
   })
 
   it('sends no query string when no filters are given', async () => {

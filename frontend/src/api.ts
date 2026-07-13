@@ -386,3 +386,7 @@ export function fetchAttribution(filters: ReviewFilters = {}): Promise<Attributi
 export function fetchBias(filters: ReviewFilters = {}): Promise<BiasResponse> {
   return getJSON<BiasResponse>(`/api/review/bias${reviewParams(filters)}`)
 }
+
+export function fetchPromptVersions(): Promise<string[]> {
+  return getJSON<string[]>('/api/review/prompt-versions')
+}

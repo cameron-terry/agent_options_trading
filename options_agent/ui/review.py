@@ -77,6 +77,20 @@ def _fetch(conn: Connection, *, since: datetime | None):
     return records, outcomes
 
 
+def get_prompt_versions(conn: Connection) -> list[str]:
+    """GET /api/review/prompt-versions.
+
+    Distinct prompt_version values across the *entire* journal, ignoring any
+    currently-active `since` filter — the version picker needs to list every
+    version the operator might want to select, including ones outside the
+    currently-viewed date range. This is the "small endpoint" the WP-9.6
+    card names as one option for its version picker; WP-9.6 should reuse it
+    rather than adding a second one.
+    """
+    records = query_journal(conn, date_from=None)
+    return sorted({r.prompt_version for r in records})
+
+
 # ---------------------------------------------------------------------------
 # Funnel
 # ---------------------------------------------------------------------------

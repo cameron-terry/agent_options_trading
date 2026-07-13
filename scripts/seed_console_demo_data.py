@@ -3,9 +3,14 @@
 Populates journal records (today's cycles, spanning OPENED / REJECTED /
 NO_ACTION_AGENT / NO_ACTION_GATED, plus one with a deliberately-unresolvable
 position link to exercise the anomaly path), open positions across a spread
-of distance-to-trigger states, and closed positions/outcomes for the equity
-curve and realized-P&L math — enough for every WP-9 console screen (Overview,
-Decision explorer, Performance, Ask) to have something real to render.
+of distance-to-trigger states, and 15 closed positions/outcomes (each with a
+matching OPENED JournalRecord, required for obs/review.py's per-strategy
+attribution — see _seed_closed_history) spanning two prompt versions and a
+mostly-bullish delta lean — enough for every WP-9 console screen (Overview,
+Decision explorer, Performance, Ask) to have something real to render,
+including both a populated (bull_put_spread, n=10) and a still-insufficient
+(iron_condor/cash_secured_put/covered_call, n<10) bucket on the Performance
+screen.
 
 This is a shared fixture, not a one-off: reuse it for every WP-9.x screen's
 docker visual-verification pass instead of hand-rolling a new scratch seed
@@ -107,13 +112,18 @@ def _migrate(db_path: Path, *, force: bool) -> None:
 
 
 def _bull_put_proposal(
-    *, underlying: str, short_strike: float, long_strike: float, dte: int
+    *,
+    underlying: str,
+    short_strike: float,
+    long_strike: float,
+    dte: int,
+    strategy: str = "bull_put_spread",
 ) -> TradeProposal:
     expiration = (NOW + timedelta(days=dte)).date()
     return TradeProposal(
         action="OPEN",
         underlying=underlying,
-        strategy="bull_put_spread",
+        strategy=strategy,
         legs=[
             Leg(right="put", side="sell", strike=short_strike, expiration=expiration),
             Leg(right="put", side="buy", strike=long_strike, expiration=expiration),
@@ -258,17 +268,63 @@ def _seed_open_position(
     )
 
 
+# Closed trades for the Performance screen (WP-9.5): (pos_id, underlying,
+# strategy, realized_pnl, days_ago, net_delta_at_open, earnings_within_dte,
+# prompt_version). 10 bull_put_spread trades cross bias_min_sample_size's
+# default floor (10) so the hit-rate table's "overall" row and that strategy
+# bucket render real numbers instead of "insufficient" — iron_condor (3),
+# cash_secured_put (1), and covered_call (1) deliberately stay under the
+# floor so the insufficient-chip path still has something to render too.
+# Deltas are mostly positive (bull_put_spread/cash_secured_put/covered_call
+# lean bullish by construction; iron_condor stays near-neutral) so the bias
+# panel's delta-skew meter and bullish cohort read as populated, while the
+# bearish cohort correctly stays "insufficient" (n=0). Three trades are
+# flagged earnings_within_dte=True so the near-catalyst cohort has a non-zero
+# (but still insufficient, n=3) sample against baseline's n=12. Six trades
+# predate prompt_version v2.1.0 so the version filter has two real buckets
+# to switch between, not just one.
+_CLOSED_TRADES = [
+    ("pos-hist-1", "QQQ", "iron_condor", 8.0, 7, 0.02, False, "v2.1.0"),
+    ("pos-hist-2", "AMD", "bull_put_spread", -25.0, 6, 0.18, False, "v2.1.0"),
+    ("pos-hist-3", "AAPL", "cash_secured_put", 62.0, 3, 0.30, True, "v2.1.0"),
+    ("pos-hist-4", "MSFT", "bull_put_spread", 118.0, 10, 0.22, False, "v2.0.0"),
+    ("pos-hist-5", "SPY", "iron_condor", -40.0, 12, -0.03, False, "v2.0.0"),
+    ("pos-hist-6", "SPY", "bull_put_spread", 95.0, 9, 0.25, False, "v2.0.0"),
+    ("pos-hist-7", "QQQ", "bull_put_spread", 72.0, 8, 0.20, False, "v2.0.0"),
+    ("pos-hist-8", "AAPL", "bull_put_spread", 140.0, 14, 0.28, True, "v2.0.0"),
+    ("pos-hist-9", "MSFT", "bull_put_spread", -60.0, 15, 0.19, False, "v2.0.0"),
+    ("pos-hist-10", "NVDA", "bull_put_spread", 110.0, 4, 0.31, False, "v2.1.0"),
+    ("pos-hist-11", "AMD", "iron_condor", 35.0, 11, 0.04, False, "v2.0.0"),
+    ("pos-hist-12", "TSLA", "covered_call", 50.0, 13, 0.55, True, "v2.0.0"),
+    ("pos-hist-13", "SPY", "bull_put_spread", 85.0, 5, 0.24, False, "v2.1.0"),
+    ("pos-hist-14", "QQQ", "bull_put_spread", -30.0, 2, 0.15, False, "v2.1.0"),
+    ("pos-hist-15", "AAPL", "bull_put_spread", 65.0, 1, 0.21, False, "v2.1.0"),
+]
+
+
 def _seed_closed_history(conn) -> None:
-    """A handful of closed positions over the past two weeks — equity curve,
-    realized P&L tile, and hit-rate math all need more than one data point."""
-    closed = [
-        ("pos-hist-1", "QQQ", "iron_condor", 8, 7),
-        ("pos-hist-2", "AMD", "bull_put_spread", -25, 6),
-        ("pos-hist-3", "AAPL", "cash_secured_put", 62, 3),
-        ("pos-hist-4", "MSFT", "bull_put_spread", 118, 10),
-        ("pos-hist-5", "SPY", "iron_condor", -40, 12),
-    ]
-    for pos_id, underlying, strategy, pnl, days_ago in closed:
+    """Closed positions over the past two weeks, each with a matching OPENED
+    JournalRecord.
+
+    Equity curve, realized-P&L tile, and hit-rate math all need more than one
+    data point (Overview screen) — but the Performance screen's four
+    obs/review.py wrappers need more than that: hit_rate_by_strategy(),
+    pnl_attribution(), and detect_bias() all attribute a closed position to a
+    strategy/underlying/net_delta *only* via the OPENED JournalRecord that
+    shares its position_id (see obs/review.py's _build_position_map) — a
+    Position + OutcomeRecord with no matching JournalRecord contributes
+    nothing to any of the three. Every trade below therefore gets both.
+    """
+    for (
+        pos_id,
+        underlying,
+        strategy,
+        pnl,
+        days_ago,
+        net_delta,
+        earnings_within_dte,
+        prompt_version,
+    ) in _CLOSED_TRADES:
         opened = NOW - timedelta(days=days_ago + 5)
         closed_at = NOW - timedelta(days=days_ago)
         insert_position(
@@ -315,6 +371,48 @@ def _seed_closed_history(conn) -> None:
                 recorded_at=closed_at,
                 contracts_closed=1,
                 realized_pnl=float(pnl),
+            ),
+        )
+        write_journal_record(
+            conn,
+            JournalRecord(
+                cycle_id=f"c-2026-demo-closed-{pos_id}",
+                timestamp=opened,
+                action_taken=ActionTaken.OPENED,
+                decision=Decision(
+                    proposal=_bull_put_proposal(
+                        underlying=underlying,
+                        short_strike=100.0,
+                        long_strike=95.0,
+                        dte=30,
+                        strategy=strategy,
+                    ),
+                    validation_result=ValidationResult(passed=True, reasons=[]),
+                    sizing_result=SizingResult(
+                        contracts=1,
+                        sized_max_loss=200.0,
+                        sized_max_profit=100.0,
+                        risk_budget_used=0.005,
+                        binding_constraint=SizingConstraint.RISK_BUDGET,
+                    ),
+                    action_taken=ActionTaken.OPENED,
+                ),
+                context_snapshot=ContextSnapshot(
+                    assembled_context={},
+                    context_hash=f"sha256:{pos_id}",
+                    model_id="claude-sonnet-5",
+                    prompt_version=prompt_version,
+                    assembled_at=opened,
+                ),
+                position_ids=[pos_id],
+                strategy=strategy,
+                underlying=underlying,
+                conviction=0.65,
+                net_delta_at_open=net_delta,
+                earnings_within_dte=earnings_within_dte,
+                limits_version="v0.3.0",
+                prompt_version=prompt_version,
+                model_id="claude-sonnet-5",
             ),
         )
 

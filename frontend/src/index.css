@@ -17,6 +17,12 @@
   --crit: #d03b3b;
   --gain: #1fb14b;
   --loss: #e05e5e;
+  /* Funnel bar shades (Performance screen), lightest → darkest */
+  --f1: #6da7ec;
+  --f2: #5598e7;
+  --f3: #3987e5;
+  --f4: #256abf;
+  --f5: #1c5cab;
   --sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
   --mono: ui-monospace, 'SF Mono', 'Cascadia Code', Consolas, 'Liberation Mono', monospace;
   font-family: var(--sans);
@@ -900,6 +906,12 @@ body {
 .review-table__mono {
   font-family: var(--mono);
   font-size: 11px;
+}
+
+.review-table__reading {
+  color: var(--ink2);
+  font-size: 12px;
+  white-space: normal;
 }
 
 .review-table__total td {

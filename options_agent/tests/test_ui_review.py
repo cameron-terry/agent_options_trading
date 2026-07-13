@@ -459,6 +459,27 @@ def test_bias_insufficient_data_by_default(seeded) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Prompt versions
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_versions_returns_distinct_sorted_values(seeded) -> None:
+    body = _client(seeded).get("/api/review/prompt-versions").json()
+    assert body == ["v1.0.0", "v2.0.0"]
+
+
+def test_prompt_versions_ignores_since(seeded) -> None:
+    # The picker must list every version present, even ones outside whatever
+    # date range the operator currently has selected.
+    far_future = "2099-01-01T00:00:00Z"
+    body = _client(seeded).get(
+        "/api/review/prompt-versions", params={"since": far_future}
+    )
+    assert body.status_code == 200
+    assert body.json() == ["v1.0.0", "v2.0.0"]
+
+
+# ---------------------------------------------------------------------------
 # NaN never reaches the wire — every /api/review/* response must be valid JSON
 # ---------------------------------------------------------------------------
 

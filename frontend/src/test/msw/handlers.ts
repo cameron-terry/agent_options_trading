@@ -198,6 +198,8 @@ export const biasFixture: BiasResponse = {
   },
 }
 
+export const promptVersionsFixture: string[] = ['v1.0.0', 'v2.0.0', 'v2.1.0']
+
 export const handlers = [
   http.get('/api/overview', () => HttpResponse.json(overviewFixture)),
   http.get('/api/positions', () => HttpResponse.json(positionsFixture)),
@@ -209,4 +211,5 @@ export const handlers = [
   http.get('/api/review/hit-rate', () => HttpResponse.json(hitRateFixture)),
   http.get('/api/review/attribution', () => HttpResponse.json(attributionFixture)),
   http.get('/api/review/bias', () => HttpResponse.json(biasFixture)),
+  http.get('/api/review/prompt-versions', () => HttpResponse.json(promptVersionsFixture)),
 ]
