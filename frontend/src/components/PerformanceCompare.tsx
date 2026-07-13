@@ -45,9 +45,15 @@ function CompareColumn({
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    // Clear immediately on every version/range change (success, error, or
+    // in-flight) rather than leaving the previous fetch's numbers on screen
+    // under the new label — a stale-but-plausible-looking mismatch between
+    // the "Version X" header and the figures beneath it would otherwise be
+    // easy to miss, more so here than in a single-version view since the
+    // label is right next to the data it's supposed to describe.
+    setData(EMPTY_COLUMN)
+    setError(null)
     if (!selected) {
-      setData(EMPTY_COLUMN)
-      setError(null)
       return
     }
     let cancelled = false

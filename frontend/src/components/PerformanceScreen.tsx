@@ -28,11 +28,20 @@ export function PerformanceScreen() {
 
   useEffect(() => {
     let cancelled = false
+    // While comparing, each column picks its own prompt_version — the top
+    // filter's leftover selection has no coordinated meaning here, so the
+    // funnel panel and the "N cycles" summary always reflect all versions
+    // regardless of what it was last set to (rather than silently scoping
+    // the summary to whatever single version happened to be selected before
+    // Compare was toggled on). Attribution/bias aren't rendered in compare
+    // mode at all, so skip fetching them entirely rather than wasting two
+    // requests on every filter change.
+    const summaryFilters = compareMode ? { since: filters.since } : filters
     Promise.all([
-      fetchFunnel(filters),
-      fetchHitRate(filters),
-      fetchAttribution(filters),
-      fetchBias(filters),
+      fetchFunnel(summaryFilters),
+      fetchHitRate(summaryFilters),
+      compareMode ? Promise.resolve(null) : fetchAttribution(filters),
+      compareMode ? Promise.resolve(null) : fetchBias(filters),
     ])
       .then(([funnelRes, hitRateRes, attributionRes, biasRes]) => {
         if (cancelled) return
@@ -49,7 +58,7 @@ export function PerformanceScreen() {
     return () => {
       cancelled = true
     }
-  }, [filters])
+  }, [filters, compareMode])
 
   // "N cycles · M opened · K closed" summary, right-aligned in the filter
   // row per the design reference. "Closed" is hit_rate's overall.trade_count
@@ -63,7 +72,12 @@ export function PerformanceScreen() {
   return (
     <div className="console-screen">
       {error && <div className="console-error">Failed to load: {error}</div>}
-      <PerformanceFilters filters={filters} onChange={setFilters} summary={summary} />
+      <PerformanceFilters
+        filters={filters}
+        onChange={setFilters}
+        summary={summary}
+        disablePromptVersion={compareMode}
+      />
 
       <label className="compare-toggle">
         <input

@@ -107,6 +107,26 @@ describe('PerformanceCompare', () => {
     expect(screen.getByText('pick a prompt_version to compare')).toBeInTheDocument()
   })
 
+  it('clears a column\'s stale data immediately on version switch, before any new fetch resolves', async () => {
+    installVersionedHandlers()
+    render(<PerformanceCompare />)
+
+    // Version A (v2.0.0) loads its initial data.
+    expect(await screen.findByText('+$100')).toBeInTheDocument()
+
+    // Make the *next* hit-rate request hang forever, so if the old figures
+    // were still showing it could only be because they were never cleared —
+    // this fetch will never resolve to replace them.
+    server.use(http.get('/api/review/hit-rate', () => new Promise(() => {})))
+
+    const columns = screen.getAllByRole('combobox')
+    await userEvent.selectOptions(columns[0], 'v2.1.0')
+
+    await waitFor(() => {
+      expect(screen.queryByText('+$100')).toBeNull()
+    })
+  })
+
   it('surfaces a per-column fetch error without breaking the other column', async () => {
     server.use(
       http.get('/api/review/hit-rate', ({ request }) => {
