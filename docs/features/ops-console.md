@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/ui/` (backend), `frontend/` (React SPA source)
 **Credentials required:** none — reads the DB only; `ANTHROPIC_API_KEY` becomes required starting WP-9.8 (ask-the-journal)
-**Status:** Overview (WP-9.2), Decision explorer (WP-9.3), and the live activity stream (WP-9.4) are complete. Skeleton (`/api/health` + static SPA shell + read-only engine + compose wiring) landed in WP-9.1. Further screens (Performance & bias, Ask the journal) land in later WP-9 cards.
+**Status:** Overview (WP-9.2), Decision explorer (WP-9.3), the live activity stream (WP-9.4), and the Performance & bias screen (WP-9.5) are complete. Skeleton (`/api/health` + static SPA shell + read-only engine + compose wiring) landed in WP-9.1. Ask the journal lands in later WP-9 cards.
 
 A read-only web console over the trading journal, served by a FastAPI service that runs beside the scheduler in docker-compose. Zero changes to the trading loop; the only planned write path (kill switch, WP-9.7) reuses `obs/killswitch.py` verbatim.
 
@@ -10,10 +10,11 @@ A read-only web console over the trading journal, served by a FastAPI service th
 
 | File | Responsibility |
 |---|---|
-| `ui/app.py` | FastAPI app factory: `/api/health`, `/api/overview`, `/api/positions`, `/api/cycles`, `/api/cycles/{cycle_id}`, `/api/events`, static SPA mount, engine wiring |
+| `ui/app.py` | FastAPI app factory: `/api/health`, `/api/overview`, `/api/positions`, `/api/cycles`, `/api/cycles/{cycle_id}`, `/api/events`, `/api/review/*`, static SPA mount, engine wiring |
 | `ui/overview.py` | Overview API aggregation (WP-9.2): tiles, equity curve, activity feed, distance-to-trigger meter |
 | `ui/cycles.py` | Decision explorer API (WP-9.3): filtered cycle list + full-trace detail, with position/order/outcome joins |
 | `ui/events.py` | Live activity stream (WP-9.4): `GET /api/events` SSE body — polls journal_records/kill_switch_log/positions for high-water-mark changes |
+| `ui/review.py` | Performance & bias API (WP-9.5): thin wrappers over `obs/review.py`'s four pure functions — funnel, hit rate, P&L attribution, bias |
 | `ui/__main__.py` | CLI entry point: `python -m options_agent.ui [--config path] [--host] [--port]` |
 | `frontend/` | Vite + React + TypeScript SPA source; builds to `dist/`, copied into the image at `options_agent/ui/static/` |
 | `Dockerfile.console` | Multi-stage build: Node stage builds the SPA, Python stage serves it |
@@ -140,7 +141,34 @@ async for chunk in event_stream(engine, request):
 
 ---
 
-## Frontend (WP-9.1, WP-9.2, WP-9.3, WP-9.4)
+## Performance & bias API (WP-9.5)
+
+`GET /api/review/funnel|hit-rate|attribution|bias` wrap the four pure functions in `obs/review.py` (`cycle_funnel`, `hit_rate_by_strategy`, `pnl_attribution`, `detect_bias`) with no new metrics and no new hit definition — see that module's docstring for the analytics design itself.
+
+```python
+from options_agent.state.db import get_connection
+from options_agent.ui.review import get_funnel, get_hit_rate, get_attribution, get_bias
+
+with get_connection(engine) as conn:
+    funnel = get_funnel(conn, since=since)                                    # FunnelResponse
+    hit_rate = get_hit_rate(conn, since=since, min_sample_size=10)            # HitRateResponse
+    attribution = get_attribution(conn, since=since)                         # AttributionResponse
+    bias = get_bias(conn, since=since, min_sample_size=10)                   # BiasResponse
+```
+
+**Parity with the CLI is load-bearing, not incidental.** `_fetch()` in `ui/review.py` reproduces `obs/__main__.py`'s `cmd_review`/`cmd_bias` fetch exactly: `query_journal(date_from=since)`, then `query_outcome_records` scoped to the `position_ids` touched by an `OPENED`/`CLOSED`/`ROLLED` record in that window. Any drift here would silently break the WP-9 epic's "matches `python -m options_agent.obs review`/`bias`" definition-of-done invariant; `test_ui_review.py` asserts endpoint output against direct calls into the same pure functions.
+
+**NaN never reaches the wire.** `obs/review.py`'s dataclasses use `math.nan` for undefined stats (e.g. `avg_win` with zero wins) — valid Python, invalid JSON. Every float that can be NaN is converted to `None` before leaving `ui/review.py` (`_nn()`); the frontend renders `None` as "—", same as the CLI's dim-dash treatment.
+
+**Insufficient-sample display gating is a wrapper-layer concern, not a pure-function one.** `hit_rate_by_strategy()` has no min-sample-size floor of its own — `StrategyStats` only goes NaN at `trade_count == 0`. The card's "insufficient (n<10)" cell requirement is applied in `ui/review.py` on top of the unmodified report: `sufficient = trade_count >= bias_min_sample_size`, nulling `hit_rate`/`avg_win`/`avg_loss`/`expectancy` (never `trade_count` or `total_pnl`) when insufficient. `detect_bias()` already enforces its own `min_sample_size` internally; its `sufficient` flags pass through unchanged. `bias_min_sample_size` (`Limits`, default 10) is reused for both — one threshold, one config knob, per the card's scope (no second hit definition, no new metric).
+
+**`/api/review/funnel` accepts but ignores `prompt_version`.** `cycle_funnel()` has no `prompt_version` filter — and neither does the CLI's `cmd_review` call into it. The endpoint accepts the parameter anyway (for a uniform four-endpoint interface WP-9.6's compare view can drive with one filter object) but never applies it, preserving CLI parity exactly.
+
+**Rejections-by-rule is not one of the four functions.** It's a `Counter` over `rejection_rule_ids` on the already-fetched records, folded into `FunnelResponse.rejections_by_rule` rather than a fifth endpoint — a trivial aggregation, not a new metric.
+
+---
+
+## Frontend (WP-9.1, WP-9.2, WP-9.3, WP-9.4, WP-9.5)
 
 Vite + React + TypeScript, scaffolded via `npm create vite@latest -- --template react-ts`. Source lives at the repo root in `frontend/` (not under `options_agent/`) so Node tooling stays out of the Python package tree.
 
@@ -155,11 +183,13 @@ npm run build    # -> frontend/dist/
 
 **Refresh strategy (WP-9.4): SSE-triggered re-fetch, not polling.** `App.tsx` opens an `EventSource('/api/events')`; both `onopen` and the `update` event call the same `load()` used by WP-9.2's original 20s poll (now removed) — no component below `App.tsx` needed to change, only the fetch trigger. Because `overview` (and the kill-switch chip that reads `overview.kill_switch.state`) is fetched at the `App.tsx` level regardless of which screen is active, a `killswitch` tick updates the chip on every screen, not just Overview. The Decision explorer still fetches on demand (filter change, cycle selection) rather than reacting to ticks — it's a historical replay view, not a live one.
 
-**Screen switching (WP-9.3):** `App.tsx` holds `screen` (`'overview' | 'decisions'`) and `selectedCycleId` as local React state — the header tabs for built screens are wired to click handlers that flip `screen`; tabs for screens that don't exist yet (Performance, Ask) stay inert `<span>`s per the design reference. No client-side router yet; both pieces of state are centralized in `App.tsx` so the eventual router swap (likely landing with WP-9.9, whose citations must deep-link into the Decision explorer) is a contained change.
+**Screen switching (WP-9.3, extended WP-9.5):** `App.tsx` holds `screen` (`'overview' | 'decisions' | 'performance'`) and `selectedCycleId` as local React state — the header tabs for built screens are wired to click handlers that flip `screen`; the Ask tab stays an inert `<span>` per the design reference until WP-9.8/9.9. No client-side router yet; both pieces of state are centralized in `App.tsx` so the eventual router swap (likely landing with WP-9.9, whose citations must deep-link into the Decision explorer) is a contained change.
 
 `components/DecisionsScreen.tsx` orchestrates the Decision explorer: `components/CycleFilters.tsx` (symbol/action/date filters — symbol commits on blur/Enter rather than per-keystroke, since `query_journal`'s symbol filter is an exact match, not a substring search), `components/CycleList.tsx` (left-pane cycle list), and `components/CycleTrace.tsx` (right-pane trace renderer: header metadata, expandable tool-call transcript with a truncated result preview, proposal blockquotes + leg table, validation rule chips + reasons, and the sizing/order/position join, including the anomaly case). A filter change always re-selects the newest matching cycle rather than leaving a stale selection in place — otherwise reverting a filter can strand the view on a sparse cycle (e.g. a `NO_ACTION` cycle with no proposal) that reads as "the trace disappeared."
 
-Remaining screens (Performance & bias, Ask the journal) land in later WP-9 cards per the [design reference](https://claude.ai/code/artifact/ba602f8d-fd08-4c36-8fc5-93fa8a3efd3a).
+`components/PerformanceScreen.tsx` (WP-9.5) composes the four `/api/review/*` panels: `PerformanceFilters.tsx` (a time-range preset `<select>` computing `since` client-side, plus a free-text `prompt_version` filter — the version-picker dropdown and side-by-side compare layout are WP-9.6 scope), `FunnelPanel.tsx` (funnel bars + rejections-by-rule table), `HitRateTable.tsx` (per-strategy stats with an "insufficient" chip per `sufficient: false`, never a bare 0% or hidden row), `AttributionPanel.tsx` (P&L bars by underlying, plus a by-strategy table), and `BiasPanel.tsx` (the delta-skew meter, clamped to ±0.5 net delta same as the design reference's band, plus the direction/event-proximity cohort table). All four panels re-fetch together on any filter change; nulls from the backend (never NaN) render as "—".
+
+The Ask screen lands in later WP-9 cards per the [design reference](https://claude.ai/code/artifact/ba602f8d-fd08-4c36-8fc5-93fa8a3efd3a).
 
 ---
 

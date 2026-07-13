@@ -17,6 +17,12 @@
   --crit: #d03b3b;
   --gain: #1fb14b;
   --loss: #e05e5e;
+  /* Funnel bar shades (Performance screen), lightest → darkest */
+  --f1: #6da7ec;
+  --f2: #5598e7;
+  --f3: #3987e5;
+  --f4: #256abf;
+  --f5: #1c5cab;
   --sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
   --mono: ui-monospace, 'SF Mono', 'Cascadia Code', Consolas, 'Liberation Mono', monospace;
   font-family: var(--sans);
@@ -519,7 +525,16 @@ body {
 .cycle-filters {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
+}
+
+.cycle-filters__summary {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--ink3);
+  font-family: var(--mono);
+  white-space: nowrap;
 }
 
 .cycle-filters__input {
@@ -853,5 +868,256 @@ body {
   .decision-explorer,
   .grid2eq {
     grid-template-columns: 1fr;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Performance & bias (WP-9.5)                                         */
+/* ------------------------------------------------------------------ */
+
+/* Generic bordered data table — shared by rejections, attribution-by-
+   strategy, and bias cohort tables. Hit-rate reuses this too. */
+.review-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+}
+
+.review-table th {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink3);
+  text-align: left;
+  font-weight: 500;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.review-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: middle;
+}
+
+.review-table tr:last-child td {
+  border-bottom: none;
+}
+
+.review-table .num,
+.review-table th.num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.review-table__mono {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.review-table__reading {
+  color: var(--ink2);
+  font-size: 12px;
+  white-space: normal;
+}
+
+.review-table__total td {
+  font-weight: 600;
+  border-top: 1px solid var(--line);
+}
+
+.review-table__na {
+  color: var(--ink3);
+}
+
+.review-table--empty {
+  color: var(--ink3);
+  font-size: 13px;
+}
+
+.review-table__footnote {
+  font-size: 11.5px;
+  color: var(--ink3);
+  margin: 12px 0 0;
+  font-family: var(--mono);
+}
+
+/* Funnel bars */
+.funnel {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.funnel--empty {
+  color: var(--ink3);
+  font-size: 13px;
+}
+
+.funnel__row {
+  display: grid;
+  grid-template-columns: 150px 1fr 90px;
+  gap: 12px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.funnel__label {
+  color: var(--ink2);
+}
+
+.funnel__bar-wrap {
+  height: 20px;
+  position: relative;
+}
+
+.funnel__bar {
+  height: 100%;
+  border-radius: 0 4px 4px 0;
+  min-width: 3px;
+  background: var(--accent);
+}
+
+.funnel__count {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  text-align: right;
+}
+
+.funnel__count small {
+  color: var(--ink3);
+}
+
+.funnel__dropoffs {
+  font-size: 11.5px;
+  color: var(--ink3);
+  font-family: var(--mono);
+  padding-left: 162px;
+  margin-top: 2px;
+}
+
+/* Attribution bars */
+.attribution-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attribution-bars__row {
+  display: grid;
+  grid-template-columns: 52px 1fr 1fr 64px;
+  align-items: center;
+  gap: 0;
+  font-size: 12px;
+}
+
+.attribution-bars__label {
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+.attribution-bars__neg,
+.attribution-bars__pos {
+  height: 16px;
+  position: relative;
+}
+
+.attribution-bars__neg {
+  border-right: 1px solid var(--line);
+}
+
+.attribution-bars__fill--neg {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--loss);
+  border-radius: 4px 0 0 4px;
+}
+
+.attribution-bars__fill--pos {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--gain);
+  border-radius: 0 4px 4px 0;
+}
+
+.attribution-bars__value {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* Delta-skew meter */
+.skew-meter__track {
+  position: relative;
+  height: 34px;
+  margin: 14px 4px 4px;
+}
+
+.skew-meter__band {
+  position: absolute;
+  top: 14px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(
+    90deg,
+    rgba(208, 59, 59, 0.35),
+    var(--inset) 42%,
+    var(--inset) 58%,
+    rgba(12, 163, 12, 0.35)
+  );
+}
+
+.skew-meter__zero {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  width: 1px;
+  height: 14px;
+  background: var(--ink3);
+}
+
+.skew-meter__pin {
+  position: absolute;
+  top: 6px;
+  width: 10px;
+  height: 22px;
+  border-radius: 3px;
+  background: var(--accent);
+  transform: translateX(-50%);
+}
+
+.skew-meter__cap {
+  position: absolute;
+  top: -8px;
+  transform: translateX(-50%);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--accent-soft);
+}
+
+.skew-meter__labels {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink3);
+  margin-top: 2px;
+}
+
+@media (max-width: 900px) {
+  .funnel__row {
+    grid-template-columns: 110px 1fr 80px;
+  }
+  .funnel__dropoffs {
+    padding-left: 122px;
   }
 }

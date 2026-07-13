@@ -1,12 +1,12 @@
 """FastAPI app factory — WP-9.1 skeleton, extended with WP-9.2's Overview API,
-WP-9.3's Decision explorer API, and WP-9.4's live activity stream.
+WP-9.3's Decision explorer API, WP-9.4's live activity stream, and WP-9.5's
+Performance & bias API.
 
 Ships /api/health, /api/overview, /api/positions, /api/cycles,
-/api/cycles/{cycle_id}, /api/events, and static SPA serving. Further data
-endpoints (/api/review/*, etc.) land in later WP-9 cards. The engine passed
-to create_app must be read-only (see state.db.build_engine(url,
-read_only=True)) — this module does not itself enforce that, it trusts its
-caller.
+/api/cycles/{cycle_id}, /api/events, /api/review/*, and static SPA serving.
+The engine passed to create_app must be read-only (see state.db.build_engine
+(url, read_only=True)) — this module does not itself enforce that, it trusts
+its caller.
 """
 
 from __future__ import annotations
@@ -38,6 +38,17 @@ from options_agent.ui.overview import (
     PositionSummary,
     get_overview,
     get_positions,
+)
+from options_agent.ui.review import (
+    AttributionResponse,
+    BiasResponse,
+    FunnelResponse,
+    HitRateResponse,
+    get_attribution,
+    get_bias,
+    get_funnel,
+    get_hit_rate,
+    get_prompt_versions,
 )
 
 logger = logging.getLogger(__name__)
@@ -122,6 +133,49 @@ def create_app(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @app.get("/api/review/funnel")
+    def review_funnel(
+        since: datetime | None = None, prompt_version: str | None = None
+    ) -> FunnelResponse:
+        with get_connection(engine) as conn:
+            return get_funnel(conn, since=since, prompt_version=prompt_version)
+
+    @app.get("/api/review/hit-rate")
+    def review_hit_rate(
+        since: datetime | None = None, prompt_version: str | None = None
+    ) -> HitRateResponse:
+        with get_connection(engine) as conn:
+            return get_hit_rate(
+                conn,
+                since=since,
+                prompt_version=prompt_version,
+                min_sample_size=config.limits.bias_min_sample_size,
+            )
+
+    @app.get("/api/review/attribution")
+    def review_attribution(
+        since: datetime | None = None, prompt_version: str | None = None
+    ) -> AttributionResponse:
+        with get_connection(engine) as conn:
+            return get_attribution(conn, since=since, prompt_version=prompt_version)
+
+    @app.get("/api/review/bias")
+    def review_bias(
+        since: datetime | None = None, prompt_version: str | None = None
+    ) -> BiasResponse:
+        with get_connection(engine) as conn:
+            return get_bias(
+                conn,
+                since=since,
+                prompt_version=prompt_version,
+                min_sample_size=config.limits.bias_min_sample_size,
+            )
+
+    @app.get("/api/review/prompt-versions")
+    def review_prompt_versions() -> list[str]:
+        with get_connection(engine) as conn:
+            return get_prompt_versions(conn)
 
     if STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="spa")
