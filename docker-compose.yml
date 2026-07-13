@@ -35,6 +35,14 @@ services:
       - options-agent
     environment:
       DB_URL: sqlite:////app/data/options_agent.db
+      # WP-9.8: the only secret the console needs — the ask-the-journal
+      # analyst's Anthropic client reads it from the environment. Deliberately
+      # not loaded via a bulk secrets file (see the options-agent service
+      # above): that would also leak the broker/webhook credentials into the
+      # UI container, violating the WP-9 epic's "no broker credentials in the
+      # UI environment" invariant. Resolved instead by docker compose's own
+      # .env variable substitution — an independent mechanism.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     ports:
       # Bound to localhost only — no auth, single-operator deployment (WP-9).
       - "127.0.0.1:8000:8000"

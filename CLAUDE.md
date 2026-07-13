@@ -22,3 +22,26 @@ git rebase origin/main
 ```
 
 Resolve conflicts commit-by-commit as the rebase replays. After resolving each conflicted file, `git add <file>` then `git rebase --continue`. Do not use `git merge origin/main` on feature branches.
+
+## Secret safety
+
+`.env` holds real credentials (`ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ANTHROPIC_API_KEY`, `DISCORD_WEBHOOK_URL`).
+
+- Avoid **`docker compose config`** (and similarly `docker inspect`, `env`, `printenv`, `cat .env`) If you need to sanity-check compose config, redact first:
+  ```bash
+  docker compose config 2>&1 | sed -E 's/(ALPACA_API_KEY|ALPACA_SECRET_KEY|ANTHROPIC_API_KEY|DISCORD_WEBHOOK_URL): .*/\1: [REDACTED]/'
+  ```
+  or scope the check narrowly (e.g. `grep -c ANTHROPIC_API_KEY` on a specific service's block to confirm presence, not the value).
+
+- **pytest's default traceback echoes fixture argument values** on a failing test. Always run tier-2 evals with a traceback style that suppresses locals:
+  ```bash
+  uv run pytest tests/evals/ -m eval --tb=line
+  ```
+
+- When a secret's *value* must reach a command (e.g. `docker run -e ANTHROPIC_API_KEY=...`), resolve it via shell command substitution rather than typing the literal value into the command string:
+  ```bash
+  docker run -e ANTHROPIC_API_KEY="$(grep '^ANTHROPIC_API_KEY=' .env | cut -d= -f2-)" ...
+  ```
+  Never write `-e ANTHROPIC_API_KEY=sk-...` with the value spelled out — that string is what gets logged/displayed.
+
+- If a secret leaks into tool output or a transcript despite these precautions, say so immediately and recommend rotation — don't silently continue as if nothing happened.

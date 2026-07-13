@@ -30,6 +30,17 @@ def test_console_service_has_no_alpaca_credentials():
     assert "env_file" not in console_block
 
 
+def test_console_service_gets_anthropic_key_but_not_discord_webhook():
+    # WP-9.8: the ask-the-journal analyst needs ANTHROPIC_API_KEY, declared
+    # explicitly (not via a bulk secrets file — see the test above) so
+    # DISCORD_WEBHOOK_URL still never reaches the console container.
+    text = _COMPOSE_PATH.read_text()
+    console_block = _service_block(text, "console")
+
+    assert "ANTHROPIC_API_KEY" in console_block
+    assert "DISCORD_WEBHOOK_URL" not in console_block
+
+
 def test_console_service_exists_and_binds_localhost():
     text = _COMPOSE_PATH.read_text()
     console_block = _service_block(text, "console")

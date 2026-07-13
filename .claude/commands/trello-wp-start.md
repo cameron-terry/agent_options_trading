@@ -107,6 +107,10 @@ After CI passes, update `docs/features/` to reflect what landed in this WP:
 
 Include all doc file changes in the same commit in Phase 6 (or as an immediately following commit on the same branch before the PR is opened).
 
+### Phase 5.75 — Stand up the console demo (WP-9 only)
+
+For any `WP-9.x` ticket, once CI passes (Phase 5) and docs are updated (Phase 5.5), bring up the demo container automatically — don't wait for the user to ask, and don't skip it because the change "seems backend-only." Follow the "Visual verification workflow (docker)" steps in the WP-9 carried-forward context below: rebuild the image, seed (or reuse) a scratch DB, run `console-demo` on port 8001. This gives the user a running instance to review against the design reference while the PR is open, and is also the point to sanity-check the change yourself against real seeded data (e.g. exercise a new endpoint with `curl` before claiming it works). Leave the container running afterward (per that workflow's step 5) rather than tearing it down immediately — the user may want to poke at it themselves.
+
 ### Phase 6 — Open a PR
 
 Once all CI gates are green, commit the work and open a pull request:
@@ -180,6 +184,8 @@ Equity-curve-chart-specific (inline-JS only, confirmed WP-9.2): gridline stroke 
      agent_options_trading-console:latest
    ```
    `-e DB_URL=...` alone is sufficient for the container — no config.toml mount needed (`ui.app.create_app()` reads `DB_URL` as an override regardless of whether a config.toml was found; verified WP-9.5, see `scripts/seed_console_demo_data.py`'s docstring). A curl immediately after `docker run -d` can transiently fail (connection reset, curl exit 56) while uvicorn finishes starting — wait a couple seconds and retry rather than assuming the container is broken.
+
+   **Testing anything under `/api/ask` needs `ANTHROPIC_API_KEY` too** — add `-e ANTHROPIC_API_KEY="$(grep '^ANTHROPIC_API_KEY=' .env | cut -d= -f2-)"` to the `docker run` command above. Use command substitution exactly like that (not a literal `-e ANTHROPIC_API_KEY=sk-...` with the value typed inline) — the raw key never appears in the command string the Bash tool logs, only its value flows into the container's env at execution time. **Never run anything that echoes/prints `.env` contents to verify this worked** (e.g. `docker compose config` with no redaction, `cat .env`, `env` inside the container). If you need to confirm the container has the var, check for a successful `/api/ask` response instead (an auth failure surfaces as a 401/500 from the Anthropic SDK), or pipe any inspection command through a redaction filter first.
 
    **Cross-checking against the CLI is a separate trap.** `python -m options_agent.obs review`/`bias`'s `_load_config()` prefers a checked-in `config.toml` over `DB_URL` unconditionally — running it from the repo root (which has one, pointing at the real dev DB) silently ignores your `DB_URL` override and reports numbers from the wrong database, with no error. Run it from a cwd with no `config.toml` instead (e.g. `cd <scratch-dir> && DB_URL=... uv --project <repo-root> run python -m options_agent.obs review`).
 3. **`docker restart` does not pick up a rebuilt image** — a container is pinned to the image snapshot from its `docker run`. After every rebuild (or reseed — a replaced DB file can leave stale connections in an already-running container), `docker rm -f console-demo` then re-`docker run` from the fresh tag/DB. `docker stop` with `--rm` can race the name becoming free again — prefer `docker rm -f` immediately before recreating.
