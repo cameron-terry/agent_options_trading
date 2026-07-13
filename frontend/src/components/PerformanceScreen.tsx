@@ -49,10 +49,19 @@ export function PerformanceScreen() {
     }
   }, [filters])
 
+  // "N cycles · M opened · K closed" summary, right-aligned in the filter
+  // row per the design reference. "Closed" is hit_rate's overall.trade_count
+  // — the same fully-closed-position definition hit rate and attribution
+  // both use (see obs/review.py's _split_outcomes), not a raw outcome count.
+  const summary =
+    funnel && hitRate
+      ? `${funnel.total} cycles · ${funnel.opened} opened · ${hitRate.overall.trade_count} closed`
+      : undefined
+
   return (
     <div className="console-screen">
       {error && <div className="console-error">Failed to load: {error}</div>}
-      <PerformanceFilters filters={filters} onChange={setFilters} />
+      <PerformanceFilters filters={filters} onChange={setFilters} summary={summary} />
 
       {funnel && (
         <div className="grid2eq">

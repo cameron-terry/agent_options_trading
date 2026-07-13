@@ -13,6 +13,9 @@ describe('PerformanceScreen', () => {
     expect(screen.getByText('Hit rate by strategy')).toBeInTheDocument()
     expect(screen.getByText('P&L attribution by underlying')).toBeInTheDocument()
     expect(screen.getByText('Bias monitor')).toBeInTheDocument()
+
+    // funnelFixture: total=12, opened=3; hitRateFixture.overall.trade_count=2.
+    expect(screen.getByText('12 cycles · 3 opened · 2 closed')).toBeInTheDocument()
   })
 
   it('surfaces a load error', async () => {

@@ -33,4 +33,20 @@ describe('PerformanceFilters', () => {
       expect(screen.getByDisplayValue('prompt_version: all')).toBeInTheDocument()
     })
   })
+
+  it('renders the summary text when provided', () => {
+    render(
+      <PerformanceFilters
+        filters={{}}
+        onChange={() => {}}
+        summary="412 cycles · 44 opened · 38 closed"
+      />,
+    )
+    expect(screen.getByText('412 cycles · 44 opened · 38 closed')).toBeInTheDocument()
+  })
+
+  it('omits the summary span entirely when not provided', () => {
+    const { container } = render(<PerformanceFilters filters={{}} onChange={() => {}} />)
+    expect(container.querySelector('.cycle-filters__summary')).toBeNull()
+  })
 })

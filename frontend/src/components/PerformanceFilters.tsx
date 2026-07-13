@@ -21,9 +21,14 @@ function sinceForDays(days: number | null): string | undefined {
 interface PerformanceFiltersProps {
   filters: ReviewFilters
   onChange: (filters: ReviewFilters) => void
+  // "N cycles · M opened · K closed" — right-aligned in the same row as the
+  // filters, matching the design reference. Rendered by the caller (which
+  // owns the funnel/hit-rate data) rather than fetched here; omitted while
+  // that data is still loading.
+  summary?: string
 }
 
-export function PerformanceFilters({ filters, onChange }: PerformanceFiltersProps) {
+export function PerformanceFilters({ filters, onChange, summary }: PerformanceFiltersProps) {
   // The range select is a day-count preset, not the derived ISO `since`
   // timestamp itself — tracked locally so the control stays a controlled
   // <select> without trying to reverse-map an arbitrary ISO string back to
@@ -76,6 +81,7 @@ export function PerformanceFilters({ filters, onChange }: PerformanceFiltersProp
           </option>
         ))}
       </select>
+      {summary && <span className="cycle-filters__summary">{summary}</span>}
     </div>
   )
 }
