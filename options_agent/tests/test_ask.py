@@ -19,7 +19,11 @@ from options_agent.agent.ask_schema import (
     TOOL_SUBMIT_ASK_ANSWER,
     _build_input_schema,
 )
-from options_agent.agent.ask_tool import AGENT_ASK_TOOL_NAMES, TOOL_RUN_SQL
+from options_agent.agent.ask_tool import (
+    AGENT_ASK_TOOL_NAMES,
+    TOOL_RUN_SQL,
+    build_run_sql_tool,
+)
 from options_agent.state.db import build_engine, metadata
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -69,6 +73,15 @@ def _mock_response(stop_reason: str, content: list[Any]) -> MagicMock:
 _VALID_ANSWER_INPUT: dict[str, Any] = {
     "answer_text": "3 cycles opened positions in the window.",
     "cited_cycle_ids": ["c1"],
+}
+
+# For scenarios where no run_sql call (or none returning a cycle_id column)
+# precedes the commit — citing "c1" here would be an ungrounded citation and
+# trigger the retry-then-drop path tested separately below. Tests that only
+# care about the schema/loop mechanics, not citation grounding, use this one.
+_NO_CITATION_ANSWER_INPUT: dict[str, Any] = {
+    "answer_text": "3 cycles opened positions in the window.",
+    "cited_cycle_ids": [],
 }
 
 
@@ -159,12 +172,12 @@ def test_ask_no_tool_calls_commits_directly() -> None:
         _mock_response("end_turn", [_text_block()]),
         _mock_response(
             "tool_use",
-            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _VALID_ANSWER_INPUT)],
+            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _NO_CITATION_ANSWER_INPUT)],
         ),
     ]
     result, _ = _patched_ask(responses)
-    assert result.answer_text == _VALID_ANSWER_INPUT["answer_text"]
-    assert result.cited_cycle_ids == ["c1"]
+    assert result.answer_text == _NO_CITATION_ANSWER_INPUT["answer_text"]
+    assert result.cited_cycle_ids == []
     assert result.executed_sql == []
 
 
@@ -210,7 +223,7 @@ def test_ask_feeds_guardrail_rejection_back_as_tool_error() -> None:
         _mock_response("end_turn", [_text_block()]),
         _mock_response(
             "tool_use",
-            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _VALID_ANSWER_INPUT)],
+            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _NO_CITATION_ANSWER_INPUT)],
         ),
     ]
     result, mock_client = _patched_ask(responses)
@@ -257,11 +270,11 @@ def test_ask_retries_on_schema_validation_error_then_succeeds() -> None:
         ),
         _mock_response(
             "tool_use",
-            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _VALID_ANSWER_INPUT)],
+            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _NO_CITATION_ANSWER_INPUT)],
         ),
     ]
     result, mock_client = _patched_ask(responses, max_schema_retries=2)
-    assert result.answer_text == _VALID_ANSWER_INPUT["answer_text"]
+    assert result.answer_text == _NO_CITATION_ANSWER_INPUT["answer_text"]
     assert mock_client.messages.create.call_count == 3
 
 
@@ -289,14 +302,159 @@ def test_ask_stops_exploration_at_max_turns() -> None:
         tool_call,
         _mock_response(
             "tool_use",
-            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _VALID_ANSWER_INPUT)],
+            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _NO_CITATION_ANSWER_INPUT)],
         ),
     ]
     result, mock_client = _patched_ask(responses, max_turns=2)
-    assert result.answer_text == _VALID_ANSWER_INPUT["answer_text"]
+    assert result.answer_text == _NO_CITATION_ANSWER_INPUT["answer_text"]
     # 2 exploration turns + 1 commit turn.
     assert mock_client.messages.create.call_count == 3
 
 
 def test_agent_ask_tool_names_is_run_sql_only() -> None:
     assert AGENT_ASK_TOOL_NAMES == frozenset({TOOL_RUN_SQL})
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# agent/ask_tool.py — build_run_sql_tool interpolates actual limits, not
+# module-level defaults (regression coverage for the PR #94 review finding)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_build_run_sql_tool_interpolates_custom_limits() -> None:
+    tool = build_run_sql_tool(row_cap=42, timeout_secs=3.0)
+    description = tool.get("description", "")
+    assert "42" in description
+    assert "3-second" in description
+
+
+def test_build_run_sql_tool_defaults_differ_from_custom() -> None:
+    default_tool = build_run_sql_tool()
+    custom_tool = build_run_sql_tool(row_cap=42, timeout_secs=3.0)
+    assert default_tool.get("description") != custom_tool.get("description")
+
+
+def test_ask_sends_tool_description_matching_actual_limits() -> None:
+    # End-to-end: ask() must build the run_sql tool from the row_cap/
+    # timeout_secs it was actually called with, not sql_guard's defaults —
+    # otherwise the model reads limits that don't match what
+    # execute_guarded_select() enforces the moment a caller overrides them.
+    responses = [
+        _mock_response(
+            "tool_use",
+            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _NO_CITATION_ANSWER_INPUT)],
+        ),
+    ]
+    with patch("options_agent.agent.ask.anthropic.Anthropic") as MockCls:
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = [
+            _mock_response("end_turn", [_text_block()])
+        ] + responses
+        MockCls.return_value = mock_client
+        engine = _seeded_engine()
+        with engine.connect() as c:
+            ask("Anything?", c, row_cap=17, timeout_secs=2.0)
+
+    first_call_tools = mock_client.messages.create.call_args_list[0].kwargs["tools"]
+    description = first_call_tools[0].get("description", "")
+    assert "17" in description
+    assert "2-second" in description
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# agent/ask.py — citation grounding: cited_cycle_ids is cross-checked against
+# cycle_id values a run_sql result actually returned this turn, not trusted
+# from the model verbatim (PR #94 review finding)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_ask_accepts_grounded_citation_without_retry() -> None:
+    sql = "SELECT cycle_id FROM journal_records"
+    responses = [
+        _mock_response(
+            "tool_use", [_tool_use_block(TOOL_RUN_SQL, {"sql": sql}, block_id="tu_1")]
+        ),
+        _mock_response("end_turn", [_text_block()]),
+        _mock_response(
+            "tool_use",
+            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _VALID_ANSWER_INPUT)],
+        ),
+    ]
+    result, mock_client = _patched_ask(responses)
+    assert result.cited_cycle_ids == ["c1"]
+    # No citation retry needed — exactly 3 calls (2 explore + 1 commit).
+    assert mock_client.messages.create.call_count == 3
+
+
+def test_ask_retries_ungrounded_citation_then_succeeds() -> None:
+    sql = "SELECT cycle_id FROM journal_records"
+    responses = [
+        _mock_response(
+            "tool_use", [_tool_use_block(TOOL_RUN_SQL, {"sql": sql}, block_id="tu_1")]
+        ),
+        _mock_response("end_turn", [_text_block()]),
+        # First commit attempt cites a real id plus a fabricated one.
+        _mock_response(
+            "tool_use",
+            [
+                _tool_use_block(
+                    TOOL_SUBMIT_ASK_ANSWER,
+                    {
+                        "answer_text": "1 cycle opened a position.",
+                        "cited_cycle_ids": ["c1", "c-fabricated"],
+                    },
+                    block_id="tu_answer_1",
+                )
+            ],
+        ),
+        # Second attempt drops the fabricated id after feedback.
+        _mock_response(
+            "tool_use",
+            [
+                _tool_use_block(
+                    TOOL_SUBMIT_ASK_ANSWER,
+                    {
+                        "answer_text": "1 cycle opened a position.",
+                        "cited_cycle_ids": ["c1"],
+                    },
+                    block_id="tu_answer_2",
+                )
+            ],
+        ),
+    ]
+    result, mock_client = _patched_ask(responses, max_citation_retries=1)
+    assert result.cited_cycle_ids == ["c1"]
+    assert mock_client.messages.create.call_count == 4
+
+    # The feedback fed back to the model must name the fabricated id.
+    retry_messages = mock_client.messages.create.call_args_list[3].kwargs["messages"]
+    feedback_content = retry_messages[-1]["content"][0]["content"]
+    assert "c-fabricated" in feedback_content
+    assert retry_messages[-1]["content"][0]["is_error"] is True
+
+
+def test_ask_drops_ungrounded_citation_after_retries_exhausted() -> None:
+    # No run_sql call at all this turn — nothing is grounded — and the model
+    # never corrects its citation even after feedback.
+    bad_answer = _mock_response(
+        "tool_use",
+        [
+            _tool_use_block(
+                TOOL_SUBMIT_ASK_ANSWER,
+                {
+                    "answer_text": "1 cycle opened a position.",
+                    "cited_cycle_ids": ["c-fabricated"],
+                },
+            )
+        ],
+    )
+    responses = [
+        _mock_response("end_turn", [_text_block()]),
+        bad_answer,
+        bad_answer,
+    ]
+    result, mock_client = _patched_ask(responses, max_citation_retries=1)
+    # Ungrounded citation dropped, not raised — the prose answer still ships.
+    assert result.answer_text == "1 cycle opened a position."
+    assert result.cited_cycle_ids == []
+    assert mock_client.messages.create.call_count == 3

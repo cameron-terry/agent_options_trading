@@ -9,6 +9,12 @@ server-side (agent/ask.py) from the actual run_sql tool-call transcript, not
 self-reported by the model, so an answer can never cite a query that wasn't
 really run — the same "show your work" discipline as the trading agent's
 tool_calls_transcript.
+
+cited_cycle_ids IS taken from the model here (there is no server-side way to
+derive which cycles support a claim), but agent/ask.py cross-checks every id
+against the cycle_id values that actually appeared in a run_sql result
+before returning — an id the model can't ground is retried, then dropped.
+See ask.py's module docstring.
 """
 
 from typing import Any
@@ -33,9 +39,12 @@ class AskAnswer(BaseModel):
         default_factory=list,
         description=(
             "cycle_id values (from journal_records) that this answer's"
-            " factual claims are drawn from. Empty only when the answer is a"
-            " purely aggregate/statistical claim not attributable to"
-            " specific cycles."
+            " factual claims are drawn from. Only cite a cycle_id that"
+            " literally appeared in a run_sql result you fetched this turn —"
+            " citations are checked against that and dropped if they don't"
+            " match. Empty only when the answer is a purely"
+            " aggregate/statistical claim not attributable to specific"
+            " cycles."
         ),
     )
 

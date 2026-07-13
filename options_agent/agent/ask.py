@@ -6,9 +6,16 @@ submit_ask_answer — the same two-phase shape as reasoner.py's reason(),
 simplified because there is no deterministic-validation feedback loop here
 (an SQL answer has no equivalent of a TradeProposal risk check).
 
-executed_sql on the returned AskResult is derived from the actual run_sql
-tool-call transcript, not self-reported by the model — see ask_schema.py's
-module docstring for why.
+Both executed_sql and cited_cycle_ids on the returned AskResult are grounded
+server-side, not self-reported:
+  - executed_sql is built from the actual run_sql tool-call transcript (see
+    ask_schema.py's module docstring for why).
+  - cited_cycle_ids is cross-checked against the cycle_id values that
+    actually appeared in some run_sql result this turn (seen_cycle_ids
+    below). A citation the model can't ground gets one retry with feedback,
+    then is silently dropped rather than returned as an unverifiable link —
+    WP-9.9's Decision-explorer citation links must never be able to 404 on a
+    fabricated cycle_id (code-review finding, WP-9.8 PR #94).
 """
 
 from __future__ import annotations
@@ -31,8 +38,8 @@ from options_agent.agent.ask_schema import (
 )
 from options_agent.agent.ask_tool import (
     AGENT_ASK_TOOL_NAMES,
-    AGENT_ASK_TOOLS,
     TOOL_RUN_SQL,
+    build_run_sql_tool,
 )
 from options_agent.agent.sql_guard import (
     DEFAULT_ROW_CAP,
@@ -106,6 +113,7 @@ def ask(
     row_cap: int = DEFAULT_ROW_CAP,
     timeout_secs: float = DEFAULT_TIMEOUT_SECS,
     max_schema_retries: int = 2,
+    max_citation_retries: int = 1,
 ) -> AskResult:
     """Answer one natural-language question over the journal via run_sql.
 
@@ -131,10 +139,16 @@ def ask(
         max_schema_retries:   Additional commit attempts after a schema-
                               invalid submit_ask_answer call. Total attempts
                               = max_schema_retries + 1.
+        max_citation_retries: Attempts to get the model to correct
+                              cited_cycle_ids that reference a cycle_id
+                              never returned by any run_sql result this
+                              turn, before giving up and dropping just the
+                              ungrounded ids from the returned result.
 
     Returns:
         AskResult with the model's prose answer, the SQL actually executed
-        (ground truth, not self-reported), and the cited cycle_ids.
+        (ground truth, not self-reported), and the cited cycle_ids (grounded
+        against actual query results — see this module's docstring).
 
     Raises:
         AskError: the model called an unknown tool, or schema validation
@@ -150,6 +164,11 @@ def ask(
     ]
     messages: list[Any] = [{"role": "user", "content": question}]
     executed_sql: list[str] = []
+    seen_cycle_ids: set[str] = set()
+    # Built once with the row_cap/timeout_secs this call actually enforces —
+    # never the module-level defaults — so the tool description the model
+    # reads can't drift from what execute_guarded_select() really does.
+    ask_tools = [build_run_sql_tool(row_cap=row_cap, timeout_secs=timeout_secs)]
 
     _t0 = time.monotonic()
     log.info(
@@ -165,7 +184,7 @@ def ask(
             model=model_id,
             max_tokens=max_tokens_explore,
             system=system_blocks,
-            tools=AGENT_ASK_TOOLS,  # type: ignore[arg-type]
+            tools=ask_tools,  # type: ignore[arg-type]
             tool_choice={"type": "auto"},
             messages=messages,  # type: ignore[arg-type]
         )
@@ -209,6 +228,10 @@ def ask(
                 continue
 
             executed_sql.append(sql)
+            for row in result.rows:
+                cycle_id = row.get("cycle_id")
+                if isinstance(cycle_id, str):
+                    seen_cycle_ids.add(cycle_id)
             tool_results.append(
                 {
                     "type": "tool_result",
@@ -238,11 +261,15 @@ def ask(
         )
 
     schema_attempts = 0
+    citation_attempts = 0
     while True:
         log.info(
-            "  commit attempt (schema %d/%d) — waiting for model response",
+            "  commit attempt (schema %d/%d, citation %d/%d) — waiting for"
+            " model response",
             schema_attempts,
             max_schema_retries,
+            citation_attempts,
+            max_citation_retries,
         )
         commit_response = client.messages.create(
             model=model_id,
@@ -296,14 +323,65 @@ def ask(
             ]
             continue
 
+        # Ground cited_cycle_ids against cycle_id values a run_sql result
+        # actually returned this turn — the model self-reports these (unlike
+        # executed_sql), so nothing prevents it from citing an id it recalls
+        # but never queried. Give it one corrective round-trip; if it still
+        # can't ground every id, drop just the ungrounded ones rather than
+        # failing the whole answer or returning an unverifiable citation.
+        ungrounded = [
+            cid for cid in answer.cited_cycle_ids if cid not in seen_cycle_ids
+        ]
+        if ungrounded and citation_attempts < max_citation_retries:
+            citation_attempts += 1
+            log.warning(
+                "Citation retry %d/%d: ungrounded cited_cycle_ids %s",
+                citation_attempts,
+                max_citation_retries,
+                ungrounded,
+            )
+            commit_messages = commit_messages + [
+                {"role": "assistant", "content": commit_response.content},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": answer_block.id,
+                            "is_error": True,
+                            "content": (
+                                "cited_cycle_ids included id(s) that never"
+                                f" appeared in any run_sql result you already"
+                                f" ran this turn: {ungrounded}. Call"
+                                " submit_ask_answer again with cited_cycle_ids"
+                                " restricted to ids that appeared in a query"
+                                " result, or leave it empty if the claim is"
+                                " purely aggregate."
+                            ),
+                        }
+                    ],
+                },
+            ]
+            continue
+
+        if ungrounded:
+            log.warning(
+                "Dropping %d ungrounded cited_cycle_id(s) after retries exhausted: %s",
+                len(ungrounded),
+                ungrounded,
+            )
+        cited_cycle_ids = [
+            cid for cid in answer.cited_cycle_ids if cid in seen_cycle_ids
+        ]
+
         log.info(
             "ask() done — %d query call(s), %d cited cycle(s), %.1fs",
             len(executed_sql),
-            len(answer.cited_cycle_ids),
+            len(cited_cycle_ids),
             time.monotonic() - _t0,
         )
         return AskResult(
             answer_text=answer.answer_text,
             executed_sql=executed_sql,
-            cited_cycle_ids=answer.cited_cycle_ids,
+            cited_cycle_ids=cited_cycle_ids,
         )
