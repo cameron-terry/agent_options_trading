@@ -16,8 +16,10 @@ function DeltaSkewMeter({ skew }: { skew: BiasResponse['delta_skew'] }) {
   if (!skew.sufficient || skew.mean_net_delta === null) {
     return (
       <div className="skew-meter">
-        <div className="skew-meter__band" />
-        <div className="skew-meter__zero" />
+        <div className="skew-meter__track">
+          <div className="skew-meter__band" />
+          <div className="skew-meter__zero" />
+        </div>
         <p className="review-table__na">
           insufficient data (n={skew.sample_size})
         </p>

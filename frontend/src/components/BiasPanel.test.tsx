@@ -45,6 +45,20 @@ describe('BiasPanel', () => {
     expect(screen.getByText('insufficient data (n=2)')).toBeInTheDocument()
   })
 
+  it('keeps the band/zero markers inside .skew-meter__track when insufficient', () => {
+    // Regression test: these two elements are absolutely positioned and rely
+    // on .skew-meter__track (position: relative) as their containing block.
+    // Rendering them as direct children of .skew-meter instead (no relative
+    // ancestor) makes them escape to the page root — a real bug caught by
+    // code review since jsdom doesn't compute layout, so only a structural
+    // (not visual) assertion can catch a regression here.
+    const { container } = render(<BiasPanel bias={biasData()} />)
+    const track = container.querySelector('.skew-meter__track')
+    expect(track).not.toBeNull()
+    expect(track!.querySelector('.skew-meter__band')).not.toBeNull()
+    expect(track!.querySelector('.skew-meter__zero')).not.toBeNull()
+  })
+
   it('renders the pinned skew value when sufficient', () => {
     render(
       <BiasPanel
