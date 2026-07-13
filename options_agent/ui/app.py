@@ -1,12 +1,12 @@
 """FastAPI app factory — WP-9.1 skeleton, extended with WP-9.2's Overview API,
-WP-9.3's Decision explorer API, WP-9.4's live activity stream, and WP-9.5's
-Performance & bias API.
+WP-9.3's Decision explorer API, WP-9.4's live activity stream, WP-9.5's
+Performance & bias API, and WP-9.8's Ask-the-journal analyst.
 
 Ships /api/health, /api/overview, /api/positions, /api/cycles,
-/api/cycles/{cycle_id}, /api/events, /api/review/*, and static SPA serving.
-The engine passed to create_app must be read-only (see state.db.build_engine
-(url, read_only=True)) — this module does not itself enforce that, it trusts
-its caller.
+/api/cycles/{cycle_id}, /api/events, /api/review/*, /api/ask, and static SPA
+serving. The engine passed to create_app must be read-only (see
+state.db.build_engine(url, read_only=True)) — this module does not itself
+enforce that, it trusts its caller.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from sqlalchemy.engine import Engine
 from options_agent.config import Config
 from options_agent.contracts.state import ActionTaken
 from options_agent.state.db import build_engine, get_connection
+from options_agent.ui.ask import AskRequest, AskResponse, get_ask_answer
 from options_agent.ui.cycles import (
     CycleDetail,
     CycleListItem,
@@ -176,6 +177,11 @@ def create_app(
     def review_prompt_versions() -> list[str]:
         with get_connection(engine) as conn:
             return get_prompt_versions(conn)
+
+    @app.post("/api/ask")
+    def ask_endpoint(body: AskRequest) -> AskResponse:
+        with get_connection(engine) as conn:
+            return get_ask_answer(conn, body.question)
 
     if STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="spa")

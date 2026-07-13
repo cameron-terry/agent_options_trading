@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/ui/` (backend), `frontend/` (React SPA source)
 **Credentials required:** none — reads the DB only; `ANTHROPIC_API_KEY` becomes required starting WP-9.8 (ask-the-journal)
-**Status:** Overview (WP-9.2), Decision explorer (WP-9.3), the live activity stream (WP-9.4), and the Performance & bias screen (WP-9.5) are complete. Skeleton (`/api/health` + static SPA shell + read-only engine + compose wiring) landed in WP-9.1. Ask the journal lands in later WP-9 cards.
+**Status:** Overview (WP-9.2), Decision explorer (WP-9.3), the live activity stream (WP-9.4), the Performance & bias screen (WP-9.5), and the Ask-the-journal analyst backend (WP-9.8) are complete. Skeleton (`/api/health` + static SPA shell + read-only engine + compose wiring) landed in WP-9.1. The Ask screen (chat UI, WP-9.9) is still to come.
 
 A read-only web console over the trading journal, served by a FastAPI service that runs beside the scheduler in docker-compose. Zero changes to the trading loop; the only planned write path (kill switch, WP-9.7) reuses `obs/killswitch.py` verbatim.
 
@@ -10,11 +10,12 @@ A read-only web console over the trading journal, served by a FastAPI service th
 
 | File | Responsibility |
 |---|---|
-| `ui/app.py` | FastAPI app factory: `/api/health`, `/api/overview`, `/api/positions`, `/api/cycles`, `/api/cycles/{cycle_id}`, `/api/events`, `/api/review/*`, static SPA mount, engine wiring |
+| `ui/app.py` | FastAPI app factory: `/api/health`, `/api/overview`, `/api/positions`, `/api/cycles`, `/api/cycles/{cycle_id}`, `/api/events`, `/api/review/*`, `/api/ask`, static SPA mount, engine wiring |
 | `ui/overview.py` | Overview API aggregation (WP-9.2): tiles, equity curve, activity feed, distance-to-trigger meter |
 | `ui/cycles.py` | Decision explorer API (WP-9.3): filtered cycle list + full-trace detail, with position/order/outcome joins |
 | `ui/events.py` | Live activity stream (WP-9.4): `GET /api/events` SSE body — polls journal_records/kill_switch_log/positions for high-water-mark changes |
 | `ui/review.py` | Performance & bias API (WP-9.5): thin wrappers over `obs/review.py`'s four pure functions — funnel, hit rate, P&L attribution, bias |
+| `ui/ask.py` | Ask-the-journal API (WP-9.8): `POST /api/ask` request/response shaping around `agent/ask.py`'s analyst loop |
 | `ui/__main__.py` | CLI entry point: `python -m options_agent.ui [--config path] [--host] [--port]` |
 | `frontend/` | Vite + React + TypeScript SPA source; builds to `dist/`, copied into the image at `options_agent/ui/static/` |
 | `Dockerfile.console` | Multi-stage build: Node stage builds the SPA, Python stage serves it |
@@ -168,6 +169,44 @@ with get_connection(engine) as conn:
 
 ---
 
+## Ask-the-journal analyst (WP-9.8)
+
+`POST /api/ask` answers natural-language questions over the journal via a second, independent LLM call alongside `agent/reasoner.py`'s trade reasoner — same two-phase agentic-loop shape (exploration with an "auto" tool, then a forced-tool commit call), but with exactly one read-only tool instead of seven, and no deterministic-validation feedback loop (an SQL answer has no `TradeProposal` risk check to fail).
+
+```python
+from options_agent.state.db import get_connection
+from options_agent.ui.ask import get_ask_answer
+
+with get_connection(engine) as conn:
+    response = get_ask_answer(conn, "How many bull_put_spread cycles opened last month?")
+    # AskResponse(answer=..., executed_sql=[...], cited_cycle_ids=[...])
+```
+
+| File | Responsibility |
+|---|---|
+| `agent/sql_guard.py` | `validate_select_only` (sqlglot AST allow-list) + `execute_guarded_select` (row cap, statement timeout) |
+| `agent/ask_tool.py` | `run_sql` tool definition — the analyst's only tool |
+| `agent/ask_schema.py` | `AskAnswer` + the forced-commit `submit_ask_answer` tool |
+| `agent/ask_prompts.py` | Hand-written schema + WP-0 semantic-conventions system prompt |
+| `agent/ask.py` | `ask()` — the exploration/commit loop |
+| `ui/ask.py` | `POST /api/ask` request/response models + wrapper |
+
+**Guardrail: allow-list, not deny-list.** `validate_select_only` parses the submitted SQL with `sqlglot` and accepts it only if it is exactly one statement whose top-level node type is `Select`/`Union`/`Intersect`/`Except`. An allow-list was chosen over enumerating unsafe statement kinds because `sqlglot` has no single expression type per unsafe kind — `PRAGMA`, `ATTACH`, `VACUUM`, `REINDEX`, `EXPLAIN`, and bare `BEGIN`/`COMMIT` all parse to different, inconsistent node types (some even fall back to a generic `Command`), so a deny-list would need to track every one of them and would silently under-reject any kind added later. The read-only engine (`PRAGMA query_only=ON`) is a second, independent backstop — even a query that somehow slipped past the AST check cannot write.
+
+**Timeout: `sqlite3.Connection.set_progress_handler`, not a native statement timeout.** SQLite has none. `execute_guarded_select` installs a progress-handler callback (polled every 1000 VM instructions) that returns non-zero once a wall-clock deadline passes, which SQLite honors by aborting the in-flight query with `OperationalError: interrupted` — the closest primitive SQLite offers to Postgres's `statement_timeout`. Targets SQLite only (the only dialect the console deploys against; see the read-only-engine section above) — `execute_guarded_select` raises `SqlGuardError` immediately if handed a non-SQLite connection rather than silently skipping the timeout.
+
+**Row cap with an honest truncation marker.** `execute_guarded_select` fetches `row_cap + 1` rows and reports `truncated: true` (never a silent, unexplained cutoff) when the extra row exists. Default 500 rows / 5s per query — interpolated into both the `run_sql` tool description and the system prompt so the numbers the model reads always match what's actually enforced.
+
+**`executed_sql` is server-side ground truth, not model self-report.** `AskAnswer` (the `submit_ask_answer` schema) only carries `answer_text` and `cited_cycle_ids` — no `executed_sql` field. `ask()` builds the returned `executed_sql` list itself from the actual `run_sql` tool-call transcript, so an answer can never cite a query that wasn't really run — the same "show your work" discipline as the trading agent's `tool_calls_transcript`.
+
+**Conventions text intentionally mirrors `obs/review.py`, not a rewritten paraphrase.** The system prompt's hit-rate/open-closed/null-`iv_rank` conventions are worded to match WP-7's review module docstring verbatim (e.g. "Hit definition: realized_pnl > 0") so the analyst can never answer a question using a competing definition of a concept the review screens already canonicalized.
+
+**Schema section is hand-written, not generated.** `contracts/` has narrative Pydantic docstrings but nothing structured for mechanical extraction; `state/db.py`'s `Table(...)` definitions carry the richest schema commentary in the repo and are what `ask_prompts.py` was written against. Update it by hand alongside any future migration that changes column names or semantics — there is no automated sync.
+
+**Deployment: `ANTHROPIC_API_KEY` now reaches the console container.** The compose `console` service deliberately does not use `env_file: .env` (that would also leak `ALPACA_*`/`DISCORD_WEBHOOK_URL` into the UI environment, violating the WP-9 epic's "no broker credentials in the UI environment" invariant) — instead it declares `ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}` explicitly under `environment:`, resolved by docker compose's own `.env` variable-substitution mechanism (independent of the `env_file:` directive).
+
+---
+
 ## Frontend (WP-9.1, WP-9.2, WP-9.3, WP-9.4, WP-9.5)
 
 Vite + React + TypeScript, scaffolded via `npm create vite@latest -- --template react-ts`. Source lives at the repo root in `frontend/` (not under `options_agent/`) so Node tooling stays out of the Python package tree.
@@ -204,6 +243,6 @@ curl http://127.0.0.1:8000/             # SPA shell
 ```
 
 The `console` compose service:
-- Sets only `DB_URL` — **no `env_file: .env`**, so no `ALPACA_*`/`ANTHROPIC_API_KEY`/`DISCORD_WEBHOOK_URL` reach the container.
+- Sets `DB_URL` and (WP-9.8) `ANTHROPIC_API_KEY` explicitly — **no `env_file: .env`**, so `ALPACA_*`/`DISCORD_WEBHOOK_URL` never reach the container even though `ANTHROPIC_API_KEY` now does (see the Ask-the-journal section above for why the two mechanisms are independent).
 - Mounts `agent_data` **read-write** despite the engine being read-only: SQLite WAL mode requires write access to the `-wal`/`-shm` files for *all* connections, including readers — enforcement is at the connection level (`PRAGMA query_only`), not the filesystem level. A `:ro` volume mount would break WAL reads.
 - Binds its port to `127.0.0.1:8000` only — no auth, single-operator deployment per the WP-9 epic's stated scope.
