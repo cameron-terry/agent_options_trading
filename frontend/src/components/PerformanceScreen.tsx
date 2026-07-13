@@ -14,10 +14,12 @@ import { AttributionByStrategyPanel, AttributionPanel } from './AttributionPanel
 import { BiasPanel } from './BiasPanel'
 import { FunnelPanel, RejectionsByRulePanel } from './FunnelPanel'
 import { HitRateTable } from './HitRateTable'
+import { PerformanceCompare } from './PerformanceCompare'
 import { PerformanceFilters } from './PerformanceFilters'
 
 export function PerformanceScreen() {
   const [filters, setFilters] = useState<ReviewFilters>({})
+  const [compareMode, setCompareMode] = useState(false)
   const [funnel, setFunnel] = useState<FunnelResponse | null>(null)
   const [hitRate, setHitRate] = useState<HitRateResponse | null>(null)
   const [attribution, setAttribution] = useState<AttributionResponse | null>(null)
@@ -63,23 +65,44 @@ export function PerformanceScreen() {
       {error && <div className="console-error">Failed to load: {error}</div>}
       <PerformanceFilters filters={filters} onChange={setFilters} summary={summary} />
 
+      <label className="compare-toggle">
+        <input
+          type="checkbox"
+          checked={compareMode}
+          onChange={(e) => setCompareMode(e.target.checked)}
+        />
+        Compare prompt versions
+      </label>
+
       {funnel && (
         <div className="grid2eq">
           <FunnelPanel funnel={funnel} />
           <RejectionsByRulePanel funnel={funnel} />
         </div>
       )}
-
-      {hitRate && <HitRateTable hitRate={hitRate} />}
-
-      {attribution && (
-        <div className="grid2eq">
-          <AttributionPanel attribution={attribution} />
-          <AttributionByStrategyPanel attribution={attribution} />
-        </div>
+      {compareMode && (
+        <p className="review-table__footnote">
+          funnel is not filterable by prompt_version — cycle_funnel() has no such filter, so
+          the panel above reflects all versions regardless of the pickers below.
+        </p>
       )}
 
-      {bias && <BiasPanel bias={bias} />}
+      {compareMode ? (
+        <PerformanceCompare since={filters.since} />
+      ) : (
+        <>
+          {hitRate && <HitRateTable hitRate={hitRate} />}
+
+          {attribution && (
+            <div className="grid2eq">
+              <AttributionPanel attribution={attribution} />
+              <AttributionByStrategyPanel attribution={attribution} />
+            </div>
+          )}
+
+          {bias && <BiasPanel bias={bias} />}
+        </>
+      )}
     </div>
   )
 }

@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/ui/` (backend), `frontend/` (React SPA source)
 **Credentials required:** none — reads the DB only; `ANTHROPIC_API_KEY` becomes required starting WP-9.8 (ask-the-journal)
-**Status:** Overview (WP-9.2), Decision explorer (WP-9.3), the live activity stream (WP-9.4), the Performance & bias screen (WP-9.5), and the Ask-the-journal analyst backend (WP-9.8) are complete. Skeleton (`/api/health` + static SPA shell + read-only engine + compose wiring) landed in WP-9.1. The Ask screen (chat UI, WP-9.9) is still to come.
+**Status:** Overview (WP-9.2), Decision explorer (WP-9.3), the live activity stream (WP-9.4), the Performance & bias screen (WP-9.5), the prompt-version compare view (WP-9.6), and the Ask-the-journal analyst backend (WP-9.8) are complete. Skeleton (`/api/health` + static SPA shell + read-only engine + compose wiring) landed in WP-9.1. The Ask screen (chat UI, WP-9.9) is still to come.
 
 A read-only web console over the trading journal, served by a FastAPI service that runs beside the scheduler in docker-compose. Zero changes to the trading loop; the only planned write path (kill switch, WP-9.7) reuses `obs/killswitch.py` verbatim.
 
@@ -169,6 +169,18 @@ with get_connection(engine) as conn:
 
 ---
 
+## Prompt-version compare view (WP-9.6)
+
+Pure client composition — no new backend endpoint. `PerformanceScreen.tsx`'s "Compare prompt versions" checkbox toggles between the WP-9.5 single-version panels and `components/PerformanceCompare.tsx`, which drives the same `fetchHitRate`/`fetchAttribution`/`fetchBias` client functions twice — once per column, each with its own `prompt_version` — and reuses `HitRateTable`/`AttributionPanel`/`AttributionByStrategyPanel`/`BiasPanel` unmodified. No duplicated metric logic on either side of the compare.
+
+**Funnel is excluded from the two-column split, not duplicated.** `cycle_funnel()` has no `prompt_version` filter (see the Performance & bias API section above) — a per-column funnel would render identical numbers under two different version headers, reading as a bug rather than as data. `PerformanceScreen.tsx` renders `FunnelPanel`/`RejectionsByRulePanel` once, above the compare columns, with an explanatory footnote visible only in compare mode.
+
+**Version pickers default to the two most recent versions, not empty.** `PerformanceCompare` fetches `GET /api/review/prompt-versions` once (reusing the WP-9.5 endpoint, not a second one) and seeds Version A / Version B with the last two entries of the sorted list, so the compare view is populated on first render. Each column then owns its own `prompt_version` selection independently — changing one column's picker doesn't touch the other's fetch.
+
+**Insufficient-sample and error states are per-column.** Each column's `Promise.all` over hit-rate/attribution/bias fails independently, so one version's fetch error (or a young version's "insufficient (n<10)" cells) never blocks or blanks the other column — matching the WP-9 epic's "never a hidden row" invariant on a per-version basis.
+
+---
+
 ## Ask-the-journal analyst (WP-9.8)
 
 `POST /api/ask` answers natural-language questions over the journal via a second, independent LLM call alongside `agent/reasoner.py`'s trade reasoner — same two-phase agentic-loop shape (exploration with an "auto" tool, then a forced-tool commit call), but with exactly one read-only tool instead of seven, and no deterministic-validation feedback loop (an SQL answer has no `TradeProposal` risk check to fail).
@@ -228,7 +240,7 @@ npm run build    # -> frontend/dist/
 
 `components/DecisionsScreen.tsx` orchestrates the Decision explorer: `components/CycleFilters.tsx` (symbol/action/date filters — symbol commits on blur/Enter rather than per-keystroke, since `query_journal`'s symbol filter is an exact match, not a substring search), `components/CycleList.tsx` (left-pane cycle list), and `components/CycleTrace.tsx` (right-pane trace renderer: header metadata, expandable tool-call transcript with a truncated result preview, proposal blockquotes + leg table, validation rule chips + reasons, and the sizing/order/position join, including the anomaly case). A filter change always re-selects the newest matching cycle rather than leaving a stale selection in place — otherwise reverting a filter can strand the view on a sparse cycle (e.g. a `NO_ACTION` cycle with no proposal) that reads as "the trace disappeared."
 
-`components/PerformanceScreen.tsx` (WP-9.5) composes the four `/api/review/*` panels: `PerformanceFilters.tsx` (a time-range preset `<select>` computing `since` client-side, plus a free-text `prompt_version` filter — the version-picker dropdown and side-by-side compare layout are WP-9.6 scope), `FunnelPanel.tsx` (funnel bars + rejections-by-rule table), `HitRateTable.tsx` (per-strategy stats with an "insufficient" chip per `sufficient: false`, never a bare 0% or hidden row), `AttributionPanel.tsx` (P&L bars by underlying, plus a by-strategy table), and `BiasPanel.tsx` (the delta-skew meter, clamped to ±0.5 net delta same as the design reference's band, plus the direction/event-proximity cohort table). All four panels re-fetch together on any filter change; nulls from the backend (never NaN) render as "—".
+`components/PerformanceScreen.tsx` (WP-9.5, extended WP-9.6) composes the four `/api/review/*` panels: `PerformanceFilters.tsx` (a time-range preset `<select>` computing `since` client-side, plus a `prompt_version` `<select>` populated from `GET /api/review/prompt-versions`), `FunnelPanel.tsx` (funnel bars + rejections-by-rule table), `HitRateTable.tsx` (per-strategy stats with an "insufficient" chip per `sufficient: false`, never a bare 0% or hidden row), `AttributionPanel.tsx` (P&L bars by underlying, plus a by-strategy table), and `BiasPanel.tsx` (the delta-skew meter, clamped to ±0.5 net delta same as the design reference's band, plus the direction/event-proximity cohort table). All four panels re-fetch together on any filter change; nulls from the backend (never NaN) render as "—". A "Compare prompt versions" checkbox swaps the single-version hit-rate/attribution/bias panels for `components/PerformanceCompare.tsx`'s two-column A/B layout — see the WP-9.6 section above.
 
 The Ask screen lands in later WP-9 cards per the [design reference](https://claude.ai/code/artifact/ba602f8d-fd08-4c36-8fc5-93fa8a3efd3a).
 
