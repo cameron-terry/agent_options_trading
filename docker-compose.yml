@@ -35,14 +35,22 @@ services:
       - options-agent
     environment:
       DB_URL: sqlite:////app/data/options_agent.db
-      # WP-9.8: the only secret the console needs — the ask-the-journal
-      # analyst's Anthropic client reads it from the environment. Deliberately
-      # not loaded via a bulk secrets file (see the options-agent service
-      # above): that would also leak the broker/webhook credentials into the
-      # UI container, violating the WP-9 epic's "no broker credentials in the
-      # UI environment" invariant. Resolved instead by docker compose's own
-      # .env variable substitution — an independent mechanism.
+      # WP-9.8: the only secret the console needed until WP-9.7 — the
+      # ask-the-journal analyst's Anthropic client reads it from the
+      # environment. Deliberately not loaded via a bulk secrets file (see the
+      # options-agent service above): that would also leak ALPACA_* broker
+      # credentials into the UI container, violating the WP-9 epic's "no
+      # broker credentials in the UI environment" invariant. Resolved instead
+      # by docker compose's own .env variable substitution — an independent
+      # mechanism.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      # WP-9.7: the kill-switch console's CRITICAL alert needs a real channel
+      # to be more than a no-op — same env var and NullChannel-fallback
+      # behavior as the options-agent service's alert dispatch. Not a broker
+      # credential (nothing ALPACA_*), so granting it here doesn't violate the
+      # invariant above; omit it and the console still works, it just logs
+      # "alerts suppressed" and dispatches to a NullChannel instead.
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
     ports:
       # Bound to localhost only — no auth, single-operator deployment (WP-9).
       - "127.0.0.1:8000:8000"

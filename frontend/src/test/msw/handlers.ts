@@ -6,6 +6,7 @@ import type {
   CycleListItem,
   FunnelResponse,
   HitRateResponse,
+  KillSwitchStatusResponse,
   OverviewResponse,
   PositionSummary,
 } from '../../api'
@@ -200,6 +201,37 @@ export const biasFixture: BiasResponse = {
 
 export const promptVersionsFixture: string[] = ['v1.0.0', 'v2.0.0', 'v2.1.0']
 
+export const killSwitchStatusFixture: KillSwitchStatusResponse = {
+  state: 'NONE',
+  history: [
+    {
+      id: 'ks-2',
+      state: 'NONE',
+      set_by: 'console',
+      reason: 'issue resolved',
+      created_at: '2026-07-12T15:00:00Z',
+    },
+    {
+      id: 'ks-1',
+      state: 'HALT',
+      set_by: 'console',
+      reason: 'reconcile mismatch',
+      created_at: '2026-07-12T14:00:00Z',
+    },
+  ],
+  alert_failures: [
+    {
+      id: 'af-1',
+      event_type: 'AlertEventType.FILL',
+      severity: 'AlertSeverity.WARN',
+      detail: 'Discord webhook timed out',
+      attempted_at: '2026-07-12T13:00:00Z',
+      attempts: 2,
+      last_error: 'HTTPError 503',
+    },
+  ],
+}
+
 export const handlers = [
   http.get('/api/overview', () => HttpResponse.json(overviewFixture)),
   http.get('/api/positions', () => HttpResponse.json(positionsFixture)),
@@ -212,4 +244,20 @@ export const handlers = [
   http.get('/api/review/attribution', () => HttpResponse.json(attributionFixture)),
   http.get('/api/review/bias', () => HttpResponse.json(biasFixture)),
   http.get('/api/review/prompt-versions', () => HttpResponse.json(promptVersionsFixture)),
+  http.get('/api/killswitch', () => HttpResponse.json(killSwitchStatusFixture)),
+  http.post('/api/killswitch', async ({ request }) => {
+    const body = (await request.json()) as {
+      action: 'HALT' | 'FLATTEN' | 'RESUME'
+      reason: string
+      confirmation?: string
+    }
+    const newState = body.action === 'RESUME' ? 'NONE' : body.action
+    return HttpResponse.json({
+      id: 'ks-new',
+      state: newState,
+      set_by: 'console',
+      reason: body.reason,
+      created_at: '2026-07-13T10:00:00Z',
+    })
+  }),
 ]

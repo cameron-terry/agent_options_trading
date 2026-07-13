@@ -390,3 +390,69 @@ export function fetchBias(filters: ReviewFilters = {}): Promise<BiasResponse> {
 export function fetchPromptVersions(): Promise<string[]> {
   return getJSON<string[]>('/api/review/prompt-versions')
 }
+
+// --- WP-9.7: Kill-switch console + alert-delivery health -----------------
+// Field names mirror options_agent/ui/killswitch.py's Pydantic models.
+
+export type KillSwitchActionType = 'HALT' | 'FLATTEN' | 'RESUME'
+
+export interface KillSwitchHistoryEntry {
+  id: string
+  state: KillSwitchState
+  set_by: string
+  reason: string
+  created_at: string
+}
+
+export interface AlertFailureItem {
+  id: string
+  event_type: string
+  severity: string
+  detail: string
+  attempted_at: string
+  attempts: number
+  last_error: string
+}
+
+export interface KillSwitchStatusResponse {
+  state: KillSwitchState
+  history: KillSwitchHistoryEntry[]
+  alert_failures: AlertFailureItem[]
+}
+
+export interface KillSwitchActionRequest {
+  action: KillSwitchActionType
+  reason: string
+  confirmation?: string
+}
+
+export function fetchKillSwitchStatus(): Promise<KillSwitchStatusResponse> {
+  return getJSON<KillSwitchStatusResponse>('/api/killswitch')
+}
+
+function extractErrorDetail(body: unknown, status: number): string {
+  if (body && typeof body === 'object' && 'detail' in body) {
+    const detail = (body as { detail: unknown }).detail
+    if (typeof detail === 'string') return detail
+    if (Array.isArray(detail) && detail.length > 0) {
+      const first = detail[0] as { msg?: string }
+      if (typeof first.msg === 'string') return first.msg
+    }
+  }
+  return `POST /api/killswitch → ${status}`
+}
+
+export async function postKillSwitchAction(
+  body: KillSwitchActionRequest,
+): Promise<KillSwitchHistoryEntry> {
+  const res = await fetch('/api/killswitch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => null)
+    throw new Error(extractErrorDetail(errBody, res.status))
+  }
+  return (await res.json()) as KillSwitchHistoryEntry
+}

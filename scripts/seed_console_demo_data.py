@@ -10,7 +10,8 @@ mostly-bullish delta lean — enough for every WP-9 console screen (Overview,
 Decision explorer, Performance, Ask) to have something real to render,
 including both a populated (bull_put_spread, n=10) and a still-insufficient
 (iron_condor/cash_secured_put/covered_call, n<10) bucket on the Performance
-screen.
+screen. Also seeds a two-entry kill-switch history (HALT then resume, WP-9.7)
+and one alert_delivery_failures row for the alert-delivery health panel.
 
 This is a shared fixture, not a one-off: reuse it for every WP-9.x screen's
 docker visual-verification pass instead of hand-rolling a new scratch seed
@@ -62,6 +63,7 @@ import argparse
 import os
 import subprocess
 import sys
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -93,9 +95,13 @@ from options_agent.contracts.state import (
     PositionStatus,
     ToolCallRecord,
 )
-from options_agent.obs.killswitch import set_state
+from options_agent.obs.killswitch import resume, set_state
 from options_agent.state.crud import insert_order, insert_position
-from options_agent.state.db import build_engine, get_connection
+from options_agent.state.db import (
+    alert_delivery_failures_table,
+    build_engine,
+    get_connection,
+)
 from options_agent.state.journal import write_journal_record, write_outcome_record
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -430,7 +436,34 @@ def seed(db_path: Path) -> None:
     engine = build_engine(f"sqlite:///{db_path}")
 
     with get_connection(engine) as conn:
-        set_state(conn, KillSwitchState.NONE, set_by="demo-seed", reason="init")
+        # Kill-switch console (WP-9.7) needs more than one history row to be
+        # worth looking at: arm HALT, then resume — leaves the system in
+        # NONE (matching every other screen's "TRADING · NONE" assumption)
+        # while giving the history table two real rows with a real
+        # arm/resume gap, not just the single init entry.
+        set_state(
+            conn,
+            KillSwitchState.HALT,
+            set_by="demo-seed",
+            reason="scheduled maintenance window",
+        )
+        resume(conn, set_by="demo-seed", reason="maintenance complete")
+
+        # Alert-delivery health panel (WP-9.7) needs a row to render —
+        # nothing in the seeded journal ever exercises a real dispatch
+        # failure, so insert one directly, same shape AlertDispatcher writes
+        # on exhausted retry (see obs/alerts.py's _record_failure).
+        conn.execute(
+            alert_delivery_failures_table.insert().values(
+                id=str(uuid.uuid4()),
+                event_type="AlertEventType.FILL",
+                severity="AlertSeverity.INFO",
+                detail="OPENED SPY bull_put_spread x2 @ 1.35 credit",
+                attempted_at=NOW - timedelta(hours=6),
+                attempts=2,
+                last_error="HTTPError: 503 Service Unavailable (Discord webhook)",
+            )
+        )
 
         # --- Open positions spanning the distance-to-trigger spread the
         # Overview screen's mock shows: near-target, mid-target, near-stop,
