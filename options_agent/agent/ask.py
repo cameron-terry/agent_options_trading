@@ -16,6 +16,16 @@ server-side, not self-reported:
     then is silently dropped rather than returned as an unverifiable link —
     WP-9.9's Decision-explorer citation links must never be able to 404 on a
     fabricated cycle_id (code-review finding, WP-9.8 PR #94).
+
+WP-9.9: the exploration loop below is a generator (ask_stream()) yielding
+QueryStarted/QueryResult/QueryError as each run_sql call happens, then a
+final Answer — this is what ui/ask.py wraps into the /api/ask SSE response.
+ask() itself is now a thin wrapper draining ask_stream() to the same
+AskResult it always returned, so every existing caller/test is unaffected.
+The retry budgets (max_turns, max_schema_retries, max_citation_retries)
+are the only "give up" mechanism — there is no separate error-count cap;
+a run_sql failure is just fed back to the model as one more turn against
+the same max_turns budget it already has (WP-9.9 decision, 2026-07-13).
 """
 
 from __future__ import annotations
@@ -23,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -57,6 +68,65 @@ log = logging.getLogger(__name__)
 # token budget. ~4 chars/token is the standard English-text approximation;
 # erring conservative (undercounting tokens) is safe for a cap.
 _CHARS_PER_TOKEN_ESTIMATE = 4
+
+
+@dataclass
+class HistoryTurn:
+    """One prior (question, answer) exchange, client-resent for multi-turn
+    conversations. Prepended to the new question as plain user/assistant
+    text messages — not a tool-call transcript replay (WP-9.9 decision,
+    2026-07-13): the model's own prose answer is a cheap, sufficient summary
+    of what it found, and re-running full tool transcripts through the
+    result-token budget for every follow-up would multiply cost for turns
+    that don't need the underlying rows again.
+    """
+
+    question: str
+    answer_text: str
+
+
+@dataclass
+class QueryStarted:
+    """A run_sql call the model made, before its result is known."""
+
+    sql: str
+
+
+@dataclass
+class QueryResult:
+    """A run_sql call that executed successfully."""
+
+    sql: str
+    columns: list[str]
+    rows: list[dict[str, Any]]
+    truncated: bool
+    row_cap: int
+
+
+@dataclass
+class QueryError:
+    """A run_sql call rejected by the guardrail or failed/timed out.
+
+    Always emitted even though the loop then feeds the same error back to
+    the model as a tool_result and lets it retry — the point is that a UI
+    consumer sees every failure, never just the eventually-successful retry
+    (card requirement: "never silently retried away").
+    """
+
+    sql: str
+    error: str
+
+
+@dataclass
+class Answer:
+    """The final, grounded answer — the last event ask_stream() yields."""
+
+    answer_text: str
+    executed_sql: list[str]
+    cited_cycle_ids: list[str]
+
+
+AskEvent = QueryStarted | QueryResult | QueryError | Answer
 
 
 @dataclass
@@ -101,10 +171,26 @@ def _serialize_run_sql_result(result: GuardedQueryResult, *, max_tokens: int) ->
     )
 
 
-def ask(
+def _build_initial_messages(
+    question: str, history: Sequence[HistoryTurn] | None
+) -> list[Any]:
+    """Prepend prior (question, answer_text) pairs as plain user/assistant
+    text turns before the new question — see HistoryTurn's docstring for why
+    this is plain text rather than a tool-call transcript replay.
+    """
+    messages: list[Any] = []
+    for turn in history or ():
+        messages.append({"role": "user", "content": turn.question})
+        messages.append({"role": "assistant", "content": turn.answer_text})
+    messages.append({"role": "user", "content": question})
+    return messages
+
+
+def ask_stream(
     question: str,
     conn: Connection,
     *,
+    history: Sequence[HistoryTurn] | None = None,
     model_id: str = "claude-sonnet-4-6",
     max_turns: int = 5,
     max_tokens: int = 1024,
@@ -114,8 +200,9 @@ def ask(
     timeout_secs: float = DEFAULT_TIMEOUT_SECS,
     max_schema_retries: int = 2,
     max_citation_retries: int = 1,
-) -> AskResult:
-    """Answer one natural-language question over the journal via run_sql.
+) -> Iterator[AskEvent]:
+    """Answer one natural-language question over the journal via run_sql,
+    yielding progress events as they happen.
 
     conn must be opened read-only (state.db.build_engine(url, read_only=True))
     — this function does not itself enforce that, it trusts its caller, same
@@ -125,10 +212,16 @@ def ask(
         question:            The operator's natural-language question.
         conn:                Read-only SQLAlchemy connection the run_sql
                               tool executes against.
+        history:              Prior (question, answer_text) exchanges in
+                              this conversation, oldest first — see
+                              HistoryTurn's docstring.
         model_id:             Anthropic model identifier.
         max_turns:            Exploration-phase turn cap (run_sql calls).
                               When hit, proceeds to commit with whatever
-                              evidence has been gathered.
+                              evidence has been gathered. Also the de facto
+                              cap on how many times a failed run_sql call
+                              can be retried — there is no separate
+                              consecutive-error budget (WP-9.9 decision).
         max_tokens:           Output token cap for the commit API call.
         max_tokens_explore:   Output token cap for exploration turns.
         result_token_budget:  Max tokens' worth of a single run_sql result
@@ -145,10 +238,9 @@ def ask(
                               turn, before giving up and dropping just the
                               ungrounded ids from the returned result.
 
-    Returns:
-        AskResult with the model's prose answer, the SQL actually executed
-        (ground truth, not self-reported), and the cited cycle_ids (grounded
-        against actual query results — see this module's docstring).
+    Yields:
+        QueryStarted/QueryResult/QueryError for each run_sql call, in order,
+        followed by exactly one final Answer event.
 
     Raises:
         AskError: the model called an unknown tool, or schema validation
@@ -162,7 +254,7 @@ def ask(
             "cache_control": {"type": "ephemeral"},
         }
     ]
-    messages: list[Any] = [{"role": "user", "content": question}]
+    messages: list[Any] = _build_initial_messages(question, history)
     executed_sql: list[str] = []
     seen_cycle_ids: set[str] = set()
     # Built once with the row_cap/timeout_secs this call actually enforces —
@@ -172,7 +264,7 @@ def ask(
 
     _t0 = time.monotonic()
     log.info(
-        "ask() starting — model=%s max_turns=%d question=%r",
+        "ask_stream() starting — model=%s max_turns=%d question=%r",
         model_id,
         max_turns,
         question,
@@ -212,11 +304,13 @@ def ask(
             tool_input = cast(dict[str, Any], block.input)
             sql = tool_input.get("sql", "")
             log.info("    → run_sql(%s)", _fmt_sql(sql))
+            yield QueryStarted(sql=sql)
             try:
                 result = execute_guarded_select(
                     conn, sql, row_cap=row_cap, timeout_secs=timeout_secs
                 )
             except SqlGuardError as exc:
+                yield QueryError(sql=sql, error=str(exc))
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -232,6 +326,13 @@ def ask(
                 cycle_id = row.get("cycle_id")
                 if isinstance(cycle_id, str):
                     seen_cycle_ids.add(cycle_id)
+            yield QueryResult(
+                sql=sql,
+                columns=result.columns,
+                rows=result.rows,
+                truncated=result.truncated,
+                row_cap=result.row_cap,
+            )
             tool_results.append(
                 {
                     "type": "tool_result",
@@ -375,13 +476,39 @@ def ask(
         ]
 
         log.info(
-            "ask() done — %d query call(s), %d cited cycle(s), %.1fs",
+            "ask_stream() done — %d query call(s), %d cited cycle(s), %.1fs",
             len(executed_sql),
             len(cited_cycle_ids),
             time.monotonic() - _t0,
         )
-        return AskResult(
+        yield Answer(
             answer_text=answer.answer_text,
             executed_sql=executed_sql,
             cited_cycle_ids=cited_cycle_ids,
         )
+        return
+
+
+def ask(
+    question: str,
+    conn: Connection,
+    *,
+    history: Sequence[HistoryTurn] | None = None,
+    **kwargs: Any,
+) -> AskResult:
+    """Drain ask_stream() to the final AskResult — for callers that don't
+    need incremental progress (existing tests, any future non-streaming
+    caller). See ask_stream()'s docstring for all other parameters.
+
+    Raises:
+        AskError: propagated from ask_stream() if raised before an Answer
+                  event is produced.
+    """
+    for event in ask_stream(question, conn, history=history, **kwargs):
+        if isinstance(event, Answer):
+            return AskResult(
+                answer_text=event.answer_text,
+                executed_sql=event.executed_sql,
+                cited_cycle_ids=event.cited_cycle_ids,
+            )
+    raise AskError("ask_stream() ended without producing an Answer event.")

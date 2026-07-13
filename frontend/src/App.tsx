@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { fetchOverview, fetchPositions, type OverviewResponse, type PositionSummary } from './api'
 import { ActivityFeed } from './components/ActivityFeed'
+import { AskScreen } from './components/AskScreen'
 import { DecisionsScreen } from './components/DecisionsScreen'
 import { EquityCurve } from './components/EquityCurve'
 import { KillSwitchChip } from './components/KillSwitchChip'
@@ -10,12 +11,11 @@ import { PositionsTable } from './components/PositionsTable'
 import { Tiles } from './components/Tiles'
 
 // Screen switching is local state, not a router — matches the design
-// reference's presentational tabs (WP-9.2 decision). Ask isn't built yet so
-// its tab stays inert. Both this and the selected cycle live here so
-// WP-9.9's URL-addressable cycle requirement (citations must deep link into
-// the Decision explorer) is a contained swap to a router later, not an
-// unwind of state scattered across screens.
-type Screen = 'overview' | 'decisions' | 'performance'
+// reference's presentational tabs (WP-9.2 decision). Both this and the
+// selected cycle live here so a citation from the Ask screen (WP-9.9) can
+// deep-link into the Decision explorer just by setting both, and so the
+// eventual router swap is contained to one place.
+type Screen = 'overview' | 'decisions' | 'performance' | 'ask'
 
 function App() {
   const [screen, setScreen] = useState<Screen>('overview')
@@ -24,6 +24,11 @@ function App() {
   const [positions, setPositions] = useState<PositionSummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [killSwitchOpen, setKillSwitchOpen] = useState(false)
+
+  const citeCycle = (cycleId: string) => {
+    setSelectedCycleId(cycleId)
+    setScreen('decisions')
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -84,7 +89,12 @@ function App() {
           >
             Performance
           </span>
-          <span>Ask</span>
+          <span
+            className={screen === 'ask' ? 'on' : undefined}
+            onClick={() => setScreen('ask')}
+          >
+            Ask
+          </span>
         </nav>
         <div className="console-header__right">
           {overview && (
@@ -145,6 +155,8 @@ function App() {
       )}
 
       {screen === 'performance' && <PerformanceScreen />}
+
+      {screen === 'ask' && <AskScreen onCiteCycle={citeCycle} />}
 
       {killSwitchOpen && <KillSwitchPanel onClose={() => setKillSwitchOpen(false)} />}
     </main>

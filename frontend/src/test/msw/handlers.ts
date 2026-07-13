@@ -232,6 +232,53 @@ export const killSwitchStatusFixture: KillSwitchStatusResponse = {
   ],
 }
 
+// --- WP-9.9: Ask the journal — SSE response builder -----------------------
+// POST /api/ask streams `event: X\ndata: Y\n\n` frames; MSW v2 supports a
+// ReadableStream response body, so this builds one from a plain list of
+// (event, data) pairs — the same shape options_agent/ui/ask.py's
+// ask_event_stream() emits.
+
+export type SseFrame = [event: string, data: unknown]
+
+export function sseResponse(frames: SseFrame[]): Response {
+  const body = new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder()
+      for (const [event, data] of frames) {
+        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
+      }
+      controller.close()
+    },
+  })
+  return new Response(body, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+  })
+}
+
+export const askAnswerFixture: SseFrame[] = [
+  ['query_started', { sql: "SELECT cycle_id FROM journal_records WHERE strategy='bull_put_spread'" }],
+  [
+    'query_result',
+    {
+      sql: "SELECT cycle_id FROM journal_records WHERE strategy='bull_put_spread'",
+      columns: ['cycle_id'],
+      rows: [{ cycle_id: 'cyc-1' }, { cycle_id: 'cyc-2' }],
+      truncated: false,
+      row_cap: 500,
+    },
+  ],
+  [
+    'answer',
+    {
+      answer_text: '2 bull put spreads opened this window.',
+      executed_sql: ["SELECT cycle_id FROM journal_records WHERE strategy='bull_put_spread'"],
+      cited_cycle_ids: ['cyc-1', 'cyc-2'],
+      tables_touched: ['journal_records'],
+    },
+  ],
+]
+
 export const handlers = [
   http.get('/api/overview', () => HttpResponse.json(overviewFixture)),
   http.get('/api/positions', () => HttpResponse.json(positionsFixture)),
@@ -260,4 +307,5 @@ export const handlers = [
       created_at: '2026-07-13T10:00:00Z',
     })
   }),
+  http.post('/api/ask', () => sseResponse(askAnswerFixture)),
 ]

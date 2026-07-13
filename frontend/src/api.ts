@@ -456,3 +456,113 @@ export async function postKillSwitchAction(
   }
   return (await res.json()) as KillSwitchHistoryEntry
 }
+
+// --- WP-9.9: Ask the journal ---------------------------------------------
+// POST /api/ask streams Server-Sent Events; field names mirror
+// options_agent/ui/ask.py's event payloads exactly.
+
+export interface AskHistoryTurn {
+  question: string
+  answer_text: string
+}
+
+export interface AskQueryResultPayload {
+  sql: string
+  columns: string[]
+  rows: Record<string, unknown>[]
+  truncated: boolean
+  row_cap: number
+}
+
+export interface AskQueryErrorPayload {
+  sql: string
+  error: string
+}
+
+export interface AskAnswerPayload {
+  answer_text: string
+  executed_sql: string[]
+  cited_cycle_ids: string[]
+  tables_touched: string[]
+}
+
+export interface AskStreamHandlers {
+  onQueryStarted?: (sql: string) => void
+  onQueryResult?: (payload: AskQueryResultPayload) => void
+  onQueryError?: (payload: AskQueryErrorPayload) => void
+  onAnswer?: (payload: AskAnswerPayload) => void
+  onError?: (message: string) => void
+}
+
+function dispatchSseFrame(frame: string, handlers: AskStreamHandlers): void {
+  let event = 'message'
+  let data = ''
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('event: ')) event = line.slice(7)
+    else if (line.startsWith('data: ')) data = line.slice(6)
+  }
+  if (!data) return
+
+  const payload = JSON.parse(data)
+  switch (event) {
+    case 'query_started':
+      handlers.onQueryStarted?.(payload.sql)
+      break
+    case 'query_result':
+      handlers.onQueryResult?.(payload as AskQueryResultPayload)
+      break
+    case 'query_error':
+      handlers.onQueryError?.(payload as AskQueryErrorPayload)
+      break
+    case 'answer':
+      handlers.onAnswer?.(payload as AskAnswerPayload)
+      break
+    case 'error':
+      handlers.onError?.(payload.message)
+      break
+  }
+}
+
+// Manual SSE parsing over fetch()'s ReadableStream rather than EventSource
+// (WP-9.9 decision): EventSource is GET-only with no body, and a question
+// is an arbitrary-length string that needs to go in a POST body, not a
+// query param.
+export async function streamAsk(
+  question: string,
+  history: AskHistoryTurn[],
+  handlers: AskStreamHandlers,
+): Promise<void> {
+  let res: Response
+  try {
+    res = await fetch('/api/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, history }),
+    })
+  } catch {
+    handlers.onError?.('Network error contacting /api/ask')
+    return
+  }
+  if (!res.ok || !res.body) {
+    handlers.onError?.(`/api/ask → ${res.status}`)
+    return
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+
+    let sepIndex = buffer.indexOf('\n\n')
+    while (sepIndex !== -1) {
+      const frame = buffer.slice(0, sepIndex)
+      buffer = buffer.slice(sepIndex + 2)
+      dispatchSseFrame(frame, handlers)
+      sepIndex = buffer.indexOf('\n\n')
+    }
+  }
+}
