@@ -51,6 +51,15 @@ The card's name and description are already available from Phase 1's `get_list_c
 
 4. **Fetch the PR** using `gh pr view <number> --json title,body,state,files,additions,deletions` and `gh pr diff <number>`. Read only files touched by the diff — do not scan the whole repo.
 
+### Phase 2.4 — Check out the PR into a dedicated worktree
+
+Phase 2.5 and Phase 2.6 both execute code from the PR (pytest, manual verification snippets, `docker compose build`, a live UI server). Do that in an isolated worktree, never in the main working tree — the reviewer session shouldn't disturb whatever branch or uncommitted state the user's own checkout is in.
+
+1. **Look for an existing worktree on the PR's branch before creating a new one.** Get the branch name (`gh pr view <number> --json headRefName -q .headRefName`), then check `git worktree list` for a path already checked out to it — most commonly the worktree `/trello-wp-start` created for this same ticket (its Phase 8 keeps that worktree on disk until the user confirms the ticket is fully done, which is typically still true while the card sits in "In Review"). Reusing it means the review runs against the exact working state the implementer left, including anything not yet pushed.
+2. **If a matching worktree exists:** call `EnterWorktree` with `path: <that-worktree-path>` to switch into it. Skip `gh pr checkout` — it's already on the right branch. Do not run `git pull` or otherwise mutate it beyond what's needed for read-only verification; it isn't yours.
+3. **If no matching worktree exists:** call `EnterWorktree` with `name: review-wp-N.M-<short-slug>` (e.g. `review-wp-9.5-performance-api`) to create a fresh one, then run `gh pr checkout <number>` inside it to fetch and switch to the PR's branch.
+4. Run all of Phase 2.5's verification commands and Phase 2.6's build/seed/server steps from inside this worktree.
+
 ### Phase 2.5 — Run author verification steps
 
 After Phase 2 completes and you have the PR body, extract and run **all three forms** of author verification:
@@ -85,7 +94,7 @@ Skip this phase entirely if the card has no `area:ui` label and touches no files
 
 4. **Compare against the reference**, dimension by dimension: layout structure (grid columns, pane widths), color/chip semantics (which states map to which color), interaction affordances the mock implies (expand/collapse indicators, hover cursors, disabled states), and any field the API response includes that the mock displays but the component silently drops. A deviation that's documented — in the PR's "Decisions resolved" table or a code comment explaining a real constraint (e.g. "no schema exists to summarize this") — is not a bug. An *undocumented* fidelity gap, especially one that drops already-fetched data or removes a usability affordance the mock relied on, is a legitimate finding for this review.
 
-5. **Tear down** — kill the background server, delete the scratch DB, and remove any `options_agent/ui/static/` build output you copied in.
+5. **Tear down** — kill the background server. Deleting the scratch DB and build output is unnecessary if working in the Phase 2.4 worktree — `ExitWorktree`'s Phase 4 removal deletes the whole checkout — but still kill the server process explicitly; worktree removal doesn't touch running processes.
 
 ### Phase 3 — Deliver the review
 
@@ -121,6 +130,13 @@ Output a structured review using exactly this template:
 **[Approve | Request changes | Needs discussion]** — one sentence.
 ```
 
+### Phase 4 — Clean up the worktree
+
+Once the review has been delivered, exit the worktree:
+
+- **If Phase 2.4 created a fresh worktree (step 3):** call `ExitWorktree` with `action: "remove"` (pass `discard_changes: true` if it's refused for uncommitted/unmerged state — nothing in a review-only worktree needs to survive past this point). A code review has no reason to leave a checkout behind; unlike implementation work, there's no follow-up commit expected from this session.
+- **If Phase 2.4 reused an existing worktree (step 2):** call `ExitWorktree` with `action: "keep"` — it isn't this session's worktree to delete, and `/trello-wp-start`'s own Phase 8 owns its lifecycle. (`ExitWorktree` refuses to remove a worktree entered via `path` anyway, so `"remove"` would be a no-op here, but state the reasoning in the review output rather than relying on that.)
+
 ## Rules
 
 - **Never take merge or approval actions** — the Verdict is a recommendation only; do not call any GitHub or Trello API to approve or merge.
@@ -128,3 +144,4 @@ Output a structured review using exactly this template:
 - **Do not read files outside the PR diff** unless a cross-reference in the diff points to a contract file in `docs/` that is needed to verify correctness.
 - **If a card's `Depends on` entry is not "Done"**, flag it explicitly in Cross-WP clarifications as an integration risk — do not assume the interface is stable.
 - **Stay within the card's scope** — do not critique design decisions that were explicitly documented as resolved in the card description or the PR body's "Decisions resolved" table.
+- **Run all verification and demo work (Phase 2.5, Phase 2.6) inside the Phase 2.4 worktree, never in the main working tree** — always remove it at the end (Phase 4).
