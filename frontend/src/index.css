@@ -1293,9 +1293,13 @@ body {
   gap: 8px;
 }
 
-.kill-switch-panel__confirm {
-  border-color: rgba(208, 59, 59, 0.5) !important;
-  color: #e57373 !important;
+/* :not(:disabled) rather than !important: lets the shared
+   button:disabled rule above (higher specificity via the extra class +
+   pseudo-class) win once this button is actually disabled, instead of
+   punching through it unconditionally. */
+.kill-switch-panel__confirm:not(:disabled) {
+  border-color: rgba(208, 59, 59, 0.5);
+  color: #e57373;
 }
 
 .kill-switch-panel__subhead {
