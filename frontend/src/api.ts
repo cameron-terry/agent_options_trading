@@ -552,17 +552,27 @@ export async function streamAsk(
   const decoder = new TextDecoder()
   let buffer = ''
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
+  // A stream can die mid-read (server-side Anthropic SDK error, network
+  // drop) — ui/ask.py's own docstring documents that those propagate
+  // uncaught and just end the connection. Without this catch, reader.read()
+  // rejecting would throw past every caller, and AskScreen's setPending(false)
+  // right after its `await streamAsk(...)` would never run, leaving the
+  // input stuck disabled indefinitely.
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
 
-    let sepIndex = buffer.indexOf('\n\n')
-    while (sepIndex !== -1) {
-      const frame = buffer.slice(0, sepIndex)
-      buffer = buffer.slice(sepIndex + 2)
-      dispatchSseFrame(frame, handlers)
-      sepIndex = buffer.indexOf('\n\n')
+      let sepIndex = buffer.indexOf('\n\n')
+      while (sepIndex !== -1) {
+        const frame = buffer.slice(0, sepIndex)
+        buffer = buffer.slice(sepIndex + 2)
+        dispatchSseFrame(frame, handlers)
+        sepIndex = buffer.indexOf('\n\n')
+      }
     }
+  } catch {
+    handlers.onError?.('Connection to /api/ask dropped mid-stream')
   }
 }

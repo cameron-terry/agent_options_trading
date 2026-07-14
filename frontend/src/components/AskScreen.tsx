@@ -56,46 +56,53 @@ export function AskScreen({ onCiteCycle }: AskScreenProps) {
       setTurns((prev) => prev.map((t, i) => (i === turnIndex ? updater(t) : t)))
     }
 
-    await streamAsk(trimmed, history, {
-      onQueryStarted: (sql) => {
-        updateTurn((t) => ({
-          ...t,
-          queries: [...t.queries, { sql, status: 'running', result: null, error: null }],
-        }))
-      },
-      onQueryResult: (payload) => {
-        updateTurn((t) => {
-          const queries = t.queries.slice()
-          queries[queries.length - 1] = {
-            sql: payload.sql,
-            status: 'done',
-            result: payload,
-            error: null,
-          }
-          return { ...t, queries }
-        })
-      },
-      onQueryError: (payload) => {
-        updateTurn((t) => {
-          const queries = t.queries.slice()
-          queries[queries.length - 1] = {
-            sql: payload.sql,
-            status: 'error',
-            result: null,
-            error: payload.error,
-          }
-          return { ...t, queries }
-        })
-      },
-      onAnswer: (payload) => {
-        updateTurn((t) => ({ ...t, answer: payload }))
-      },
-      onError: (message) => {
-        updateTurn((t) => ({ ...t, error: message }))
-      },
-    })
-
-    setPending(false)
+    // finally, not a trailing statement — streamAsk() already catches its own
+    // read-loop errors internally, but this is the backstop that guarantees
+    // the input never stays stuck disabled even if that changes later.
+    try {
+      await streamAsk(trimmed, history, {
+        onQueryStarted: (sql) => {
+          updateTurn((t) => ({
+            ...t,
+            queries: [...t.queries, { sql, status: 'running', result: null, error: null }],
+          }))
+        },
+        onQueryResult: (payload) => {
+          updateTurn((t) => {
+            const queries = t.queries.slice()
+            queries[queries.length - 1] = {
+              sql: payload.sql,
+              status: 'done',
+              result: payload,
+              error: null,
+            }
+            return { ...t, queries }
+          })
+        },
+        onQueryError: (payload) => {
+          updateTurn((t) => {
+            const queries = t.queries.slice()
+            queries[queries.length - 1] = {
+              sql: payload.sql,
+              status: 'error',
+              result: null,
+              error: payload.error,
+            }
+            return { ...t, queries }
+          })
+        },
+        onAnswer: (payload) => {
+          updateTurn((t) => ({ ...t, answer: payload }))
+        },
+        onError: (message) => {
+          updateTurn((t) => ({ ...t, error: message }))
+        },
+      })
+    } catch {
+      updateTurn((t) => (t.answer || t.error ? t : { ...t, error: 'Something went wrong.' }))
+    } finally {
+      setPending(false)
+    }
   }
 
   return (
@@ -159,7 +166,7 @@ function ChatExchange({
 
         {turn.answer && (
           <>
-            <div className="chat-msg__text">{turn.answer.answer_text}</div>
+            <div className="chat-msg__text">{renderAnswerText(turn.answer.answer_text)}</div>
             {turn.answer.cited_cycle_ids.length > 0 && (
               <div className="chat-msg__cite">
                 drawn from cycles{' '}
@@ -186,6 +193,21 @@ function ChatExchange({
         {!done && <div className="chat-msg__pending">thinking…</div>}
       </div>
     </>
+  )
+}
+
+// answer_text supports one markdown affordance — **bold** — for key figures
+// and caveats (the system prompt in agent/ask/prompts.py instructs the model
+// to use it), so caveats render visually distinct per the design reference
+// rather than blending into the surrounding prose.
+function renderAnswerText(text: string) {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g)
+  return parts.map((part, i) =>
+    part.startsWith('**') && part.endsWith('**') ? (
+      <b key={i}>{part.slice(2, -2)}</b>
+    ) : (
+      part
+    ),
   )
 }
 

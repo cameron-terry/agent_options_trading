@@ -186,6 +186,16 @@ def test_system_prompt_interpolates_guardrail_limits() -> None:
     assert "7s" in prompt
 
 
+def test_system_prompt_instructs_bold_caveats() -> None:
+    # WP-9.9 code-review follow-up: the Ask screen only renders **bold**
+    # markdown as visually distinct (AskScreen.tsx's renderAnswerText) — the
+    # model must be told to use it for the card's "caveats visually
+    # distinct" acceptance criterion to actually hold end-to-end.
+    prompt = build_ask_system_prompt()
+    assert "**double asterisks**" in prompt
+    assert "caveat" in prompt.lower()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # agent/ask/loop.py — ask() loop
 # ──────────────────────────────────────────────────────────────────────────────

@@ -165,4 +165,67 @@ describe('AskScreen', () => {
 
     await waitFor(() => expect(input).not.toBeDisabled())
   })
+
+  it('renders **bold** markdown in the answer as visually distinct emphasis', async () => {
+    server.use(
+      http.post('/api/ask', () =>
+        sseResponse([
+          [
+            'answer',
+            {
+              answer_text: '8 trades closed. **Caveat:** sample size is below the n=10 floor.',
+              executed_sql: [],
+              cited_cycle_ids: [],
+              tables_touched: [],
+            },
+          ],
+        ]),
+      ),
+    )
+
+    await ask('How did the high-IV cohort do?')
+
+    const bold = await screen.findByText('Caveat:')
+    expect(bold.tagName).toBe('B')
+    expect(screen.getByText(/sample size is below the n=10 floor/)).toBeInTheDocument()
+    // The raw ** markers must not leak into the rendered text.
+    expect(screen.queryByText(/\*\*/)).not.toBeInTheDocument()
+  })
+
+  it('re-enables the input and surfaces an error when the SSE stream drops mid-read', async () => {
+    // A stream that errors instead of closing cleanly — simulates a network
+    // drop or an uncaught backend exception (documented behavior per
+    // ui/ask.py's module docstring: Anthropic SDK errors just end the
+    // connection). Regression test for the bug where this left the input
+    // stuck disabled forever.
+    let controller: ReadableStreamDefaultController<Uint8Array>
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        controller = c
+      },
+    })
+    server.use(
+      http.post(
+        '/api/ask',
+        () =>
+          new Response(stream, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }),
+      ),
+    )
+
+    const user = userEvent.setup()
+    render(<AskScreen onCiteCycle={vi.fn()} />)
+    const input = screen.getByPlaceholderText(/ask about trades/i)
+    await user.type(input, 'How many opened?')
+    await user.keyboard('{Enter}')
+
+    await waitFor(() => expect(input).toBeDisabled())
+
+    controller!.error(new Error('connection reset'))
+
+    await waitFor(() => expect(input).not.toBeDisabled())
+    expect(await screen.findByText(/dropped mid-stream/)).toBeInTheDocument()
+  })
 })

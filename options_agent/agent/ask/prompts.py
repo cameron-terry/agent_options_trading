@@ -131,5 +131,12 @@ def build_ask_system_prompt(
         " from in cited_cycle_ids. If a claim is purely aggregate (e.g."
         " 'average conviction across all cycles') and not attributable to"
         " specific cycles, say so in prose rather than fabricating"
-        " citations.\n\nSCHEMA\n\n" + _SCHEMA + "\n" + _CONVENTIONS
+        " citations.\n\n"
+        "Formatting: answer_text is rendered as plain prose with minimal"
+        " markdown support — wrap the key figures in your answer and any"
+        " caveat sentences (e.g. small-sample warnings, warm-up exclusions)"
+        " in **double asterisks** so they render with emphasis, e.g."
+        " '**Caveat:** both cohorts are under the n=10 sample floor.' Do not"
+        " use any other markdown syntax (headers, lists, links) — only"
+        " **bold** is supported.\n\nSCHEMA\n\n" + _SCHEMA + "\n" + _CONVENTIONS
     )

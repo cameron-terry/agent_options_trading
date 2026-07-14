@@ -1364,6 +1364,10 @@ body {
   color: var(--ink2);
 }
 
+.chat-msg--agent b {
+  color: var(--ink);
+}
+
 .chat-msg__planrow {
   display: flex;
   flex-wrap: wrap;
