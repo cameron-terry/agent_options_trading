@@ -26,9 +26,20 @@ interface PerformanceFiltersProps {
   // owns the funnel/hit-rate data) rather than fetched here; omitted while
   // that data is still loading.
   summary?: string
+  // WP-9.6: while the compare view is active, this filter's prompt_version
+  // has no coordinated meaning (each compare column picks its own version)
+  // — disabled rather than removed so `since` stays reachable in the same
+  // row, with a title explaining why it's inert instead of silently doing
+  // nothing.
+  disablePromptVersion?: boolean
 }
 
-export function PerformanceFilters({ filters, onChange, summary }: PerformanceFiltersProps) {
+export function PerformanceFilters({
+  filters,
+  onChange,
+  summary,
+  disablePromptVersion,
+}: PerformanceFiltersProps) {
   // The range select is a day-count preset, not the derived ISO `since`
   // timestamp itself — tracked locally so the control stays a controlled
   // <select> without trying to reverse-map an arbitrary ISO string back to
@@ -70,6 +81,8 @@ export function PerformanceFilters({ filters, onChange, summary }: PerformanceFi
       <select
         className="cycle-filters__input"
         value={filters.prompt_version ?? ''}
+        disabled={disablePromptVersion}
+        title={disablePromptVersion ? 'pick versions per column below while comparing' : undefined}
         onChange={(e) =>
           onChange({ ...filters, prompt_version: e.target.value || undefined })
         }
