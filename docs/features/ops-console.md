@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/ui/` (backend), `frontend/` (React SPA source)
 **Credentials required:** `ANTHROPIC_API_KEY` (WP-9.8, ask-the-journal); `DISCORD_WEBHOOK_URL` optional (WP-9.7, kill-switch CRITICAL alert — falls back to a no-op `NullChannel` when unset, same as the scheduler). Otherwise reads the DB only.
-**Status:** Overview (WP-9.2), Decision explorer (WP-9.3), the live activity stream (WP-9.4), the Performance & bias screen (WP-9.5), the prompt-version compare view (WP-9.6), the kill-switch console + alert-delivery health (WP-9.7), and the Ask-the-journal analyst backend (WP-9.8) are complete. Skeleton (`/api/health` + static SPA shell + read-only engine + compose wiring) landed in WP-9.1. The Ask screen (chat UI, WP-9.9) is still to come.
+**Status:** Overview (WP-9.2), Decision explorer (WP-9.3), the live activity stream (WP-9.4), the Performance & bias screen (WP-9.5), the prompt-version compare view (WP-9.6), the kill-switch console + alert-delivery health (WP-9.7), the Ask-the-journal analyst backend (WP-9.8), and the Ask screen (chat UI + SSE streaming, WP-9.9) are complete. Skeleton (`/api/health` + static SPA shell + read-only engine + compose wiring) landed in WP-9.1.
 
 A read-only web console over the trading journal, served by a FastAPI service that runs beside the scheduler in docker-compose. Zero changes to the trading loop; the only write path (the kill switch, WP-9.7) reuses `obs/killswitch.py` verbatim.
 
@@ -16,7 +16,7 @@ A read-only web console over the trading journal, served by a FastAPI service th
 | `ui/events.py` | Live activity stream (WP-9.4): `GET /api/events` SSE body — polls journal_records/kill_switch_log/positions for high-water-mark changes |
 | `ui/review.py` | Performance & bias API (WP-9.5): thin wrappers over `obs/review.py`'s four pure functions — funnel, hit rate, P&L attribution, bias |
 | `ui/killswitch.py` | Kill-switch console API (WP-9.7): `GET`/`POST /api/killswitch` — the console's only write, plus the alert-delivery health panel over `alert_delivery_failures` |
-| `ui/ask.py` | Ask-the-journal API (WP-9.8): `POST /api/ask` request/response shaping around `agent/ask.py`'s analyst loop |
+| `ui/ask.py` | Ask-the-journal API (WP-9.8, streamed WP-9.9): `POST /api/ask` SSE framing around `agent/ask/loop.py`'s `ask_stream()` generator |
 | `ui/__main__.py` | CLI entry point: `python -m options_agent.ui [--config path] [--host] [--port]` |
 | `frontend/` | Vite + React + TypeScript SPA source; builds to `dist/`, copied into the image at `options_agent/ui/static/` |
 | `Dockerfile.console` | Multi-stage build: Node stage builds the SPA, Python stage serves it |
@@ -213,9 +213,9 @@ with get_connection(write_engine) as conn:
 
 ---
 
-## Ask-the-journal analyst (WP-9.8)
+## Ask-the-journal analyst (WP-9.8, streamed WP-9.9)
 
-`POST /api/ask` answers natural-language questions over the journal via a second, independent LLM call alongside `agent/reasoner.py`'s trade reasoner — same two-phase agentic-loop shape (exploration with an "auto" tool, then a forced-tool commit call), but with exactly one read-only tool instead of seven, and no deterministic-validation feedback loop (an SQL answer has no `TradeProposal` risk check to fail).
+`POST /api/ask` answers natural-language questions over the journal via a second, independent LLM call alongside `agent/reasoner.py`'s trade reasoner — same two-phase agentic-loop shape (exploration with an "auto" tool, then a forced-tool commit call), but with exactly one read-only tool instead of seven, and no deterministic-validation feedback loop (an SQL answer has no `TradeProposal` risk check to fail). As of WP-9.9 the endpoint streams via SSE rather than returning one blocking JSON payload — see below.
 
 ```python
 from options_agent.state.db import get_connection
@@ -223,17 +223,17 @@ from options_agent.ui.ask import get_ask_answer
 
 with get_connection(engine) as conn:
     response = get_ask_answer(conn, "How many bull_put_spread cycles opened last month?")
-    # AskResponse(answer=..., executed_sql=[...], cited_cycle_ids=[...])
+    # AskResponse(answer=..., executed_sql=[...], cited_cycle_ids=[...], tables_touched=[...])
 ```
 
 | File | Responsibility |
 |---|---|
-| `agent/sql_guard.py` | `validate_select_only` (sqlglot AST allow-list) + `execute_guarded_select` (row cap, statement timeout) |
-| `agent/ask_tool.py` | `run_sql` tool definition — the analyst's only tool |
-| `agent/ask_schema.py` | `AskAnswer` + the forced-commit `submit_ask_answer` tool |
-| `agent/ask_prompts.py` | Hand-written schema + WP-0 semantic-conventions system prompt |
-| `agent/ask.py` | `ask()` — the exploration/commit loop |
-| `ui/ask.py` | `POST /api/ask` request/response models + wrapper |
+| `agent/ask/sql_guard.py` | `validate_select_only` (sqlglot AST allow-list) + `execute_guarded_select` (row cap, statement timeout) |
+| `agent/ask/tool.py` | `run_sql` tool definition — the analyst's only tool |
+| `agent/ask/schema.py` | `AskAnswer` + the forced-commit `submit_ask_answer` tool |
+| `agent/ask/prompts.py` | Hand-written schema + WP-0 semantic-conventions system prompt |
+| `agent/ask/loop.py` | `ask_stream()` — the exploration/commit loop as a generator; `ask()` drains it for non-streaming callers. Both re-exported from `agent/ask/__init__.py` (WP-9.9 package split), so external callers still `from options_agent.agent.ask import ask_stream` |
+| `ui/ask.py` | `POST /api/ask` SSE framing (`ask_event_stream`) + the non-streaming `get_ask_answer` wrapper |
 
 **Guardrail: allow-list, not deny-list.** `validate_select_only` parses the submitted SQL with `sqlglot` and accepts it only if it is exactly one statement whose top-level node type is `Select`/`Union`/`Intersect`/`Except`. An allow-list was chosen over enumerating unsafe statement kinds because `sqlglot` has no single expression type per unsafe kind — `PRAGMA`, `ATTACH`, `VACUUM`, `REINDEX`, `EXPLAIN`, and bare `BEGIN`/`COMMIT` all parse to different, inconsistent node types (some even fall back to a generic `Command`), so a deny-list would need to track every one of them and would silently under-reject any kind added later. The read-only engine (`PRAGMA query_only=ON`) is a second, independent backstop — even a query that somehow slipped past the AST check cannot write.
 
@@ -247,13 +247,21 @@ with get_connection(engine) as conn:
 
 **Conventions text intentionally mirrors `obs/review.py`, not a rewritten paraphrase.** The system prompt's hit-rate/open-closed/null-`iv_rank` conventions are worded to match WP-7's review module docstring verbatim (e.g. "Hit definition: realized_pnl > 0") so the analyst can never answer a question using a competing definition of a concept the review screens already canonicalized.
 
-**Schema section is hand-written, not generated.** `contracts/` has narrative Pydantic docstrings but nothing structured for mechanical extraction; `state/db.py`'s `Table(...)` definitions carry the richest schema commentary in the repo and are what `ask_prompts.py` was written against. Update it by hand alongside any future migration that changes column names or semantics — there is no automated sync.
+**Schema section is hand-written, not generated.** `contracts/` has narrative Pydantic docstrings but nothing structured for mechanical extraction; `state/db.py`'s `Table(...)` definitions carry the richest schema commentary in the repo and are what `agent/ask/prompts.py` was written against. Update it by hand alongside any future migration that changes column names or semantics — there is no automated sync.
+
+**Streaming (WP-9.9): per-phase SSE, not per-token.** `agent/ask/loop.py`'s exploration/commit loop already has natural event boundaries — `ask_stream()` is a generator yielding `QueryStarted` → `QueryResult`/`QueryError` for each `run_sql` call, then a final `Answer`. Per-token streaming was rejected: Claude doesn't stream *through* a tool call, so token-level granularity would fight the loop's actual shape for no UX benefit. `ui/ask.py`'s `ask_event_stream()` wraps each event into an SSE frame (`event: query_started|query_result|query_error|answer`, JSON `data:`); `ui/app.py`'s `POST /api/ask` handler returns it as a `StreamingResponse`. The endpoint stays `POST`, not `GET` + `EventSource` — a question is an arbitrary-length string that belongs in a body, and `EventSource` is GET-only. The frontend (`api.ts`'s `streamAsk()`) reads the response via `fetch()` + a `ReadableStream` reader, parsing SSE frames by hand instead.
+
+**Every `run_sql` call is visible, never silently retried away.** A guardrail rejection or execution error still gets fed back to the model as a `tool_result` so it can retry (bounded by the existing `max_turns` exploration budget — there is no separate consecutive-error cap), but `QueryError` is yielded to the stream regardless, so the UI shows every failed attempt, not just the eventually-successful one.
+
+**`tables_touched` is derived server-side, not model-reported.** `ui/ask.py`'s `_tables_touched()` parses each `executed_sql` entry with `sqlglot` (already a dependency of `sql_guard.py`) and extracts table names for the Ask screen's plan chip — same "don't trust the model for anything checkable" discipline as `executed_sql` itself.
+
+**Multi-turn history: client-held, capped, plain text.** `ask_stream()`/`ask()` take an optional `history: Sequence[HistoryTurn]`, prepended to the new question as plain `user`/`assistant` text turns (not a tool-call transcript replay — the model's own prose answer is a cheap, sufficient summary for a follow-up). The Ask screen resends the last 5 completed exchanges (`MAX_HISTORY_TURNS` in `AskScreen.tsx`) on every question; there is no server-side session.
 
 **Deployment: `ANTHROPIC_API_KEY` now reaches the console container.** The compose `console` service deliberately does not use `env_file: .env` (that would also leak `ALPACA_*`/`DISCORD_WEBHOOK_URL` into the UI environment, violating the WP-9 epic's "no broker credentials in the UI environment" invariant) — instead it declares `ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}` explicitly under `environment:`, resolved by docker compose's own `.env` variable-substitution mechanism (independent of the `env_file:` directive).
 
 ---
 
-## Frontend (WP-9.1, WP-9.2, WP-9.3, WP-9.4, WP-9.5)
+## Frontend (WP-9.1, WP-9.2, WP-9.3, WP-9.4, WP-9.5, WP-9.9)
 
 Vite + React + TypeScript, scaffolded via `npm create vite@latest -- --template react-ts`. Source lives at the repo root in `frontend/` (not under `options_agent/`) so Node tooling stays out of the Python package tree.
 
@@ -268,7 +276,7 @@ npm run build    # -> frontend/dist/
 
 **Refresh strategy (WP-9.4): SSE-triggered re-fetch, not polling.** `App.tsx` opens an `EventSource('/api/events')`; both `onopen` and the `update` event call the same `load()` used by WP-9.2's original 20s poll (now removed) — no component below `App.tsx` needed to change, only the fetch trigger. Because `overview` (and the kill-switch chip that reads `overview.kill_switch.state`) is fetched at the `App.tsx` level regardless of which screen is active, a `killswitch` tick updates the chip on every screen, not just Overview. The Decision explorer still fetches on demand (filter change, cycle selection) rather than reacting to ticks — it's a historical replay view, not a live one.
 
-**Screen switching (WP-9.3, extended WP-9.5):** `App.tsx` holds `screen` (`'overview' | 'decisions' | 'performance'`) and `selectedCycleId` as local React state — the header tabs for built screens are wired to click handlers that flip `screen`; the Ask tab stays an inert `<span>` per the design reference until WP-9.8/9.9. No client-side router yet; both pieces of state are centralized in `App.tsx` so the eventual router swap (likely landing with WP-9.9, whose citations must deep-link into the Decision explorer) is a contained change.
+**Screen switching (WP-9.3, extended WP-9.5, WP-9.9):** `App.tsx` holds `screen` (`'overview' | 'decisions' | 'performance' | 'ask'`) and `selectedCycleId` as local React state — the header tabs are wired to click handlers that flip `screen`. No client-side router yet; both pieces of state stayed centralized in `App.tsx` specifically so WP-9.9's citation deep-link was a contained addition rather than an unwind of state scattered across screens: `App.tsx`'s `citeCycle(cycleId)` sets `selectedCycleId` and switches `screen` to `'decisions'` in one call, passed into `AskScreen` as `onCiteCycle`.
 
 `components/DecisionsScreen.tsx` orchestrates the Decision explorer: `components/CycleFilters.tsx` (symbol/action/date filters — symbol commits on blur/Enter rather than per-keystroke, since `query_journal`'s symbol filter is an exact match, not a substring search), `components/CycleList.tsx` (left-pane cycle list), and `components/CycleTrace.tsx` (right-pane trace renderer: header metadata, expandable tool-call transcript with a truncated result preview, proposal blockquotes + leg table, validation rule chips + reasons, and the sizing/order/position join, including the anomaly case). A filter change always re-selects the newest matching cycle rather than leaving a stale selection in place — otherwise reverting a filter can strand the view on a sparse cycle (e.g. a `NO_ACTION` cycle with no proposal) that reads as "the trace disappeared."
 
@@ -276,7 +284,7 @@ npm run build    # -> frontend/dist/
 
 **Kill-switch console (WP-9.7)** is a modal, not a fifth tab. The design reference never mocks up the panel itself — it only says the Overview screen's kill-switch chip "links to the control panel" — so `components/KillSwitchPanel.tsx` renders as an overlay (`.modal-backdrop` / `.modal`) triggered by clicking the chip in `App.tsx`'s header (wrapped in a `.kill-switch-chip-button`), keeping the existing 4-tab structure (`Overview`/`Decisions`/`Performance`/`Ask`) untouched. The panel fetches its own `/api/killswitch` state independently of `App.tsx`'s `overview` state — after a successful action it just re-fetches its own status; the header chip picks up the change separately through the existing SSE tick + overview poll, so the two don't need to be wired together. Arming HALT needs only a reason; RESUME and FLATTEN each reveal a second field requiring the operator to type the action word verbatim before the confirm button enables, mirroring `ui/killswitch.py`'s server-side validation exactly (the client-side check is a UX nicety — the server enforces it regardless).
 
-The Ask screen lands in later WP-9 cards per the [design reference](https://claude.ai/code/artifact/ba602f8d-fd08-4c36-8fc5-93fa8a3efd3a).
+`components/AskScreen.tsx` (WP-9.9) is the chat surface: a user question renders immediately, then the agent message builds up live as SSE events arrive — a plan row (`SELECT-only` chip, a live query count, and once the answer lands, a `tables_touched` chip joined with `⋈`), one collapsible `<details>` SQL block per `run_sql` call (open while running, showing an inline result table or an error message once it settles), the final prose answer, and — when present — a `cited cycles` line whose links call `onCiteCycle` to jump into the Decision explorer with that cycle pre-selected. `api.ts`'s `streamAsk()` does the SSE parsing by hand (`fetch()` + `ReadableStream`, splitting on `\n\n`) rather than `EventSource`, since the request is a `POST` with a body. Conversation history is client-held: `AskScreen` resends the last `MAX_HISTORY_TURNS` (5) completed exchanges as `{question, answer_text}` pairs on every new question; a turn that errored out contributes nothing to history rather than poisoning the next request's context.
 
 ---
 

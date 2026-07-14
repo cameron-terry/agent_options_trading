@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,11 +29,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.engine import Engine
 
+from options_agent.agent.ask import HistoryTurn
 from options_agent.config import Config
 from options_agent.contracts.state import ActionTaken
 from options_agent.obs.alerts import AlertDispatcher, DiscordChannel, NullChannel
 from options_agent.state.db import build_engine, get_connection
-from options_agent.ui.ask import AskRequest, AskResponse, get_ask_answer
+from options_agent.ui.ask import AskRequest, ask_event_stream
 from options_agent.ui.cycles import (
     CycleDetail,
     CycleListItem,
@@ -226,9 +228,21 @@ def create_app(
             return get_prompt_versions(conn)
 
     @app.post("/api/ask")
-    def ask_endpoint(body: AskRequest) -> AskResponse:
-        with get_connection(engine) as conn:
-            return get_ask_answer(conn, body.question)
+    def ask_endpoint(body: AskRequest) -> StreamingResponse:
+        history = [
+            HistoryTurn(question=h.question, answer_text=h.answer_text)
+            for h in body.history
+        ]
+
+        def generate() -> Iterator[str]:
+            with get_connection(engine) as conn:
+                yield from ask_event_stream(conn, body.question, history)
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/api/killswitch")
     def killswitch_status() -> KillSwitchStatusResponse:

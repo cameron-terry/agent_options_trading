@@ -1,5 +1,5 @@
-"""WP-9.8: Ask-the-journal analyst tests (agent/ask.py, agent/ask_schema.py,
-agent/ask_prompts.py).
+"""WP-9.8: Ask-the-journal analyst tests (agent/ask/loop.py, agent/ask/schema.py,
+agent/ask/prompts.py).
 
 All Anthropic SDK calls are mocked. No live API calls are made.
 """
@@ -12,14 +12,23 @@ from unittest.mock import MagicMock, patch
 import pytest
 import sqlalchemy as sa
 
-from options_agent.agent.ask import AskError, ask
-from options_agent.agent.ask_prompts import build_ask_system_prompt
-from options_agent.agent.ask_schema import (
+from options_agent.agent.ask import (
+    Answer,
+    AskError,
+    HistoryTurn,
+    QueryError,
+    QueryResult,
+    QueryStarted,
+    ask,
+    ask_stream,
+)
+from options_agent.agent.ask.prompts import build_ask_system_prompt
+from options_agent.agent.ask.schema import (
     SUBMIT_ASK_ANSWER,
     TOOL_SUBMIT_ASK_ANSWER,
     _build_input_schema,
 )
-from options_agent.agent.ask_tool import (
+from options_agent.agent.ask.tool import (
     AGENT_ASK_TOOL_NAMES,
     TOOL_RUN_SQL,
     build_run_sql_tool,
@@ -89,7 +98,7 @@ def _patched_ask(
     mock_responses: list[MagicMock], conn: sa.Connection | None = None, **kwargs: Any
 ) -> tuple[Any, MagicMock]:
     """Call ask() with a mocked Anthropic client; returns (result, mock_client)."""
-    with patch("options_agent.agent.ask.anthropic.Anthropic") as MockCls:
+    with patch("options_agent.agent.ask.loop.anthropic.Anthropic") as MockCls:
         mock_client = MagicMock()
         mock_client.messages.create.side_effect = mock_responses
         MockCls.return_value = mock_client
@@ -102,8 +111,23 @@ def _patched_ask(
     return result, mock_client
 
 
+def _patched_ask_stream(
+    mock_responses: list[MagicMock], **kwargs: Any
+) -> tuple[list[Any], MagicMock]:
+    """Call ask_stream() with a mocked Anthropic client, fully drained;
+    returns (events, mock_client)."""
+    with patch("options_agent.agent.ask.loop.anthropic.Anthropic") as MockCls:
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = mock_responses
+        MockCls.return_value = mock_client
+        engine = _seeded_engine()
+        with engine.connect() as c:
+            events = list(ask_stream("How many cycles opened positions?", c, **kwargs))
+    return events, mock_client
+
+
 # ──────────────────────────────────────────────────────────────────────────────
-# agent/ask_schema.py — SUBMIT_ASK_ANSWER definition
+# agent/ask/schema.py — SUBMIT_ASK_ANSWER definition
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -130,13 +154,13 @@ def test_submit_ask_answer_schema_required_fields() -> None:
 
 def test_submit_ask_answer_schema_has_no_executed_sql_field() -> None:
     # executed_sql is derived server-side from the tool-call transcript, not
-    # self-reported by the model — see ask_schema.py's module docstring.
+    # self-reported by the model — see schema.py's module docstring.
     schema = _build_input_schema()
     assert "executed_sql" not in schema.get("properties", {})
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# agent/ask_prompts.py — conventions honored (WP-9.8 acceptance criterion)
+# agent/ask/prompts.py — conventions honored (WP-9.8 acceptance criterion)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -162,8 +186,18 @@ def test_system_prompt_interpolates_guardrail_limits() -> None:
     assert "7s" in prompt
 
 
+def test_system_prompt_instructs_bold_caveats() -> None:
+    # WP-9.9 code-review follow-up: the Ask screen only renders **bold**
+    # markdown as visually distinct (AskScreen.tsx's renderAnswerText) — the
+    # model must be told to use it for the card's "caveats visually
+    # distinct" acceptance criterion to actually hold end-to-end.
+    prompt = build_ask_system_prompt()
+    assert "**double asterisks**" in prompt
+    assert "caveat" in prompt.lower()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
-# agent/ask.py — ask() loop
+# agent/ask/loop.py — ask() loop
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -316,7 +350,7 @@ def test_agent_ask_tool_names_is_run_sql_only() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# agent/ask_tool.py — build_run_sql_tool interpolates actual limits, not
+# agent/ask/tool.py — build_run_sql_tool interpolates actual limits, not
 # module-level defaults (regression coverage for the PR #94 review finding)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -345,7 +379,7 @@ def test_ask_sends_tool_description_matching_actual_limits() -> None:
             [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _NO_CITATION_ANSWER_INPUT)],
         ),
     ]
-    with patch("options_agent.agent.ask.anthropic.Anthropic") as MockCls:
+    with patch("options_agent.agent.ask.loop.anthropic.Anthropic") as MockCls:
         mock_client = MagicMock()
         mock_client.messages.create.side_effect = [
             _mock_response("end_turn", [_text_block()])
@@ -362,7 +396,7 @@ def test_ask_sends_tool_description_matching_actual_limits() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# agent/ask.py — citation grounding: cited_cycle_ids is cross-checked against
+# agent/ask/loop.py — citation grounding: cited_cycle_ids is cross-checked against
 # cycle_id values a run_sql result actually returned this turn, not trusted
 # from the model verbatim (PR #94 review finding)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -458,3 +492,163 @@ def test_ask_drops_ungrounded_citation_after_retries_exhausted() -> None:
     assert result.answer_text == "1 cycle opened a position."
     assert result.cited_cycle_ids == []
     assert mock_client.messages.create.call_count == 3
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# WP-9.9: ask_stream() — event sequence for the /api/ask SSE conversion
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_ask_stream_yields_query_started_then_result_then_answer() -> None:
+    sql = "SELECT cycle_id FROM journal_records"
+    responses = [
+        _mock_response(
+            "tool_use", [_tool_use_block(TOOL_RUN_SQL, {"sql": sql}, block_id="tu_1")]
+        ),
+        _mock_response("end_turn", [_text_block()]),
+        _mock_response(
+            "tool_use",
+            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _VALID_ANSWER_INPUT)],
+        ),
+    ]
+    events, _ = _patched_ask_stream(responses)
+
+    assert [type(e) for e in events] == [QueryStarted, QueryResult, Answer]
+    started, result, answer = events
+    assert isinstance(started, QueryStarted)
+    assert started.sql == sql
+    assert isinstance(result, QueryResult)
+    assert result.columns == ["cycle_id"]
+    assert isinstance(answer, Answer)
+    assert answer.answer_text == _VALID_ANSWER_INPUT["answer_text"]
+    assert answer.executed_sql == [sql]
+    assert answer.cited_cycle_ids == ["c1"]
+
+
+def test_ask_stream_yields_query_error_on_guardrail_rejection() -> None:
+    responses = [
+        _mock_response(
+            "tool_use",
+            [
+                _tool_use_block(
+                    TOOL_RUN_SQL,
+                    {"sql": "DELETE FROM journal_records"},
+                    block_id="tu_1",
+                )
+            ],
+        ),
+        _mock_response("end_turn", [_text_block()]),
+        _mock_response(
+            "tool_use",
+            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _NO_CITATION_ANSWER_INPUT)],
+        ),
+    ]
+    events, _ = _patched_ask_stream(responses)
+
+    assert [type(e) for e in events] == [QueryStarted, QueryError, Answer]
+    error_event = events[1]
+    assert isinstance(error_event, QueryError)
+    assert error_event.sql == "DELETE FROM journal_records"
+    assert "SELECT" in error_event.error
+    # A rejected query never advances executed_sql on the final Answer.
+    answer = events[2]
+    assert isinstance(answer, Answer)
+    assert answer.executed_sql == []
+
+
+def test_ask_stream_ends_with_exactly_one_answer_event() -> None:
+    responses = [
+        _mock_response("end_turn", [_text_block()]),
+        _mock_response(
+            "tool_use",
+            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _NO_CITATION_ANSWER_INPUT)],
+        ),
+    ]
+    events, _ = _patched_ask_stream(responses)
+    assert len(events) == 1
+    assert isinstance(events[0], Answer)
+
+
+def test_ask_drains_ask_stream_to_same_result_as_direct_call() -> None:
+    # ask() must remain behaviorally identical after the ask_stream() split —
+    # this is the "existing callers/tests are unaffected" guarantee.
+    sql = "SELECT cycle_id FROM journal_records"
+    responses = [
+        _mock_response(
+            "tool_use", [_tool_use_block(TOOL_RUN_SQL, {"sql": sql}, block_id="tu_1")]
+        ),
+        _mock_response("end_turn", [_text_block()]),
+        _mock_response(
+            "tool_use",
+            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _VALID_ANSWER_INPUT)],
+        ),
+    ]
+    result, _ = _patched_ask(responses)
+    assert result.answer_text == _VALID_ANSWER_INPUT["answer_text"]
+    assert result.executed_sql == [sql]
+    assert result.cited_cycle_ids == ["c1"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# WP-9.9: multi-turn history — prepended as plain user/assistant text turns
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_ask_history_prepended_as_plain_text_messages() -> None:
+    responses = [
+        _mock_response("end_turn", [_text_block()]),
+        _mock_response(
+            "tool_use",
+            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _NO_CITATION_ANSWER_INPUT)],
+        ),
+    ]
+    history = [
+        HistoryTurn(question="How many SPY trades?", answer_text="3 SPY trades."),
+    ]
+    with patch("options_agent.agent.ask.loop.anthropic.Anthropic") as MockCls:
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = responses
+        MockCls.return_value = mock_client
+        engine = _seeded_engine()
+        with engine.connect() as c:
+            ask("And how many were profitable?", c, history=history)
+
+    first_call_messages = mock_client.messages.create.call_args_list[0].kwargs[
+        "messages"
+    ]
+    assert first_call_messages[0] == {
+        "role": "user",
+        "content": "How many SPY trades?",
+    }
+    assert first_call_messages[1] == {
+        "role": "assistant",
+        "content": "3 SPY trades.",
+    }
+    assert first_call_messages[2] == {
+        "role": "user",
+        "content": "And how many were profitable?",
+    }
+
+
+def test_ask_with_no_history_matches_prior_single_message_behavior() -> None:
+    # Regression guard: omitting history must produce exactly the same
+    # messages[0] shape ask() always sent pre-WP-9.9.
+    responses = [
+        _mock_response("end_turn", [_text_block()]),
+        _mock_response(
+            "tool_use",
+            [_tool_use_block(TOOL_SUBMIT_ASK_ANSWER, _NO_CITATION_ANSWER_INPUT)],
+        ),
+    ]
+    result, mock_client = _patched_ask(responses)
+    # index 0: mock.call_args stores a reference to the *live* messages list
+    # (see the analogous comment on second_call_messages above), so only the
+    # first entry — set before any mutation — is meaningful to assert on.
+    first_call_messages = mock_client.messages.create.call_args_list[0].kwargs[
+        "messages"
+    ]
+    assert first_call_messages[0] == {
+        "role": "user",
+        "content": "How many cycles opened positions?",
+    }
+    assert result.answer_text == _NO_CITATION_ANSWER_INPUT["answer_text"]

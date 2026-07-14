@@ -4,13 +4,13 @@
     Conventions honored in answers (fixture: a question whose naive answer
     breaks the null-iv_rank or open/closed rule)
 
-Unlike agent/ask.py's guardrail logic (deterministic, unit-tested in
+Unlike agent/ask/loop.py's guardrail logic (deterministic, unit-tested in
 options_agent/tests/test_sql_guard.py and test_ask.py with a mocked LLM),
 whether the *model* actually honors the null-iv_rank / hit-definition /
-open-closed conventions baked into agent/ask_prompts.py is a real-model
+open-closed conventions baked into agent/ask/prompts.py is a real-model
 behaviour question — no mocked-LLM test can validate it. This suite is the
 same tier-2 pattern as tests/evals/test_prompt_eval.py: NOT run in default
-CI, exercised deliberately when agent/ask_prompts.py or agent/ask.py's
+CI, exercised deliberately when agent/ask/prompts.py or agent/ask/loop.py's
 citation/answer contract changes.
 
 How to run:
