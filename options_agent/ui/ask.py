@@ -1,13 +1,13 @@
 """POST /api/ask — WP-9.8 backend for the Ask-the-journal analyst, converted
 to an SSE stream in WP-9.9.
 
-Thin wrapper around agent/ask.py's ask_stream(): opens a connection from the
-console's read-only engine (WP-9.1) and streams the analyst loop's events as
-Server-Sent Events. See agent/ask.py's module docstring for the run_sql /
-submit_ask_answer loop design.
+Thin wrapper around agent/ask/loop.py's ask_stream(): opens a connection from
+the console's read-only engine (WP-9.1) and streams the analyst loop's
+events as Server-Sent Events. See agent/ask/loop.py's module docstring for
+the run_sql / submit_ask_answer loop design.
 
-Event grain (one SSE `event:` name per line below), matching agent/ask.py's
-AskEvent variants 1:1:
+Event grain (one SSE `event:` name per line below), matching
+agent/ask/loop.py's AskEvent variants 1:1:
   query_started  {"sql": str}
   query_result   {"sql", "columns", "rows", "truncated", "row_cap"}
   query_error    {"sql": str, "error": str}
@@ -15,13 +15,13 @@ AskEvent variants 1:1:
   error          {"message": str} — terminal; AskError raised before an Answer
                  was produced (unknown tool call, schema validation
                  exhausted). Anthropic SDK errors are NOT caught here, same
-                 policy as agent/ask.py — the connection just drops.
+                 policy as agent/ask/loop.py — the connection just drops.
 
 tables_touched is derived server-side from executed_sql via sqlglot (already
-a dependency — see agent/sql_guard.py), not self-reported by the model, for
-the same reason executed_sql itself is derived rather than trusted: it feeds
-the Ask screen's plan chips and must not be able to drift from what was
-actually queried.
+a dependency — see agent/ask/sql_guard.py), not self-reported by the model,
+for the same reason executed_sql itself is derived rather than trusted: it
+feeds the Ask screen's plan chips and must not be able to drift from what
+was actually queried.
 """
 
 from __future__ import annotations
@@ -142,7 +142,7 @@ def ask_event_stream(
     grain. AskError (unknown tool / schema validation exhausted) is caught
     and surfaced as a terminal `error` event rather than a broken connection
     — everything else (Anthropic SDK errors) propagates, same policy as
-    agent/ask.py.
+    agent/ask/loop.py.
     """
     try:
         for event in ask_stream(question, conn, history=history):

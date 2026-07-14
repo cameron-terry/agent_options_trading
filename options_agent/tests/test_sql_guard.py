@@ -1,4 +1,4 @@
-"""WP-9.8: SELECT-only SQL guardrail tests (agent/sql_guard.py).
+"""WP-9.8: SELECT-only SQL guardrail tests (agent/ask/sql_guard.py).
 
 No Anthropic API calls anywhere in this file — validate_select_only and
 execute_guarded_select are pure/DB-only and are tested directly.
@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 import sqlalchemy as sa
 
-from options_agent.agent.sql_guard import (
+from options_agent.agent.ask.sql_guard import (
     SqlGuardError,
     execute_guarded_select,
     validate_select_only,

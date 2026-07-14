@@ -9,7 +9,7 @@ simplified because there is no deterministic-validation feedback loop here
 Both executed_sql and cited_cycle_ids on the returned AskResult are grounded
 server-side, not self-reported:
   - executed_sql is built from the actual run_sql tool-call transcript (see
-    ask_schema.py's module docstring for why).
+    schema.py's module docstring for why).
   - cited_cycle_ids is cross-checked against the cycle_id values that
     actually appeared in some run_sql result this turn (seen_cycle_ids
     below). A citation the model can't ground gets one retry with feedback,
@@ -41,23 +41,23 @@ import anthropic
 from pydantic import ValidationError
 from sqlalchemy.engine import Connection
 
-from options_agent.agent.ask_prompts import build_ask_system_prompt
-from options_agent.agent.ask_schema import (
+from options_agent.agent.ask.prompts import build_ask_system_prompt
+from options_agent.agent.ask.schema import (
     SUBMIT_ASK_ANSWER,
     TOOL_SUBMIT_ASK_ANSWER,
     AskAnswer,
 )
-from options_agent.agent.ask_tool import (
-    AGENT_ASK_TOOL_NAMES,
-    TOOL_RUN_SQL,
-    build_run_sql_tool,
-)
-from options_agent.agent.sql_guard import (
+from options_agent.agent.ask.sql_guard import (
     DEFAULT_ROW_CAP,
     DEFAULT_TIMEOUT_SECS,
     GuardedQueryResult,
     SqlGuardError,
     execute_guarded_select,
+)
+from options_agent.agent.ask.tool import (
+    AGENT_ASK_TOOL_NAMES,
+    TOOL_RUN_SQL,
+    build_run_sql_tool,
 )
 
 log = logging.getLogger(__name__)
@@ -206,7 +206,7 @@ def ask_stream(
 
     conn must be opened read-only (state.db.build_engine(url, read_only=True))
     — this function does not itself enforce that, it trusts its caller, same
-    contract as ui/app.py's engine and agent/sql_guard.py's execute_guarded_select.
+    contract as ui/app.py's engine and agent/ask/sql_guard.py's execute_guarded_select.
 
     Args:
         question:            The operator's natural-language question.

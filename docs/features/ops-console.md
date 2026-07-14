@@ -16,7 +16,7 @@ A read-only web console over the trading journal, served by a FastAPI service th
 | `ui/events.py` | Live activity stream (WP-9.4): `GET /api/events` SSE body — polls journal_records/kill_switch_log/positions for high-water-mark changes |
 | `ui/review.py` | Performance & bias API (WP-9.5): thin wrappers over `obs/review.py`'s four pure functions — funnel, hit rate, P&L attribution, bias |
 | `ui/killswitch.py` | Kill-switch console API (WP-9.7): `GET`/`POST /api/killswitch` — the console's only write, plus the alert-delivery health panel over `alert_delivery_failures` |
-| `ui/ask.py` | Ask-the-journal API (WP-9.8, streamed WP-9.9): `POST /api/ask` SSE framing around `agent/ask.py`'s `ask_stream()` generator |
+| `ui/ask.py` | Ask-the-journal API (WP-9.8, streamed WP-9.9): `POST /api/ask` SSE framing around `agent/ask/loop.py`'s `ask_stream()` generator |
 | `ui/__main__.py` | CLI entry point: `python -m options_agent.ui [--config path] [--host] [--port]` |
 | `frontend/` | Vite + React + TypeScript SPA source; builds to `dist/`, copied into the image at `options_agent/ui/static/` |
 | `Dockerfile.console` | Multi-stage build: Node stage builds the SPA, Python stage serves it |
@@ -228,11 +228,11 @@ with get_connection(engine) as conn:
 
 | File | Responsibility |
 |---|---|
-| `agent/sql_guard.py` | `validate_select_only` (sqlglot AST allow-list) + `execute_guarded_select` (row cap, statement timeout) |
-| `agent/ask_tool.py` | `run_sql` tool definition — the analyst's only tool |
-| `agent/ask_schema.py` | `AskAnswer` + the forced-commit `submit_ask_answer` tool |
-| `agent/ask_prompts.py` | Hand-written schema + WP-0 semantic-conventions system prompt |
-| `agent/ask.py` | `ask_stream()` — the exploration/commit loop as a generator; `ask()` drains it for non-streaming callers |
+| `agent/ask/sql_guard.py` | `validate_select_only` (sqlglot AST allow-list) + `execute_guarded_select` (row cap, statement timeout) |
+| `agent/ask/tool.py` | `run_sql` tool definition — the analyst's only tool |
+| `agent/ask/schema.py` | `AskAnswer` + the forced-commit `submit_ask_answer` tool |
+| `agent/ask/prompts.py` | Hand-written schema + WP-0 semantic-conventions system prompt |
+| `agent/ask/loop.py` | `ask_stream()` — the exploration/commit loop as a generator; `ask()` drains it for non-streaming callers. Both re-exported from `agent/ask/__init__.py` (WP-9.9 package split), so external callers still `from options_agent.agent.ask import ask_stream` |
 | `ui/ask.py` | `POST /api/ask` SSE framing (`ask_event_stream`) + the non-streaming `get_ask_answer` wrapper |
 
 **Guardrail: allow-list, not deny-list.** `validate_select_only` parses the submitted SQL with `sqlglot` and accepts it only if it is exactly one statement whose top-level node type is `Select`/`Union`/`Intersect`/`Except`. An allow-list was chosen over enumerating unsafe statement kinds because `sqlglot` has no single expression type per unsafe kind — `PRAGMA`, `ATTACH`, `VACUUM`, `REINDEX`, `EXPLAIN`, and bare `BEGIN`/`COMMIT` all parse to different, inconsistent node types (some even fall back to a generic `Command`), so a deny-list would need to track every one of them and would silently under-reject any kind added later. The read-only engine (`PRAGMA query_only=ON`) is a second, independent backstop — even a query that somehow slipped past the AST check cannot write.
@@ -247,9 +247,9 @@ with get_connection(engine) as conn:
 
 **Conventions text intentionally mirrors `obs/review.py`, not a rewritten paraphrase.** The system prompt's hit-rate/open-closed/null-`iv_rank` conventions are worded to match WP-7's review module docstring verbatim (e.g. "Hit definition: realized_pnl > 0") so the analyst can never answer a question using a competing definition of a concept the review screens already canonicalized.
 
-**Schema section is hand-written, not generated.** `contracts/` has narrative Pydantic docstrings but nothing structured for mechanical extraction; `state/db.py`'s `Table(...)` definitions carry the richest schema commentary in the repo and are what `ask_prompts.py` was written against. Update it by hand alongside any future migration that changes column names or semantics — there is no automated sync.
+**Schema section is hand-written, not generated.** `contracts/` has narrative Pydantic docstrings but nothing structured for mechanical extraction; `state/db.py`'s `Table(...)` definitions carry the richest schema commentary in the repo and are what `agent/ask/prompts.py` was written against. Update it by hand alongside any future migration that changes column names or semantics — there is no automated sync.
 
-**Streaming (WP-9.9): per-phase SSE, not per-token.** `agent/ask.py`'s exploration/commit loop already has natural event boundaries — `ask_stream()` is a generator yielding `QueryStarted` → `QueryResult`/`QueryError` for each `run_sql` call, then a final `Answer`. Per-token streaming was rejected: Claude doesn't stream *through* a tool call, so token-level granularity would fight the loop's actual shape for no UX benefit. `ui/ask.py`'s `ask_event_stream()` wraps each event into an SSE frame (`event: query_started|query_result|query_error|answer`, JSON `data:`); `ui/app.py`'s `POST /api/ask` handler returns it as a `StreamingResponse`. The endpoint stays `POST`, not `GET` + `EventSource` — a question is an arbitrary-length string that belongs in a body, and `EventSource` is GET-only. The frontend (`api.ts`'s `streamAsk()`) reads the response via `fetch()` + a `ReadableStream` reader, parsing SSE frames by hand instead.
+**Streaming (WP-9.9): per-phase SSE, not per-token.** `agent/ask/loop.py`'s exploration/commit loop already has natural event boundaries — `ask_stream()` is a generator yielding `QueryStarted` → `QueryResult`/`QueryError` for each `run_sql` call, then a final `Answer`. Per-token streaming was rejected: Claude doesn't stream *through* a tool call, so token-level granularity would fight the loop's actual shape for no UX benefit. `ui/ask.py`'s `ask_event_stream()` wraps each event into an SSE frame (`event: query_started|query_result|query_error|answer`, JSON `data:`); `ui/app.py`'s `POST /api/ask` handler returns it as a `StreamingResponse`. The endpoint stays `POST`, not `GET` + `EventSource` — a question is an arbitrary-length string that belongs in a body, and `EventSource` is GET-only. The frontend (`api.ts`'s `streamAsk()`) reads the response via `fetch()` + a `ReadableStream` reader, parsing SSE frames by hand instead.
 
 **Every `run_sql` call is visible, never silently retried away.** A guardrail rejection or execution error still gets fed back to the model as a `tool_result` so it can retry (bounded by the existing `max_turns` exploration budget — there is no separate consecutive-error cap), but `QueryError` is yielded to the stream regardless, so the UI shows every failed attempt, not just the eventually-successful one.
 

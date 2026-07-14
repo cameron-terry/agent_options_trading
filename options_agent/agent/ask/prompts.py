@@ -18,7 +18,7 @@ not invent a competing definition of concepts WP-7's review module already
 canonicalized.
 """
 
-from options_agent.agent.sql_guard import DEFAULT_ROW_CAP, DEFAULT_TIMEOUT_SECS
+from options_agent.agent.ask.sql_guard import DEFAULT_ROW_CAP, DEFAULT_TIMEOUT_SECS
 
 _SCHEMA = """\
 DATABASE: SQLite. JSON-typed columns below are stored as SQLite TEXT holding

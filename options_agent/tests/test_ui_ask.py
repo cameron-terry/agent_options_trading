@@ -1,6 +1,6 @@
 """WP-9.8/9.9: POST /api/ask wiring tests (ui/ask.py, ui/app.py).
 
-agent/ask.py's ask()/ask_stream() are mocked throughout — no Anthropic API
+agent/ask/loop.py's ask()/ask_stream() are mocked throughout — no Anthropic API
 calls. WP-9.9 converted the endpoint to an SSE stream; tests parse the raw
 `event: X\\ndata: Y\\n\\n` frames the same way the frontend does.
 """

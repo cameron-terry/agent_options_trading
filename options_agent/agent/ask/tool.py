@@ -1,13 +1,13 @@
 """WP-9.8: run_sql — the ask-the-journal analyst's only tool.
 
-Definition only — see agent/sql_guard.py for the validation + execution the
-tool implementation actually runs against, and agent/ask.py for how it is
-dispatched inside the exploration loop.
+Definition only — see agent/ask/sql_guard.py for the validation + execution
+the tool implementation actually runs against, and agent/ask/loop.py for how
+it is dispatched inside the exploration loop.
 
 build_run_sql_tool() takes row_cap/timeout_secs as parameters rather than
 baking DEFAULT_ROW_CAP/DEFAULT_TIMEOUT_SECS into a module-level constant —
 ask() must call it with the row_cap/timeout_secs it actually passes to
-execute_guarded_select(), the same way ask_prompts.build_ask_system_prompt()
+execute_guarded_select(), the same way ask.prompts.build_ask_system_prompt()
 already takes them, so the tool description a caller with non-default limits
 sees never drifts from what's actually enforced. A frozen constant here
 would silently mislead the model the moment any caller overrides the
@@ -16,7 +16,7 @@ defaults (code-review finding, WP-9.8 PR #94).
 
 from anthropic.types import ToolParam
 
-from options_agent.agent.sql_guard import DEFAULT_ROW_CAP, DEFAULT_TIMEOUT_SECS
+from options_agent.agent.ask.sql_guard import DEFAULT_ROW_CAP, DEFAULT_TIMEOUT_SECS
 
 TOOL_RUN_SQL = "run_sql"
 
