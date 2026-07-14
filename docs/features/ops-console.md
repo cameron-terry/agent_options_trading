@@ -1,20 +1,21 @@
 # Ops Console
 
 **Module:** `options_agent/ui/` (backend), `frontend/` (React SPA source)
-**Credentials required:** none — reads the DB only; `ANTHROPIC_API_KEY` becomes required starting WP-9.8 (ask-the-journal)
-**Status:** Overview (WP-9.2), Decision explorer (WP-9.3), the live activity stream (WP-9.4), the Performance & bias screen (WP-9.5), the prompt-version compare view (WP-9.6), and the Ask-the-journal analyst backend (WP-9.8) are complete. Skeleton (`/api/health` + static SPA shell + read-only engine + compose wiring) landed in WP-9.1. The Ask screen (chat UI, WP-9.9) is still to come.
+**Credentials required:** `ANTHROPIC_API_KEY` (WP-9.8, ask-the-journal); `DISCORD_WEBHOOK_URL` optional (WP-9.7, kill-switch CRITICAL alert — falls back to a no-op `NullChannel` when unset, same as the scheduler). Otherwise reads the DB only.
+**Status:** Overview (WP-9.2), Decision explorer (WP-9.3), the live activity stream (WP-9.4), the Performance & bias screen (WP-9.5), the prompt-version compare view (WP-9.6), the kill-switch console + alert-delivery health (WP-9.7), and the Ask-the-journal analyst backend (WP-9.8) are complete. Skeleton (`/api/health` + static SPA shell + read-only engine + compose wiring) landed in WP-9.1. The Ask screen (chat UI, WP-9.9) is still to come.
 
-A read-only web console over the trading journal, served by a FastAPI service that runs beside the scheduler in docker-compose. Zero changes to the trading loop; the only planned write path (kill switch, WP-9.7) reuses `obs/killswitch.py` verbatim.
+A read-only web console over the trading journal, served by a FastAPI service that runs beside the scheduler in docker-compose. Zero changes to the trading loop; the only write path (the kill switch, WP-9.7) reuses `obs/killswitch.py` verbatim.
 
 ## Sub-modules
 
 | File | Responsibility |
 |---|---|
-| `ui/app.py` | FastAPI app factory: `/api/health`, `/api/overview`, `/api/positions`, `/api/cycles`, `/api/cycles/{cycle_id}`, `/api/events`, `/api/review/*`, `/api/ask`, static SPA mount, engine wiring |
+| `ui/app.py` | FastAPI app factory: `/api/health`, `/api/overview`, `/api/positions`, `/api/cycles`, `/api/cycles/{cycle_id}`, `/api/events`, `/api/review/*`, `/api/killswitch`, `/api/ask`, static SPA mount, engine wiring |
 | `ui/overview.py` | Overview API aggregation (WP-9.2): tiles, equity curve, activity feed, distance-to-trigger meter |
 | `ui/cycles.py` | Decision explorer API (WP-9.3): filtered cycle list + full-trace detail, with position/order/outcome joins |
 | `ui/events.py` | Live activity stream (WP-9.4): `GET /api/events` SSE body — polls journal_records/kill_switch_log/positions for high-water-mark changes |
 | `ui/review.py` | Performance & bias API (WP-9.5): thin wrappers over `obs/review.py`'s four pure functions — funnel, hit rate, P&L attribution, bias |
+| `ui/killswitch.py` | Kill-switch console API (WP-9.7): `GET`/`POST /api/killswitch` — the console's only write, plus the alert-delivery health panel over `alert_delivery_failures` |
 | `ui/ask.py` | Ask-the-journal API (WP-9.8): `POST /api/ask` request/response shaping around `agent/ask.py`'s analyst loop |
 | `ui/__main__.py` | CLI entry point: `python -m options_agent.ui [--config path] [--host] [--port]` |
 | `frontend/` | Vite + React + TypeScript SPA source; builds to `dist/`, copied into the image at `options_agent/ui/static/` |
@@ -181,6 +182,37 @@ Pure client composition — no new backend endpoint. `PerformanceScreen.tsx`'s "
 
 ---
 
+## Kill-switch console + alert-delivery health (WP-9.7)
+
+`GET /api/killswitch` (current state + history + alert-delivery failures) and `POST /api/killswitch` (arm HALT/FLATTEN or RESUME) are the console's **only write path** — everything else in `ui/` reads through the read-only engine.
+
+```python
+from options_agent.state.db import get_connection
+from options_agent.ui.killswitch import get_killswitch_status, apply_killswitch_action, KillSwitchActionRequest
+
+with get_connection(read_engine) as conn:
+    status = get_killswitch_status(conn)   # state, history, alert_failures
+
+with get_connection(write_engine) as conn:
+    entry = apply_killswitch_action(
+        conn,
+        KillSwitchActionRequest(action="HALT", reason="reconcile mismatch"),
+        dispatcher=alert_dispatcher,
+    )
+```
+
+**Write isolation.** `create_app()` takes a second, write-capable engine (`write_engine`, `build_engine(db_url, read_only=False)`) alongside the existing read-only `engine`, and passes it only to the killswitch router's two handlers — every other route in `ui/app.py` still closes over `engine`. In production (no `engine` injected at all) `write_engine` defaults to a fresh engine on the same `DB_URL`; when a test injects `engine` but not `write_engine`, `write_engine` defaults to that same injected engine rather than silently opening a second connection against `config.db_url`'s on-disk default — which would otherwise be an untracked filesystem side effect for the many existing tests that inject only `engine` and never exercise the write path. `test_ui_killswitch.py` enforces the invariant two ways: a source-scan test asserting no `ui/*.py` module other than `app.py`/`killswitch.py`/`__main__.py` references `write_engine`, and a read/write-isolation test using two independent engines that would catch a GET handler reading from (or a POST handler writing to) the wrong one.
+
+**Confirmation UX is stricter than the CLI, deliberately.** Arming HALT takes only a `reason` (matching `obs/__main__.py`'s `set HALT` — zero friction). RESUME and FLATTEN both additionally require a `confirmation` field equal to the literal action word (`"RESUME"` / `"FLATTEN"`) — enforced by `KillSwitchActionRequest`'s Pydantic validator, returned as a 422 otherwise. This is stricter than the CLI, whose `set FLATTEN` is also zero-friction and whose `resume` uses a bare y/N prompt: a UI button click has no equivalent of a CLI's explicit typed command, so FLATTEN gets the same typed-word guard as RESUME.
+
+**`set_by` is a fixed `"console"` string**, not a free-text field — this deployment has no per-operator identity (single-operator, no auth; see the WP-9 epic's stated scope).
+
+**The console dispatches the CRITICAL alert; the CLI currently does not.** `obs/__main__.py`'s `cmd_set`/`cmd_resume` call `set_state()`/`resume()` without a `dispatcher` argument — a pre-existing gap, not something this card introduces or fixes. `POST /api/killswitch` wires a real `AlertDispatcher` (`DiscordChannel` if `DISCORD_WEBHOOK_URL` is set, else `NullChannel`, exactly like the scheduler's own wiring in the top-level `__main__.py`) so a kill-switch change made through the UI actually fires the CRITICAL alert and populates `alert_delivery_failures` on delivery failure — what the alert-delivery health panel assumes there's something to show. `docker-compose.yml`'s `console` service now passes `DISCORD_WEBHOOK_URL` through explicitly (same pattern as `ANTHROPIC_API_KEY` — not loaded via the `options-agent` service's bulk `env_file: .env`, so `ALPACA_*` still never reaches the UI container).
+
+**Alert-delivery health** is `get_alert_delivery_failures()` — the most recent `alert_delivery_failures` rows, newest first, each with `event_type`, `severity`, `detail`, `attempts`, and `last_error`. Folded into `KillSwitchStatusResponse` alongside `state` and `history` rather than a separate endpoint, since the kill-switch panel is the only place in the UI that renders it.
+
+---
+
 ## Ask-the-journal analyst (WP-9.8)
 
 `POST /api/ask` answers natural-language questions over the journal via a second, independent LLM call alongside `agent/reasoner.py`'s trade reasoner — same two-phase agentic-loop shape (exploration with an "auto" tool, then a forced-tool commit call), but with exactly one read-only tool instead of seven, and no deterministic-validation feedback loop (an SQL answer has no `TradeProposal` risk check to fail).
@@ -241,6 +273,8 @@ npm run build    # -> frontend/dist/
 `components/DecisionsScreen.tsx` orchestrates the Decision explorer: `components/CycleFilters.tsx` (symbol/action/date filters — symbol commits on blur/Enter rather than per-keystroke, since `query_journal`'s symbol filter is an exact match, not a substring search), `components/CycleList.tsx` (left-pane cycle list), and `components/CycleTrace.tsx` (right-pane trace renderer: header metadata, expandable tool-call transcript with a truncated result preview, proposal blockquotes + leg table, validation rule chips + reasons, and the sizing/order/position join, including the anomaly case). A filter change always re-selects the newest matching cycle rather than leaving a stale selection in place — otherwise reverting a filter can strand the view on a sparse cycle (e.g. a `NO_ACTION` cycle with no proposal) that reads as "the trace disappeared."
 
 `components/PerformanceScreen.tsx` (WP-9.5, extended WP-9.6) composes the four `/api/review/*` panels: `PerformanceFilters.tsx` (a time-range preset `<select>` computing `since` client-side, plus a `prompt_version` `<select>` populated from `GET /api/review/prompt-versions`), `FunnelPanel.tsx` (funnel bars + rejections-by-rule table), `HitRateTable.tsx` (per-strategy stats with an "insufficient" chip per `sufficient: false`, never a bare 0% or hidden row), `AttributionPanel.tsx` (P&L bars by underlying, plus a by-strategy table), and `BiasPanel.tsx` (the delta-skew meter, clamped to ±0.5 net delta same as the design reference's band, plus the direction/event-proximity cohort table). All four panels re-fetch together on any filter change; nulls from the backend (never NaN) render as "—". A "Compare prompt versions" checkbox swaps the single-version hit-rate/attribution/bias panels for `components/PerformanceCompare.tsx`'s two-column A/B layout — see the WP-9.6 section above.
+
+**Kill-switch console (WP-9.7)** is a modal, not a fifth tab. The design reference never mocks up the panel itself — it only says the Overview screen's kill-switch chip "links to the control panel" — so `components/KillSwitchPanel.tsx` renders as an overlay (`.modal-backdrop` / `.modal`) triggered by clicking the chip in `App.tsx`'s header (wrapped in a `.kill-switch-chip-button`), keeping the existing 4-tab structure (`Overview`/`Decisions`/`Performance`/`Ask`) untouched. The panel fetches its own `/api/killswitch` state independently of `App.tsx`'s `overview` state — after a successful action it just re-fetches its own status; the header chip picks up the change separately through the existing SSE tick + overview poll, so the two don't need to be wired together. Arming HALT needs only a reason; RESUME and FLATTEN each reveal a second field requiring the operator to type the action word verbatim before the confirm button enables, mirroring `ui/killswitch.py`'s server-side validation exactly (the client-side check is a UX nicety — the server enforces it regardless).
 
 The Ask screen lands in later WP-9 cards per the [design reference](https://claude.ai/code/artifact/ba602f8d-fd08-4c36-8fc5-93fa8a3efd3a).
 

@@ -4,6 +4,7 @@ import { ActivityFeed } from './components/ActivityFeed'
 import { DecisionsScreen } from './components/DecisionsScreen'
 import { EquityCurve } from './components/EquityCurve'
 import { KillSwitchChip } from './components/KillSwitchChip'
+import { KillSwitchPanel } from './components/KillSwitchPanel'
 import { PerformanceScreen } from './components/PerformanceScreen'
 import { PositionsTable } from './components/PositionsTable'
 import { Tiles } from './components/Tiles'
@@ -22,6 +23,7 @@ function App() {
   const [overview, setOverview] = useState<OverviewResponse | null>(null)
   const [positions, setPositions] = useState<PositionSummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [killSwitchOpen, setKillSwitchOpen] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -85,7 +87,15 @@ function App() {
           <span>Ask</span>
         </nav>
         <div className="console-header__right">
-          {overview && <KillSwitchChip state={overview.kill_switch.state} />}
+          {overview && (
+            <button
+              className="kill-switch-chip-button"
+              onClick={() => setKillSwitchOpen(true)}
+              aria-label="Open kill-switch console"
+            >
+              <KillSwitchChip state={overview.kill_switch.state} />
+            </button>
+          )}
           {overview && overview.tiles.account_equity.value !== null && (
             <span className="console-header__equity">
               EQ <b>${overview.tiles.account_equity.value.toLocaleString()}</b>
@@ -135,6 +145,8 @@ function App() {
       )}
 
       {screen === 'performance' && <PerformanceScreen />}
+
+      {killSwitchOpen && <KillSwitchPanel onClose={() => setKillSwitchOpen(false)} />}
     </main>
   )
 }

@@ -2,7 +2,10 @@
 
 Starts the read-only ops console (WP-9.1 skeleton): serves /api/health and,
 once the SPA is built into options_agent/ui/static/, the static frontend.
-This process reads no broker credentials — its only input is the DB.
+This process reads no broker credentials — its only input is the DB, plus
+(WP-9.7) an optional DISCORD_WEBHOOK_URL for the kill-switch console's
+CRITICAL alert, same env var and channel selection as the top-level
+`python -m options_agent` scheduler entry point.
 
 Logs go to stdout at INFO level by default. Set LOG_LEVEL=DEBUG for verbose
 output.
@@ -18,6 +21,8 @@ from pathlib import Path
 import uvicorn
 
 from options_agent.config import Config
+from options_agent.obs.alerts import AlertDispatcher, DiscordChannel, NullChannel
+from options_agent.state.db import build_engine
 from options_agent.ui.app import create_app
 
 
@@ -56,7 +61,22 @@ def main() -> None:
             "Config file %s not found — using defaults (SQLite)", config_path
         )
 
-    app = create_app(config=config)
+    # Explicit write engine + alert channel for the kill-switch console (WP-9.7)
+    # — the console's one write path. Same DB_URL and DISCORD_WEBHOOK_URL
+    # selection as the top-level `python -m options_agent` scheduler entry
+    # point, so a kill-switch change made through the UI dispatches the
+    # identical CRITICAL alert a CLI-triggered one would.
+    db_url = os.environ.get("DB_URL", config.db_url)
+    write_engine = build_engine(db_url, read_only=False)
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "")
+    channel = DiscordChannel(webhook_url) if webhook_url else NullChannel()
+    if isinstance(channel, NullChannel):
+        logger.info("DISCORD_WEBHOOK_URL not set — alerts suppressed (NullChannel)")
+    alert_dispatcher = AlertDispatcher(channel, write_engine)
+
+    app = create_app(
+        config=config, write_engine=write_engine, alert_dispatcher=alert_dispatcher
+    )
     uvicorn.run(app, host=args.host, port=args.port)
 
 
