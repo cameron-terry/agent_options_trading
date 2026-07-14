@@ -69,7 +69,7 @@ If the card is in "Needs Implementation Details" or "Needs Reqs", **do not assum
 
 Only begin after the user confirms (or after answering any open questions):
 
-1. **Before branching, `git fetch origin` and check local state against `origin/main`** — don't trust the session's initial `gitStatus` snapshot or whatever branch happens to be checked out. A prior session can leave the working tree on a stale, already-merged branch (e.g. checked out on a feature branch that was squash-merged hours ago), and local `main` can lag a PR that merged since the last sync. Branching from stale state produces a Phase 3 briefing with wrong assumptions — e.g. WP-9.5 initially assumed "no frontend test framework exists" (true through WP-9.4) because local `main` hadn't picked up a test-harness PR that had just merged. `git log --oneline origin/main -8` after fetching is enough to catch this. Then create a git branch named `wp-N.M-<short-slug>` (e.g. `wp-0.8-repo-skeleton-ci`) off the fetched `origin/main`.
+1. **Create a dedicated worktree for this ticket** — call `EnterWorktree` with `name: wp-N.M-<short-slug>` (e.g. `wp-0.8-repo-skeleton-ci`). This creates an isolated git worktree under `.claude/worktrees/` on a new branch based on `origin/<default-branch>` (the tool's default `worktree.baseRef: fresh` behavior), and switches the session into it. This sidesteps the staleness trap entirely — don't trust the session's initial `gitStatus` snapshot or whatever branch happens to be checked out in the main working tree; a prior session can leave it on a stale, already-merged branch, or local `main` can lag a PR that merged since the last sync. Branching from stale state produces a Phase 3 briefing with wrong assumptions — e.g. WP-9.5 initially assumed "no frontend test framework exists" (true through WP-9.4) because local `main` hadn't picked up a test-harness PR that had just merged. `EnterWorktree` branching fresh from `origin` avoids that failure mode by construction. All subsequent implementation, testing, and PR work for this ticket happens inside the worktree.
 
 2. Implement the ticket scope as described in the card's Acceptance criteria, guided by the design doc. Stay within scope — do not touch adjacent WPs.
 
@@ -111,6 +111,8 @@ Include all doc file changes in the same commit in Phase 6 (or as an immediately
 
 For any `WP-9.x` ticket, once CI passes (Phase 5) and docs are updated (Phase 5.5), bring up the demo container automatically — don't wait for the user to ask, and don't skip it because the change "seems backend-only." Follow the "Visual verification workflow (docker)" steps in the WP-9 carried-forward context below: rebuild the image, seed (or reuse) a scratch DB, run `console-demo` on port 8001. This gives the user a running instance to review against the design reference while the PR is open, and is also the point to sanity-check the change yourself against real seeded data (e.g. exercise a new endpoint with `curl` before claiming it works). Leave the container running afterward (per that workflow's step 5) rather than tearing it down immediately — the user may want to poke at it themselves.
 
+**Worktree gotcha:** `docker compose build` derives its image tag and project name from the current directory's basename when no `name:` is set in `docker-compose.yml` (true here — checked, none is set). Building from inside a `wp-N.M-<slug>` worktree therefore tags the image `wp-n-m-<slug>-console` instead of `agent_options_trading-console`, which breaks the hardcoded `agent_options_trading-console:latest` reference in the `docker run` command below. Pin the project name explicitly when building from a worktree: `docker compose -p agent_options_trading build console` (or `COMPOSE_PROJECT_NAME=agent_options_trading docker compose build console`).
+
 ### Phase 6 — Open a PR
 
 Once all CI gates are green, commit the work and open a pull request:
@@ -131,6 +133,12 @@ Once all CI gates are green, commit the work and open a pull request:
 2. Move the card to "In Review" using `mcp__trello__move_card`.
 
 3. Update the corresponding WP-epic Trello ticket to reflect the ticket's status.
+
+### Phase 8 — Exit the worktree
+
+Call `ExitWorktree` with `action: "keep"` — leave the worktree and its branch on disk. Do not remove it yet: follow-up commits often land on this branch after Phase 7 (per the Rules section below), and the WP-9 demo container (Phase 5.75), if still running, is serving files from inside it. This returns the session's working directory to where it was before Phase 4, but the worktree remains available to re-enter (`EnterWorktree` with the same `path`) for any follow-up work on this ticket.
+
+**Final cleanup:** once the user has verified there are no further changes to be made for this ticket (e.g. review feedback is addressed, CI is green, and they explicitly say they're done, or the PR has merged), tear down the WP-9 demo container if one is still running (`docker rm -f console-demo`), then re-enter the worktree if the session isn't already in it and call `ExitWorktree` with `action: "remove"` to delete the worktree and its branch. Don't remove it proactively before that confirmation — a still-open PR commonly gets one more round of fixes.
 
 ## WP-9 (Ops Console UI) — carried-forward context
 
@@ -203,3 +211,4 @@ Equity-curve-chart-specific (inline-JS only, confirmed WP-9.2): gridline stroke 
 - If a dependency card is not "Done", implement against a typed stub and document the assumption in a code comment.
 - If the card is in "Needs Reqs" or "Needs Implementation Details", list every open question and wait for answers — do not invent defaults.
 - If follow-up commits are pushed to the PR after Phase 7 (e.g. to align with another branch or resolve a conflict), post an updated comment on the Trello card explaining what changed and why. Re-check whether any decisions recorded in the Phase 3 briefing or the existing Trello comment are now stale and correct them.
+- Never call `ExitWorktree` with `action: "remove"` until the user has confirmed there's nothing further to change for this ticket — removing it early destroys in-progress follow-up work with no way back.
