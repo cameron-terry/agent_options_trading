@@ -348,6 +348,42 @@ describe('CycleTrace — populated transcript', () => {
     expect(more.textContent).toContain('"item-14"')
   })
 
+  it('uses the singular "line" when exactly one line is hidden', () => {
+    // Pretty-printed, a 9-element array is 11 lines: "[", 9 items, "]" —
+    // one line past the 10-line threshold.
+    const items = Array.from({ length: 9 }, (_, i) => `item-${i}`)
+    const { container } = render(
+      <CycleTrace
+        detail={detail({
+          tool_calls_transcript: [toolCall({ result_json: JSON.stringify(items) })],
+        })}
+      />,
+    )
+    const more = container.querySelector('.tool-transcript__body-more') as HTMLDetailsElement
+    expect(within(more).getByText('show 1 more line')).toBeInTheDocument()
+  })
+
+  it('truncates a long result that pretty-prints to a single giant line', () => {
+    // A long JSON string scalar has no newlines at all — the line-count
+    // check alone would never catch this, only a character-count fallback.
+    const longValue = 'x'.repeat(850)
+    const { container } = render(
+      <CycleTrace
+        detail={detail({
+          tool_calls_transcript: [toolCall({ result_json: JSON.stringify(longValue) })],
+        })}
+      />,
+    )
+
+    const body = container.querySelector('.tool-transcript__body') as HTMLElement
+    const preview = body.childNodes[0].textContent ?? ''
+    expect(preview.length).toBe(800)
+
+    const more = container.querySelector('.tool-transcript__body-more') as HTMLDetailsElement
+    expect(within(more).getByText('show more')).toBeInTheDocument()
+    expect(more.textContent).toContain('x'.repeat(10))
+  })
+
   it('relabels the toggle to "show less" once expanded', () => {
     const items = Array.from({ length: 15 }, (_, i) => `item-${i}`)
     const { container } = render(

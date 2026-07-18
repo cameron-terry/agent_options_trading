@@ -44,6 +44,10 @@ function App() {
         .catch((err: Error) => {
           if (cancelled) return
           setError(err.message)
+          // A failed fetch shouldn't leave the positions panel claiming to
+          // still be loading forever — the error banner above already says
+          // what happened, so stop stalling on "loading positions…".
+          setPositions((prev) => prev ?? [])
         })
     }
 

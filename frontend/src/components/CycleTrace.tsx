@@ -1,9 +1,13 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { CycleDetail, OrderLink, PositionLink, ToolCallRecord } from '../api'
 import { formatCurrency, formatPct, formatSignedCurrency, formatTime } from '../format'
 
 const GIST_MAX_CHARS = 64
 const BODY_TRUNCATE_LINES = 10
+// Catches a long result that pretty-prints to few (or one) giant lines — a
+// long scalar/string value, say — which the line-count check alone would
+// let straight through un-truncated.
+const BODY_TRUNCATE_CHARS = 800
 
 // result_json is an opaque, heterogeneous blob (state/journal.py stores it
 // pre-serialized precisely because every tool's result shape differs) — no
@@ -30,24 +34,34 @@ function prettyResult(resultJson: string): string {
 
 function ResultBody({ resultJson }: { resultJson: string }) {
   const [expanded, setExpanded] = useState(false)
-  const pretty = prettyResult(resultJson)
-  const lines = pretty.split('\n')
-  if (lines.length <= BODY_TRUNCATE_LINES) {
+  const pretty = useMemo(() => prettyResult(resultJson), [resultJson])
+  const lines = useMemo(() => pretty.split('\n'), [pretty])
+
+  const byLines = lines.length > BODY_TRUNCATE_LINES
+  const byChars = !byLines && pretty.length > BODY_TRUNCATE_CHARS
+  if (!byLines && !byChars) {
     return <div className="tool-transcript__body">{pretty}</div>
   }
-  const preview = lines.slice(0, BODY_TRUNCATE_LINES).join('\n')
-  const rest = lines.slice(BODY_TRUNCATE_LINES).join('\n')
+
+  const preview = byLines
+    ? lines.slice(0, BODY_TRUNCATE_LINES).join('\n')
+    : pretty.slice(0, BODY_TRUNCATE_CHARS)
+  const rest = byLines
+    ? lines.slice(BODY_TRUNCATE_LINES).join('\n')
+    : pretty.slice(BODY_TRUNCATE_CHARS)
+  const hiddenLines = byLines ? lines.length - BODY_TRUNCATE_LINES : null
+  const moreLabel =
+    hiddenLines !== null ? `show ${hiddenLines} more line${hiddenLines === 1 ? '' : 's'}` : 'show more'
+
   return (
     <div className="tool-transcript__body">
       {preview}
       <details
-        className="tool-transcript__body-more"
+        className="tool-transcript__body-more chevron-toggle"
         open={expanded}
         onToggle={(e) => setExpanded(e.currentTarget.open)}
       >
-        <summary>
-          {expanded ? 'show less' : `show ${lines.length - BODY_TRUNCATE_LINES} more lines`}
-        </summary>
+        <summary>{expanded ? 'show less' : moreLabel}</summary>
         {rest}
       </details>
     </div>
@@ -67,7 +81,7 @@ function TranscriptStep({
     .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
     .join(', ')
   return (
-    <details className="tool-transcript__step" open={defaultOpen}>
+    <details className="tool-transcript__step chevron-toggle" open={defaultOpen}>
       <summary>
         <span className="tool-transcript__index">{index}</span>
         <span className="tool-transcript__name">{step.tool_name}</span>
