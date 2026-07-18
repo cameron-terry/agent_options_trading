@@ -60,6 +60,7 @@ itself) instead:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -182,8 +183,44 @@ def _transcript() -> list[ToolCallRecord]:
         ToolCallRecord(
             tool_name="get_filtered_chain",
             tool_input={"symbol": "SPY", "strategy": "bull_put_spread"},
-            result_json=(
-                '{"puts": [{"strike": 530, "bid": 2.45, "ask": 2.52, "delta": -0.24}]}'
+            # Deliberately a full multi-strike chain (not a one-liner like the
+            # other transcript entries) — the only seeded tool call that
+            # exercises the console's click-to-expand truncation for long
+            # tool-call results (frontend/src/components/CycleTrace.tsx).
+            result_json=json.dumps(
+                {
+                    "underlying": "SPY",
+                    "underlying_price": 545.20,
+                    "as_of": "2026-07-18T20:45:00Z",
+                    "puts": [
+                        {
+                            "strike": strike,
+                            "expiration": "2026-08-15",
+                            "bid": bid,
+                            "ask": round(bid + 0.07, 2),
+                            "mid": round(bid + 0.035, 2),
+                            "delta": delta,
+                            "iv": iv,
+                            "open_interest": oi,
+                            "volume": vol,
+                            "dte": 28,
+                        }
+                        for strike, bid, delta, iv, oi, vol in [
+                            (560, 8.10, -0.62, 0.180, 4210, 812),
+                            (555, 6.45, -0.54, 0.170, 3980, 705),
+                            (550, 4.95, -0.46, 0.160, 5120, 940),
+                            (545, 3.70, -0.38, 0.155, 6230, 1105),
+                            (540, 2.65, -0.30, 0.150, 4870, 690),
+                            (535, 1.85, -0.24, 0.145, 3610, 502),
+                            (530, 1.25, -0.19, 0.140, 2980, 388),
+                            (525, 0.85, -0.15, 0.135, 2140, 260),
+                            (520, 0.55, -0.11, 0.130, 1620, 190),
+                            (515, 0.35, -0.08, 0.128, 1105, 130),
+                        ]
+                    ],
+                    "truncated": False,
+                    "total_before_cap": 10,
+                }
             ),
         ),
         ToolCallRecord(

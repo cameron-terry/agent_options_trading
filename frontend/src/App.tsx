@@ -145,7 +145,7 @@ function App() {
               Open positions{' '}
               <small>marks from monitor cache — never fetched live by the UI</small>
             </h2>
-            <PositionsTable positions={positions ?? []} />
+            <PositionsTable positions={positions} />
           </section>
         </div>
       )}

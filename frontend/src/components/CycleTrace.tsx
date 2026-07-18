@@ -1,7 +1,9 @@
+import { useState } from 'react'
 import type { CycleDetail, OrderLink, PositionLink, ToolCallRecord } from '../api'
 import { formatCurrency, formatPct, formatSignedCurrency, formatTime } from '../format'
 
 const GIST_MAX_CHARS = 64
+const BODY_TRUNCATE_LINES = 10
 
 // result_json is an opaque, heterogeneous blob (state/journal.py stores it
 // pre-serialized precisely because every tool's result shape differs) — no
@@ -13,6 +15,43 @@ function summarizeResult(resultJson: string): string {
   return trimmed.length > GIST_MAX_CHARS
     ? `${trimmed.slice(0, GIST_MAX_CHARS)}…`
     : trimmed
+}
+
+// result_json is often minified; pretty-printing it first is what makes
+// "10 lines or more" a meaningful truncation threshold rather than one
+// giant unbroken line.
+function prettyResult(resultJson: string): string {
+  try {
+    return JSON.stringify(JSON.parse(resultJson), null, 2)
+  } catch {
+    return resultJson
+  }
+}
+
+function ResultBody({ resultJson }: { resultJson: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const pretty = prettyResult(resultJson)
+  const lines = pretty.split('\n')
+  if (lines.length <= BODY_TRUNCATE_LINES) {
+    return <div className="tool-transcript__body">{pretty}</div>
+  }
+  const preview = lines.slice(0, BODY_TRUNCATE_LINES).join('\n')
+  const rest = lines.slice(BODY_TRUNCATE_LINES).join('\n')
+  return (
+    <div className="tool-transcript__body">
+      {preview}
+      <details
+        className="tool-transcript__body-more"
+        open={expanded}
+        onToggle={(e) => setExpanded(e.currentTarget.open)}
+      >
+        <summary>
+          {expanded ? 'show less' : `show ${lines.length - BODY_TRUNCATE_LINES} more lines`}
+        </summary>
+        {rest}
+      </details>
+    </div>
+  )
 }
 
 function TranscriptStep({
@@ -35,7 +74,7 @@ function TranscriptStep({
         <span className="tool-transcript__args">({args})</span>
         <span className="tool-transcript__gist">{summarizeResult(step.result_json)}</span>
       </summary>
-      <div className="tool-transcript__body">{step.result_json}</div>
+      <ResultBody resultJson={step.result_json} />
     </details>
   )
 }

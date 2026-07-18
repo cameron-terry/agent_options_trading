@@ -728,6 +728,42 @@ body {
   word-break: break-word;
 }
 
+.tool-transcript__body-more {
+  margin-top: 4px;
+}
+
+.tool-transcript__body-more summary {
+  cursor: pointer;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent-soft);
+  font-family: var(--sans);
+  font-size: 11px;
+}
+
+.tool-transcript__body-more summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-transcript__body-more summary::after {
+  content: '▸';
+  color: var(--ink3);
+  font-size: 10px;
+  transition: transform 0.15s;
+}
+
+.tool-transcript__body-more[open] summary::after {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-transcript__body-more summary::after {
+    transition: none;
+  }
+}
+
 /* Proposal */
 .proposal {
   font-size: 13.5px;
