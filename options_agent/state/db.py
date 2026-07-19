@@ -115,7 +115,9 @@ orders_table = Table(
 # ---------------------------------------------------------------------------
 # fill_events — append-only; one row per broker fill execution.
 #
-# broker_exec_id is a unique idempotency key: "{broker_order_id}@{cumulative_qty}".
+# broker_exec_id is a unique idempotency key: "{broker_order_id}@{cumulative_qty}"
+# for single-leg orders, or "{broker_order_id}:{leg_symbol}@{cumulative_leg_qty}"
+# for multi-leg orders (one row per leg — see FillEvent's docstring).
 # filled_qty is the INCREMENTAL quantity for this execution (not cumulative).
 # occurred_at is broker-reported fill time; observed_at is reconcile-pass time.
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import pytest
 from options_agent.config import Config
 from options_agent.contracts.proposal import ExitPlan, Leg, TradeProposal
 from options_agent.contracts.state import (
+    FillEvent,
     LegStatus,
     Order,
     OrderRole,
@@ -24,10 +25,11 @@ from options_agent.contracts.state import (
     PositionStatus,
 )
 from options_agent.execution.broker import BrokerClient
-from options_agent.execution.reconcile import reconcile
+from options_agent.execution.reconcile import _record_fill_events, reconcile
 from options_agent.state.crud import (
     get_order,
     get_position,
+    insert_fill_event_if_new,
     insert_order,
     insert_position,
     list_fill_events_for_order,
@@ -1090,3 +1092,107 @@ def test_multi_leg_backfill_idempotent_no_duplicate_events(
     with get_connection(engine) as conn:
         events = list_fill_events_for_order(conn, "ord-ic")
     assert len(events) == 4
+
+
+def test_multi_leg_mixed_old_and_new_legs_in_one_pass(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two of four legs already have recorded FillEvents (e.g. observed on an
+    earlier reconcile pass while the order was still non-terminal); reconcile()
+    must record only the two new legs — not duplicate the existing two — and
+    still end up with a fully-populated legs_filled across all four.
+    """
+    broker = _broker(monkeypatch)
+    # Order still non-terminal in the DB so it's visible via list_pending_orders
+    # (the main loop's per-leg gating is what's under test here, not backfill).
+    _seed(
+        engine,
+        _multi_leg_pos(),
+        _multi_leg_order(status=OrderStatus.WORKING, net_fill_price=None),
+    )
+
+    with get_connection(engine) as conn:
+        insert_fill_event_if_new(
+            conn,
+            FillEvent(
+                id="fe-preexisting-1",
+                order_id="ord-ic",
+                broker_exec_id=f"broker-ic:{_OCC_SELL_PUT}@6",
+                leg_symbol=_OCC_SELL_PUT,
+                filled_qty=6,
+                fill_price=13.09,
+                occurred_at=_NOW,
+                observed_at=_NOW,
+            ),
+        )
+        insert_fill_event_if_new(
+            conn,
+            FillEvent(
+                id="fe-preexisting-2",
+                order_id="ord-ic",
+                broker_exec_id=f"broker-ic:{_OCC_BUY_PUT}@6",
+                leg_symbol=_OCC_BUY_PUT,
+                filled_qty=6,
+                fill_price=12.20,
+                occurred_at=_NOW,
+                observed_at=_NOW,
+            ),
+        )
+
+    alp = _multi_leg_alpaca_order(filled_at=_NOW)
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=alp)
+
+    with get_connection(engine) as conn:
+        diff = reconcile(broker, conn)
+
+    assert diff.anomalies == []
+
+    with get_connection(engine) as conn:
+        events = list_fill_events_for_order(conn, "ord-ic")
+    assert len(events) == 4
+    by_symbol = {e.leg_symbol: e for e in events}
+    # Pre-existing rows are untouched, not duplicated.
+    assert by_symbol[_OCC_SELL_PUT].id == "fe-preexisting-1"
+    assert by_symbol[_OCC_BUY_PUT].id == "fe-preexisting-2"
+    # The two previously-unrecorded legs are newly written.
+    assert by_symbol[_OCC_SELL_CALL].fill_price == 9.84
+    assert by_symbol[_OCC_BUY_CALL].fill_price == 8.64
+
+    with get_connection(engine) as conn:
+        fetched = get_order(conn, "ord-ic")
+    assert fetched is not None
+    assert len(fetched.legs_filled) == 4
+
+
+def test_record_fill_events_with_no_position_still_writes_fill_events(
+    engine,
+) -> None:
+    """If the position lookup misses (e.g. a data inconsistency), fill_events
+    must still be recorded per leg — the audit trail should not depend on the
+    position record being resolvable. legs_filled cannot be rebuilt without a
+    position to pair legs against, so it is left alone (no patch, no crash).
+    """
+    _seed(engine, _multi_leg_pos(), _multi_leg_order())
+
+    alp = _multi_leg_alpaca_order()
+
+    with get_connection(engine) as conn:
+        local_order = get_order(conn, "ord-ic")
+        assert local_order is not None
+        legs_filled, anomaly = _record_fill_events(
+            conn, local_order, alp, None, "broker-ic", _NOW
+        )
+
+    assert anomaly is None
+    assert legs_filled is None
+
+    with get_connection(engine) as conn:
+        events = list_fill_events_for_order(conn, "ord-ic")
+    assert len(events) == 4
+    assert {e.leg_symbol for e in events} == {
+        _OCC_SELL_PUT,
+        _OCC_BUY_PUT,
+        _OCC_SELL_CALL,
+        _OCC_BUY_CALL,
+    }

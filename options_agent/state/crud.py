@@ -350,6 +350,19 @@ def list_orders_with_unrecorded_fills(conn: Connection) -> list[Order]:
     reconcile.py's backfill pass uses this query to find and catch up exactly
     those orders — self-healing on the next reconcile() call regardless of when
     the gap was introduced.
+
+    Known limitation: recorded_qty sums fill_events across *all* legs of an
+    order, while filled_qty is combo-level (one leg's recorded qty already
+    matches the combo's). A multi-leg order that somehow ends up with only
+    some legs recorded (e.g. legs filled at genuinely different times across
+    reconcile passes while the order was still non-terminal, each caught by
+    the main loop rather than this backfill pass) could read as "fully
+    recorded" here once any single leg's qty reaches filled_qty, even with
+    other legs still unrecorded. Not currently known to be reachable in
+    practice — reconcile() runs each pass inside one DB transaction, so a
+    mid-pass failure rolls back any partial FillEvent writes rather than
+    leaving this state behind — but flagged here since the qty-sum heuristic
+    doesn't fully rule it out for multi-leg orders.
     """
     recorded = (
         sa.select(
