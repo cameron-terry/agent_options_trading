@@ -254,7 +254,7 @@ def test_config_round_trip_with_playbook() -> None:
 def test_config_from_toml_populates_playbook() -> None:
     config = Config.from_toml(Path("config.toml"))
     assert isinstance(config.playbook, PlaybookConfig)
-    assert config.playbook.playbook_version == "1.1.0"
+    assert config.playbook.playbook_version == "1.2.0"
     assert config.playbook.iv_rank_high_threshold == 0.50
     assert config.playbook.iv_rank_low_threshold == 0.25
     assert "iron_condor" in config.playbook.high_iv_strategies

@@ -32,7 +32,6 @@ _STRATEGY_DELTA_SIGN: dict[str, int] = {
     "bear_call_spread": -1,
     "bear_put_spread": -1,
     "iron_condor": 0,
-    "iron_butterfly": 0,
 }
 
 _OPTION_MULTIPLIER = 100  # shares per US equity options contract

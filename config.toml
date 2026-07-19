@@ -29,7 +29,10 @@ model_id = "claude-sonnet-4-6"   # stamp on ContextSnapshot; upgrade to claude-o
 [limits]
 # Bump limits_version whenever any threshold changes so WP-7 analytics can
 # correlate trade outcomes with the exact limits active at the time.
-limits_version = "0.4.0"   # 0.4.0: min_dte 20→30 (entries no longer land inside the 21-DTE time-stop)
+limits_version = "0.5.0"   # 0.5.0: chain_filter min_open_interest 500→250 + min_abs_delta 0.15→0.10
+                           #        (diversified 10-symbol universe; condor wings at classic deltas);
+                           #        exit_plan_bounds time_stop_dte_max 45→29 (no instant time-stops).
+                           # 0.4.0: min_dte 20→30 (entries no longer land inside the 21-DTE time-stop)
 
 # allowed_strategies is intentionally absent here — it is derived from
 # [playbook] by Config._sync_allowed_strategies. Never set it in [limits];
@@ -66,7 +69,12 @@ expiration_overlap_days = 5      # same strategy + expiration within 5 days → 
 opposing_delta_tolerance = 0.05  # |net_delta| above this triggers conflict check
 
 [limits.chain_filter]
-min_open_interest = 500
+# min_open_interest 500→250 (limits 0.5.0): 500 was calibrated for SPY/QQQ-class
+# chains. The diversified universe (TLT/GLD/XLE/EEM) carries tradable 30–45 DTE
+# strikes — especially 0.10–0.20 delta wings — with OI in the 100–500 range; at
+# 500 those chains starve and the agent gets pushed back into correlated index
+# names. The spread rule below remains the binding quote-quality gate.
+min_open_interest = 250
 max_spread_pct_of_mid = 0.10   # primary rule: spread ≤ 10% of mid
 max_spread_abs_floor = 0.05    # also pass if spread ≤ $0.05 (prevents false exclusions)
 # min_dte must clear the 21-DTE time-stop default by a useful margin: with the
@@ -74,7 +82,10 @@ max_spread_abs_floor = 0.05    # also pass if spread ≤ $0.05 (prevents false e
 # days, paying two spreads for nothing. 30–45 DTE is the classic entry window.
 min_dte = 30
 max_dte = 45
-min_abs_delta = 0.15
+# min_abs_delta 0.15→0.10 (limits 0.5.0): a 0.15 floor forced iron-condor long
+# wings to 0.15+ delta (classic wings sit at 0.05–0.10), producing narrow
+# low-credit condors. Token budget is already capped by max_contracts_per_chain.
+min_abs_delta = 0.10
 max_abs_delta = 0.45
 
 [limits.exit_plan_defaults]
@@ -91,7 +102,10 @@ profit_target_pct_max = 1.00
 stop_loss_max_loss_fraction_min = 0.10  # stop must trigger at ≥ 10% of max loss
 stop_loss_max_loss_fraction_max = 1.00  # stop no looser than 100% of max loss
 time_stop_dte_min = 7                   # must have a time-stop; 7 DTE minimum
-time_stop_dte_max = 45                  # time-stop must be within the chain filter window
+# time_stop_dte_max must stay below chain_filter.min_dte (30): a bounds-legal
+# time stop of 30–45 DTE on a 30-DTE entry would close the position at the very
+# next monitor cycle, paying two spreads for nothing (limits 0.5.0; was 45).
+time_stop_dte_max = 29
 
 # ---------------------------------------------------------------------------
 # Strategy playbook
@@ -99,7 +113,8 @@ time_stop_dte_max = 45                  # time-stop must be within the chain fil
 # analytics can correlate outcomes with the exact playbook active at the time.
 # ---------------------------------------------------------------------------
 [playbook]
-playbook_version = "1.1.0"   # 1.1.0: removed covered_call / cash_secured_put (see note below)
+playbook_version = "1.2.0"   # 1.2.0: removed iron_butterfly (see note below)
+                             # 1.1.0: removed covered_call / cash_secured_put (see note below)
 
 # IV-rank band boundaries (0.0–1.0 percentile of the symbol's trailing-year IV).
 # These are v1 placeholders — expect WP-7 evidence to drive retunes.
@@ -119,10 +134,16 @@ vix_low_vol_threshold  = 15.0   # < this → low_vol; between → normal
 # pass validation — keeping them in the playbook only wasted reasoning cycles
 # on proposals that were guaranteed rejections. Re-add them only if the
 # validator ever gains share-coverage / cash-reservation checks.
+# iron_butterfly removed in 1.2.0 for the same guaranteed-rejection reason:
+# its body sells a call and a put at the SAME strike, and |call Δ| + |put Δ| ≈ 1
+# at any strike, so both body legs can never simultaneously pass the chain
+# filter's delta band (|Δ| ≤ max_abs_delta = 0.45 requires call Δ ≤ 0.45 AND
+# ≥ 0.55 — a contradiction). The agent literally cannot see the strikes needed
+# to build one. Re-add only if max_abs_delta is raised to ≥ 0.55, accepting the
+# side effect of admitting near-ITM directional verticals.
 high_iv_strategies = [
     "bear_call_spread",
     "bull_put_spread",
-    "iron_butterfly",
     "iron_condor",
 ]
 medium_iv_strategies = [
@@ -130,7 +151,6 @@ medium_iv_strategies = [
     "bear_put_spread",
     "bull_call_spread",
     "bull_put_spread",
-    "iron_butterfly",
     "iron_condor",
 ]
 low_iv_strategies = [
