@@ -20,7 +20,6 @@ owns it going forward; any future signature changes require a WP-2 card.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
@@ -183,10 +182,10 @@ def _journal_record_to_row(record: JournalRecord) -> dict[str, Any]:
         "cycle_id": record.cycle_id,
         "timestamp": record.timestamp,
         "action_taken": record.action_taken.value,
-        "decision": json.dumps(record.decision.model_dump(mode="json")),
-        "context_snapshot": json.dumps(context_snapshot_dict),
-        "position_ids": json.dumps(record.position_ids),
-        "order_ids": json.dumps(record.order_ids),
+        "decision": record.decision.model_dump(mode="json"),
+        "context_snapshot": context_snapshot_dict,
+        "position_ids": record.position_ids,
+        "order_ids": record.order_ids,
         "strategy": record.strategy,
         "underlying": record.underlying,
         "net_delta_at_open": record.net_delta_at_open,
@@ -196,30 +195,17 @@ def _journal_record_to_row(record: JournalRecord) -> dict[str, Any]:
         "limits_version": record.limits_version,
         "prompt_version": record.prompt_version,
         "model_id": record.model_id,
-        "rejection_rule_ids": json.dumps([r.value for r in record.rejection_rule_ids]),
-        "data_quality_flags": json.dumps(record.data_quality_flags),
+        "rejection_rule_ids": [r.value for r in record.rejection_rule_ids],
+        "data_quality_flags": record.data_quality_flags,
     }
 
 
 def _row_to_journal_record(row: Any) -> JournalRecord:
     d = dict(row._mapping)
 
-    for blob_col in (
-        "decision",
-        "context_snapshot",
-        "position_ids",
-        "order_ids",
-        "rejection_rule_ids",
-    ):
-        raw = d[blob_col]
-        d[blob_col] = json.loads(raw) if isinstance(raw, str) else raw
-
     # Nullable column: rows written before this flag existed (or never flagged)
-    # store NULL, not "[]" — coerce to the model's empty-list default.
-    raw_flags = d["data_quality_flags"]
-    d["data_quality_flags"] = (
-        json.loads(raw_flags) if isinstance(raw_flags, str) else []
-    )
+    # store NULL, not [] — coerce to the model's empty-list default.
+    d["data_quality_flags"] = d["data_quality_flags"] or []
 
     d["timestamp"] = _ensure_utc(d["timestamp"])
 

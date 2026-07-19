@@ -249,6 +249,30 @@ def test_write_read_full_journal_record(engine) -> None:
     assert restored == jr
 
 
+def test_write_journal_record_stores_native_json_not_double_encoded(engine) -> None:
+    """The raw stored value must be a native list/dict, not a JSON string.
+
+    Reads through journal_records_table directly (bypassing read_journal_record's
+    JournalRecord.model_validate) so a regression to the old json.dumps-before-
+    JSON-column bug — which read_journal_record's own round-trip can't detect,
+    since a double-encode paired with a double-decode cancels out — is caught.
+    """
+    jr = _make_journal_record()
+    with get_connection(engine) as conn:
+        write_journal_record(conn, jr)
+        row = conn.execute(
+            journal_records_table.select().where(
+                journal_records_table.c.cycle_id == jr.cycle_id
+            )
+        ).one()
+
+    assert isinstance(row.decision, dict)
+    assert isinstance(row.context_snapshot, dict)
+    assert isinstance(row.position_ids, list)
+    assert isinstance(row.order_ids, list)
+    assert isinstance(row.rejection_rule_ids, list)
+
+
 def test_write_read_preserves_context_snapshot(engine) -> None:
     jr = _make_journal_record(
         context_snapshot=_make_context_snapshot(

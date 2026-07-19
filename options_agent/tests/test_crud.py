@@ -30,7 +30,7 @@ from options_agent.state.crud import (
     patch_order,
     update_position,
 )
-from options_agent.state.db import get_connection
+from options_agent.state.db import get_connection, orders_table, positions_table
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -121,6 +121,21 @@ def test_position_all_fields_survive_round_trip(engine):
     with get_connection(engine) as conn:
         fetched = get_position(conn, pos.id)
     assert fetched == pos
+
+
+def test_insert_position_stores_native_json_not_double_encoded(engine):
+    """Raw stored legs/exit_plan/equity_legs must be native list/dict, not a
+    JSON string — a regression here can't be caught by the round-trip tests
+    above, since a double-encode paired with a double-decode cancels out."""
+    pos = _pos()
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        row = conn.execute(
+            positions_table.select().where(positions_table.c.id == pos.id)
+        ).one()
+
+    assert isinstance(row.legs, list)
+    assert isinstance(row.exit_plan, dict)
 
 
 def test_position_credit_sign_survives_round_trip(engine):
@@ -227,6 +242,20 @@ def test_insert_get_order_round_trips(engine):
     with get_connection(engine) as conn:
         fetched = get_order(conn, "ord-001")
     assert fetched == ord_
+
+
+def test_insert_order_stores_native_json_not_double_encoded(engine):
+    pos = _pos()
+    ord_ = _order(legs_filled=[LegFill(leg=_LEG, filled_qty=5, fill_price=1.20)])
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, ord_)
+        row = conn.execute(
+            orders_table.select().where(orders_table.c.id == ord_.id)
+        ).one()
+
+    assert isinstance(row.legs_filled, list)
+    assert isinstance(row.legs_filled[0], dict)
 
 
 def test_get_order_missing_returns_none(engine):

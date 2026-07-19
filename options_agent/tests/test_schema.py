@@ -17,6 +17,8 @@ from options_agent.state.db import (
     get_connection,
     journal_records_table,
     metadata,
+    orders_table,
+    positions_table,
 )
 
 # ---------------------------------------------------------------------------
@@ -362,6 +364,141 @@ def test_migration_008_downgrade_removes_data_quality_flags_column(make_alembic_
         cols = {c["name"] for c in inspect(eng).get_columns("journal_records")}
         eng.dispose()
         assert "data_quality_flags" not in cols
+    finally:
+        os.unlink(db_path)
+
+
+# ---------------------------------------------------------------------------
+# Migration 009: repair double-JSON-encoded columns
+# ---------------------------------------------------------------------------
+
+_DOUBLE_ENCODED_JOURNAL_INSERT = (
+    "INSERT INTO journal_records (cycle_id, timestamp, action_taken, decision, "
+    "context_snapshot, position_ids, order_ids, limits_version, prompt_version, "
+    "model_id, rejection_rule_ids) VALUES ('cycle-double-001', "
+    "'2026-07-09T17:00:00+00:00', 'OPENED', '\"{}\"', '\"{}\"', '\"[]\"', "
+    "'\"[]\"', 'v1', 'v1', 'm1', '\"[]\"')"
+)
+
+_DOUBLE_ENCODED_POSITION_INSERT = (
+    "INSERT INTO positions (id, underlying, strategy, legs, quantity, "
+    "entry_net_amount, current_mark, marked_at, unrealized_pnl, "
+    "exit_plan, status, opened_at, nearest_expiration, "
+    "est_max_loss, est_max_profit, opening_order_id, equity_legs) "
+    "VALUES ('p-double', 'SPY', 'bull_put_spread', '\"[]\"', 1, -100.0, -80.0, "
+    "'2026-06-07T14:30:00+00:00', 20.0, '\"{}\"', 'OPEN', "
+    "'2026-06-07T14:30:00+00:00', '2026-07-18', 500.0, 100.0, 'o-double', '\"[]\"')"
+)
+
+_DOUBLE_ENCODED_ORDER_INSERT = (
+    "INSERT INTO orders (id, broker_order_id, position_id, role, status, "
+    "broker_status_raw, submitted_at, legs_filled, filled_qty) "
+    "VALUES ('o-double', 'brk1', 'p-double', 'OPEN', 'FILLED', 'filled', "
+    "'2026-06-07T14:30:00+00:00', '\"[]\"', 1)"
+)
+
+
+def test_migration_009_repairs_double_encoded_columns(make_alembic_cfg):
+    """Migration 009 normalizes double-encoded JSON columns, in place, once.
+
+    Seeds rows at revision 008 whose blob columns hold a JSON string of a
+    JSON string (the writer-side bug this migration repairs), including the
+    phantom-net-delta rows that migration 008 itself backfilled with the
+    same buggy pattern. After upgrading to head, every affected column
+    should read back as a native list/dict, not a string requiring a second
+    json.loads — and an unaffected control row should be untouched.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+    try:
+        cfg = make_alembic_cfg(db_path)
+        command.upgrade(cfg, "007")
+
+        control_id = "cycle-unaffected-001"
+        eng = create_engine(f"sqlite:///{db_path}")
+        with eng.begin() as conn:
+            conn.execute(text(_JOURNAL_ROW_INSERT), {"cycle_id": control_id})
+            for cycle_id in _PHANTOM_NET_DELTA_CYCLE_IDS:
+                conn.execute(text(_JOURNAL_ROW_INSERT), {"cycle_id": cycle_id})
+        eng.dispose()
+
+        command.upgrade(cfg, "008")
+
+        eng = create_engine(f"sqlite:///{db_path}")
+        with eng.begin() as conn:
+            conn.execute(text(_DOUBLE_ENCODED_JOURNAL_INSERT))
+            conn.execute(text(_DOUBLE_ENCODED_POSITION_INSERT))
+            conn.execute(text(_DOUBLE_ENCODED_ORDER_INSERT))
+        eng.dispose()
+
+        # Sanity check: at rev 008, the phantom rows genuinely need a second
+        # decode (this is the pre-existing bug migration 009 exists to fix).
+        eng = create_engine(f"sqlite:///{db_path}")
+        with eng.connect() as conn:
+            pre_flags = conn.execute(
+                select(
+                    journal_records_table.c.cycle_id,
+                    journal_records_table.c.data_quality_flags,
+                )
+            ).fetchall()
+        eng.dispose()
+        pre_flags_by_id = {row.cycle_id: row.data_quality_flags for row in pre_flags}
+        assert isinstance(pre_flags_by_id[_PHANTOM_NET_DELTA_CYCLE_IDS[0]], str)
+
+        command.upgrade(cfg, "009")
+
+        eng = create_engine(f"sqlite:///{db_path}")
+        with eng.connect() as conn:
+            journal_row = conn.execute(
+                select(journal_records_table).where(
+                    journal_records_table.c.cycle_id == "cycle-double-001"
+                )
+            ).one()
+            flags_rows = conn.execute(
+                select(
+                    journal_records_table.c.cycle_id,
+                    journal_records_table.c.data_quality_flags,
+                )
+            ).fetchall()
+            position_row = conn.execute(
+                select(positions_table).where(positions_table.c.id == "p-double")
+            ).one()
+            order_row = conn.execute(
+                select(orders_table).where(orders_table.c.id == "o-double")
+            ).one()
+        eng.dispose()
+
+        assert journal_row.decision == {}
+        assert journal_row.context_snapshot == {}
+        assert journal_row.position_ids == []
+        assert journal_row.order_ids == []
+        assert journal_row.rejection_rule_ids == []
+
+        flags_by_id = {row.cycle_id: row.data_quality_flags for row in flags_rows}
+        for cycle_id in _PHANTOM_NET_DELTA_CYCLE_IDS:
+            assert flags_by_id[cycle_id] == ["phantom_net_delta"]
+        assert flags_by_id[control_id] is None
+
+        assert position_row.legs == []
+        assert position_row.exit_plan == {}
+        assert position_row.equity_legs == []
+
+        assert order_row.legs_filled == []
+
+        # Idempotent: re-running the repair pass (simulated via a downgrade
+        # to 008 — a no-op per this migration's downgrade() — and back up to
+        # head) leaves already-clean data unchanged rather than re-encoding.
+        command.downgrade(cfg, "008")
+        command.upgrade(cfg, "009")
+        eng = create_engine(f"sqlite:///{db_path}")
+        with eng.connect() as conn:
+            journal_row_again = conn.execute(
+                select(journal_records_table).where(
+                    journal_records_table.c.cycle_id == "cycle-double-001"
+                )
+            ).one()
+        eng.dispose()
+        assert journal_row_again.position_ids == []
     finally:
         os.unlink(db_path)
 
