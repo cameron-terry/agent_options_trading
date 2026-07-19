@@ -16,7 +16,9 @@ Usage:
     uv run python scripts/backfill_position_fill_metrics.py            # dry run
     uv run python scripts/backfill_position_fill_metrics.py --apply    # write
 
-Honors the DB_URL env override the same way options_agent.__main__ does.
+Honors the DB_URL env override the same way ui.app.create_app() does — a
+config.toml is optional; DB_URL alone is sufficient (the running console
+container, for instance, has no config.toml, only DB_URL).
 """
 
 from __future__ import annotations
@@ -42,16 +44,17 @@ def main() -> None:
     args = parser.parse_args()
 
     config_path = Path("config.toml")
-    if not config_path.exists():
-        print(
-            "ERROR: config.toml not found. Run from the project root "
-            "(or a cwd with no config.toml, with DB_URL set explicitly).",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    config = Config.from_toml(config_path)
-    db_url = os.environ.get("DB_URL", config.db_url)
+    db_url = os.environ.get("DB_URL")
+    if db_url is None:
+        if not config_path.exists():
+            print(
+                "ERROR: no DB_URL env var and no config.toml in the current "
+                "directory. Set DB_URL explicitly, or run from a directory "
+                "containing config.toml.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        db_url = Config.from_toml(config_path).db_url
     engine = build_engine(db_url)
 
     print(f"WP-1 est_max_loss/profit fill-time backfill — target: {db_url}")
