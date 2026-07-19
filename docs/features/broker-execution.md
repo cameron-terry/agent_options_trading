@@ -159,6 +159,17 @@ print(stat_diff.reconciled_at)           # UTC timestamp of this pass
 
 Reconcile is idempotent — running it twice produces the same DB state.
 
+## Fill-time risk correction (WP-1 follow-up)
+
+`Position.est_max_loss`/`est_max_profit` are set at position creation from the pre-trade chain-mid estimate (`risk/structure.py::compute_structure_metrics`, applied by the orchestrator's ENRICH+VALIDATE step). Once the order actually fills, `risk/structure.py::apply_fill_metrics` recomputes both values from the real `net_fill_price` — the same expiration-payoff analysis, just anchored to the confirmed price instead of the pre-trade mid. This runs automatically on both fill paths:
+
+- **Synchronous** — the order fills within `submit_multi_leg`'s poll window at cycle-top (`orchestrator.py`).
+- **Asynchronous** — the order is still `WORKING` at cycle-top and fills later; the next `reconcile()` pass detects it (`execution/reconcile.py::_apply_fill_to_position`).
+
+Both values remain **per-contract** (matching `TradeProposal`, `risk/sizing.py`, and `monitor/exits.py` — multiply by `Position.quantity` for whole-position dollars). A deviation >20% between the pre-fill estimate and the fill-corrected value is logged as a warning (`risk/structure.py::_log_deviation`); mixed-expiration structures (where payoff analysis doesn't apply) fall back to the pre-fill estimate unchanged.
+
+Positions opened before this fix landed carry a stale, mid-based `est_max_loss`/`est_max_profit`. `scripts/backfill_position_fill_metrics.py` corrects existing open positions from their opening order's `net_fill_price` — dry-run by default, `--apply` to write.
+
 ## Rate limits and retries
 
 `BrokerClient` wraps every Alpaca call with exponential back-off on 429 / 5xx responses. `order_poll_interval_secs` and `order_poll_timeout_secs` in `config.toml` control fill-status polling behaviour. The client re-initialises its internal `alpaca-py` session automatically on auth expiry.

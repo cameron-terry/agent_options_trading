@@ -169,7 +169,14 @@ class Position(BaseModel):
     current_mark and unrealized_pnl are cached snapshots from the last
     reconcile; not authoritative.
     nearest_expiration is denormalised for cheap DTE computation by WP-5.
-    est_max_loss / est_max_profit are carried from the proposal for exit rules.
+    est_max_loss / est_max_profit are per-contract (per combo unit; matches
+    TradeProposal / risk/structure.py convention) — multiply by `quantity`
+    for whole-position dollars, exactly as monitor/exits.py and
+    risk/sizing.py already do. Set at Position creation from the
+    ENRICH+VALIDATE step's chain-mid estimate (risk/structure.py), then
+    corrected against the actual fill price at fill confirmation (WP-1,
+    risk/structure.py:apply_fill_metrics, called from both the orchestrator's
+    synchronous-fill path and execution/reconcile.py's async-fill path).
     """
 
     id: str
