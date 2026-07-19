@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from unittest.mock import patch
 
 from options_agent.contracts.data import (
     ChainFilterParams,
@@ -14,8 +15,11 @@ from options_agent.contracts.proposal import ExitPlan, Leg, TradeProposal
 from options_agent.risk.limits import Limits
 from options_agent.risk.sizing import size
 from options_agent.risk.structure import (
+    apply_fill_metrics,
     apply_structure_metrics,
+    compute_payoff_bounds,
     compute_structure_metrics,
+    recompute_fill_metrics,
 )
 
 _EXPIRY = date(2026, 9, 18)
@@ -375,3 +379,94 @@ def test_correct_agent_value_passes_through_unchanged() -> None:
     )
     after = size(correct.model_copy(update=updates), portfolio, limits)
     assert before.contracts == after.contracts == 3
+
+
+# ---------------------------------------------------------------------------
+# WP-1: fill-time recompute (est_max_loss/profit corrected against the
+# actual fill price, not the chain-mid estimate baked in pre-trade).
+# ---------------------------------------------------------------------------
+
+
+def test_compute_payoff_bounds_matches_chain_mid_result() -> None:
+    # Same bull put spread as test_bull_put_spread_credit_metrics — verifies
+    # the extracted helper reproduces compute_structure_metrics's result when
+    # given the same net price.
+    legs = [
+        _leg(560.0, "put", "sell"),
+        _leg(555.0, "put", "buy"),
+    ]
+    est_max_loss, est_max_profit = compute_payoff_bounds(legs, -1.50)
+    assert est_max_loss == 350.0
+    assert est_max_profit == 150.0
+
+
+def test_recompute_fill_metrics_uses_fill_price_not_mid() -> None:
+    # Width 5 credit spread. Proposal assumed a 1.50 credit (mid); the order
+    # actually filled at a better 2.00 credit — max loss should shrink from
+    # 350 to 300, matching the improved fill, not the original estimate.
+    legs = [
+        _leg(560.0, "put", "sell"),
+        _leg(555.0, "put", "buy"),
+    ]
+    est_max_loss, est_max_profit = recompute_fill_metrics(legs, -2.00)
+    assert est_max_loss == 300.0
+    assert est_max_profit == 200.0
+
+
+def test_recompute_fill_metrics_mixed_expirations_returns_none() -> None:
+    legs = [
+        _leg(560.0, "put", "sell"),
+        _leg(555.0, "put", "buy", expiration=_OTHER_EXPIRY),
+    ]
+    assert recompute_fill_metrics(legs, -1.50) == (None, None)
+
+
+def test_apply_fill_metrics_corrects_position_values() -> None:
+    legs = [
+        _leg(560.0, "put", "sell"),
+        _leg(555.0, "put", "buy"),
+    ]
+    # Position was created with the pre-trade chain-mid estimate (350/150);
+    # the order actually filled at a better credit (2.00 vs. 1.50 mid).
+    est_max_loss, est_max_profit = apply_fill_metrics(
+        legs,
+        -2.00,
+        prior_est_max_loss=350.0,
+        prior_est_max_profit=150.0,
+        log_context="test fill",
+    )
+    assert est_max_loss == 300.0
+    assert est_max_profit == 200.0
+
+
+def test_apply_fill_metrics_falls_back_on_mixed_expirations() -> None:
+    legs = [
+        _leg(560.0, "put", "sell"),
+        _leg(555.0, "put", "buy", expiration=_OTHER_EXPIRY),
+    ]
+    est_max_loss, est_max_profit = apply_fill_metrics(
+        legs,
+        -1.50,
+        prior_est_max_loss=350.0,
+        prior_est_max_profit=150.0,
+        log_context="test fill",
+    )
+    assert est_max_loss == 350.0
+    assert est_max_profit == 150.0
+
+
+def test_apply_fill_metrics_logs_large_deviation() -> None:
+    legs = [
+        _leg(560.0, "put", "sell"),
+        _leg(555.0, "put", "buy"),
+    ]
+    with patch("options_agent.risk.structure.logger") as mock_logger:
+        apply_fill_metrics(
+            legs,
+            -2.50,  # credit far better than the 1.50 mid estimate
+            prior_est_max_loss=350.0,
+            prior_est_max_profit=150.0,
+            log_context="cycle test-deviation",
+        )
+    assert mock_logger.warning.called
+    assert "deviates" in mock_logger.warning.call_args[0][0]

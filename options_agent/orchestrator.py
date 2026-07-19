@@ -81,6 +81,7 @@ from options_agent.risk.gates import (
 from options_agent.risk.sizing import size as _size
 from options_agent.risk.structure import (
     StructureMetrics,
+    apply_fill_metrics,
     apply_structure_metrics,
     compute_structure_metrics,
 )
@@ -1160,6 +1161,19 @@ def run_entry_cycle(
         if order.status == OrderStatus.FILLED and order.net_fill_price is not None
         else limit_price
     )
+    # WP-1: recompute est_max_loss/profit from the actual fill (not the
+    # chain-mid estimate baked into proposal.est_max_loss/profit by the
+    # ENRICH+VALIDATE step) when the order filled synchronously here.
+    if order.status == OrderStatus.FILLED and order.net_fill_price is not None:
+        _pos_max_loss, _pos_max_profit = apply_fill_metrics(
+            proposal.legs,
+            order.net_fill_price,
+            prior_est_max_loss=proposal.est_max_loss,
+            prior_est_max_profit=proposal.est_max_profit,
+            log_context=f"cycle {cycle_id} fill",
+        )
+    else:
+        _pos_max_loss, _pos_max_profit = proposal.est_max_loss, proposal.est_max_profit
     position = Position(
         id=position_id,
         underlying=proposal.underlying,
@@ -1188,8 +1202,8 @@ def run_entry_cycle(
         opened_at=now,
         closed_at=None,
         nearest_expiration=min(leg.expiration for leg in proposal.legs),
-        est_max_loss=proposal.est_max_loss,
-        est_max_profit=proposal.est_max_profit,
+        est_max_loss=_pos_max_loss,
+        est_max_profit=_pos_max_profit,
         opening_order_id=order.id,
         asset_class=AssetClass.OPTION_STRATEGY,
         equity_legs=[],

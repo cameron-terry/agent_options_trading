@@ -73,6 +73,7 @@ from options_agent.contracts.state import (
     StateDiff,
 )
 from options_agent.execution.broker import STATUS_MAP, BrokerClient
+from options_agent.risk.structure import apply_fill_metrics
 from options_agent.state.crud import (
     get_order,
     get_position,
@@ -370,7 +371,16 @@ def reconcile(
         }
         if broker_filled_qty > local_order.filled_qty:
             patch_kwargs["filled_qty"] = broker_filled_qty
-            patch_kwargs["net_fill_price"] = fill_price if fill_price > 0 else None
+            # WP-1: net_fill_price is Alpaca's signed mleg price (negative =
+            # net credit), matching Position.entry_net_amount's convention —
+            # see execution/broker.py's two other fill-mapping sites, which
+            # correctly gate on fill_price_raw/filled_qty presence, not price
+            # sign. The old `fill_price > 0` guard here silently dropped
+            # net_fill_price for every credit fill completed asynchronously
+            # (i.e. not within the synchronous cycle-top poll window).
+            patch_kwargs["net_fill_price"] = (
+                fill_price if fill_price_raw is not None else None
+            )
 
             # Rebuild legs_filled from the position's legs so the Order record
             # is self-contained for WP-7 slippage analysis.  For single-leg
@@ -421,7 +431,7 @@ def reconcile(
             newly_filled.append(updated_order)
             _apply_fill_to_position(
                 conn,
-                local_order,
+                updated_order,
                 broker_filled_at or now,
                 new_positions,
                 closed_positions,
@@ -498,7 +508,12 @@ def _apply_fill_to_position(
     new_positions: list[Position],
     closed_positions: list[Position],
 ) -> None:
-    """Transition the position linked to a newly-filled order."""
+    """Transition the position linked to a newly-filled order.
+
+    filled_order must be the freshly-patched Order row (net_fill_price set) —
+    a pre-patch copy has no fill price and the WP-1 recompute below would
+    silently no-op.
+    """
     pos = get_position(conn, filled_order.position_id)
     if pos is None:
         logger.warning(
@@ -510,7 +525,21 @@ def _apply_fill_to_position(
 
     opening = filled_order.role == OrderRole.OPEN
     if opening and pos.status == PositionStatus.PENDING_OPEN:
-        updated = pos.model_copy(update={"status": PositionStatus.OPEN})
+        update: dict[str, object] = {"status": PositionStatus.OPEN}
+        # WP-1: this order filled asynchronously (after cycle-top), so the
+        # est_max_loss/profit baked in at Position creation still reflects
+        # the pre-trade chain-mid estimate. Correct it against the real fill.
+        if filled_order.net_fill_price is not None:
+            fill_max_loss, fill_max_profit = apply_fill_metrics(
+                [pos_leg.leg for pos_leg in pos.legs],
+                filled_order.net_fill_price,
+                prior_est_max_loss=pos.est_max_loss,
+                prior_est_max_profit=pos.est_max_profit,
+                log_context=f"reconcile fill order {filled_order.id}",
+            )
+            update["est_max_loss"] = fill_max_loss
+            update["est_max_profit"] = fill_max_profit
+        updated = pos.model_copy(update=update)
         update_position(conn, updated)
         new_positions.append(updated)
 

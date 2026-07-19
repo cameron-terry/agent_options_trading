@@ -165,6 +165,78 @@ def _seed(engine, pos: Position, order: Order) -> None:
 
 
 # ---------------------------------------------------------------------------
+# WP-1: two-leg credit-spread fixtures for the async fill-time recompute.
+# ---------------------------------------------------------------------------
+
+_CS_EXPIRY = date(2026, 7, 18)
+_CS_LEG_SHORT = Leg(right="put", side="sell", strike=560.0, expiration=_CS_EXPIRY)
+_CS_LEG_LONG = Leg(right="put", side="buy", strike=555.0, expiration=_CS_EXPIRY)
+
+
+def _credit_spread_pos(
+    pos_id: str = "pos-cs-001",
+    status: PositionStatus = PositionStatus.PENDING_OPEN,
+) -> Position:
+    return Position(
+        id=pos_id,
+        underlying="SPY",
+        strategy="bull_put_spread",
+        legs=[
+            PositionLeg(
+                leg=_CS_LEG_SHORT,
+                filled_qty=0,
+                avg_fill_price=0.0,
+                status=LegStatus.OPEN,
+            ),
+            PositionLeg(
+                leg=_CS_LEG_LONG,
+                filled_qty=0,
+                avg_fill_price=0.0,
+                status=LegStatus.OPEN,
+            ),
+        ],
+        quantity=1,
+        entry_net_amount=-1.50,
+        current_mark=-1.50,
+        marked_at=_NOW,
+        unrealized_pnl=0.0,
+        realized_pnl=None,
+        exit_plan=_EXIT_PLAN,
+        status=status,
+        opened_at=_NOW,
+        closed_at=None,
+        nearest_expiration=date(2026, 7, 18),
+        est_max_loss=350.0,
+        est_max_profit=150.0,
+        opening_order_id="ord-cs-001",
+    )
+
+
+def _credit_spread_order(
+    order_id: str = "ord-cs-001",
+    broker_order_id: str = "broker-cs-001",
+    status: OrderStatus = OrderStatus.WORKING,
+    filled_qty: int = 0,
+    position_id: str = "pos-cs-001",
+    role: OrderRole = OrderRole.OPEN,
+) -> Order:
+    return Order(
+        id=order_id,
+        broker_order_id=broker_order_id,
+        position_id=position_id,
+        role=role,
+        status=status,
+        broker_status_raw="new",
+        submitted_at=_NOW,
+        filled_at=None,
+        limit_price=-1.50,
+        legs_filled=[],
+        net_fill_price=None,
+        filled_qty=filled_qty,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Full fill: WORKING -> FILLED
 # ---------------------------------------------------------------------------
 
@@ -228,6 +300,77 @@ def test_full_fill_transitions_position_to_open(
         pos = get_position(conn, "pos-001")
     assert pos is not None
     assert pos.status == PositionStatus.OPEN
+
+
+def test_async_fill_recomputes_est_max_loss_from_fill_price(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WP-1: an order that fills asynchronously (not at cycle-top, so it's
+    picked up by a later reconcile() pass) must still correct
+    Position.est_max_loss/profit against the real fill, not leave the
+    pre-fill chain-mid estimate (350/150) stranded.
+    """
+    broker = _broker(monkeypatch)
+    _seed(
+        engine,
+        _credit_spread_pos(status=PositionStatus.PENDING_OPEN),
+        _credit_spread_order(),
+    )
+
+    # Filled at a better credit (2.00) than the 1.50 mid the position was
+    # created with -> max loss (5 - 2.00) * 100 = 300, not 350.
+    filled_alpaca = _alpaca_order(
+        broker_id="broker-cs-001",
+        status="filled",
+        filled_qty=1,
+        filled_avg_price=-2.00,
+        filled_at=_NOW,
+    )
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=filled_alpaca)
+
+    with get_connection(engine) as conn:
+        reconcile(broker, conn, _clock=_NOW)
+
+    with get_connection(engine) as conn:
+        pos = get_position(conn, "pos-cs-001")
+    assert pos is not None
+    assert pos.status == PositionStatus.OPEN
+    assert pos.est_max_loss == 300.0
+    assert pos.est_max_profit == 200.0
+
+
+def test_async_credit_fill_stores_signed_net_fill_price(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: Alpaca's mleg filled_avg_price is signed (negative =
+    credit); a prior `fill_price > 0` guard silently dropped net_fill_price
+    to None for every async credit fill.
+    """
+    broker = _broker(monkeypatch)
+    _seed(
+        engine,
+        _credit_spread_pos(status=PositionStatus.PENDING_OPEN),
+        _credit_spread_order(),
+    )
+
+    filled_alpaca = _alpaca_order(
+        broker_id="broker-cs-001",
+        status="filled",
+        filled_qty=1,
+        filled_avg_price=-1.50,
+        filled_at=_NOW,
+    )
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=filled_alpaca)
+
+    with get_connection(engine) as conn:
+        reconcile(broker, conn, _clock=_NOW)
+
+    with get_connection(engine) as conn:
+        fetched = get_order(conn, "ord-cs-001")
+    assert fetched is not None
+    assert fetched.net_fill_price == -1.50
 
 
 def test_full_fill_records_fill_event(engine, monkeypatch: pytest.MonkeyPatch) -> None:
