@@ -211,7 +211,14 @@ def test_full_fill_transitions_position_to_open(
     broker.get_broker_order = MagicMock(return_value=filled_alpaca)
 
     with get_connection(engine) as conn:
-        diff = reconcile(broker, conn)
+        # _clock pins reconcile()'s notion of "now" to the fixture's _NOW
+        # (2026-06-13), which is safely before _pos()'s nearest_expiration
+        # (2026-07-18). Without it, reconcile() falls back to the real
+        # wall-clock date; once that passes 2026-07-18 the position transitions
+        # PENDING_OPEN -> OPEN and is immediately caught by the same-pass
+        # expiry backstop and flipped to EXPIRED before this test can assert
+        # on it.
+        diff = reconcile(broker, conn, _clock=_NOW)
 
     assert len(diff.new_positions) == 1
     assert diff.new_positions[0].id == "pos-001"
