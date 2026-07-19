@@ -39,6 +39,10 @@ journal_records — one append-only row per entry-cycle decision (the "journal")
   earnings_within_dte (bool, nullable)
   limits_version, prompt_version, model_id (str)
   rejection_rule_ids (JSON list[str])  non-empty only when action_taken = REJECTED.
+  data_quality_flags (JSON list[str], nullable)  non-empty only when a known
+                                  historical data bug tainted this cycle. See
+                                  conventions below — never treat a flagged
+                                  cycle's numbers as reliable without caveat.
 
 positions — one row per strategy-level position (mutable: status/mark/pnl
 update in place).
@@ -104,6 +108,14 @@ syntactically correct query.
   * Small samples: state the sample size (COUNT) alongside any rate or
     average. "Insufficient data" is a normal, expected answer during
     warm-up — do not manufacture false precision from a handful of rows.
+  * data_quality_flags non-empty (e.g. "phantom_net_delta") means a known
+    bug corrupted this cycle's context_snapshot before it was fixed —
+    currently: a handful of 2026-07-09/07-10 cycles whose portfolio net
+    delta was wildly wrong due to a Greek-aggregation bug (fixed in PR #89).
+    When a question touches net delta, portfolio risk, or those cycles'
+    thesis text specifically, exclude flagged rows from aggregate figures or
+    explicitly caveat that the cited number is known-bad — never state a
+    flagged cycle's net_dollar_delta as fact.
 """
 
 

@@ -22,6 +22,7 @@ function detail(overrides: Partial<CycleDetail> = {}): CycleDetail {
     prompt_version: 'v3',
     limits_version: 'v2',
     context_hash: 'abcdef0123456789',
+    data_quality_flags: [],
     proposal: null,
     tool_calls_transcript: [],
     validation_result: null,
@@ -130,6 +131,23 @@ describe('CycleTrace', () => {
   it('shows the empty-transcript note when no tools were called', () => {
     render(<CycleTrace detail={detail()} />)
     expect(screen.getByText(/no tool calls recorded/)).toBeInTheDocument()
+  })
+
+  it('omits the data-quality flag row when no flags are set', () => {
+    const { container } = render(<CycleTrace detail={detail()} />)
+    expect(container.querySelector('.cycle-header__flags')).not.toBeInTheDocument()
+  })
+
+  it('renders a warn chip with a tooltip for a known data-quality flag', () => {
+    render(<CycleTrace detail={detail({ data_quality_flags: ['phantom_net_delta'] })} />)
+    const chip = screen.getByText('phantom_net_delta')
+    expect(chip).toHaveClass('action-chip--warn')
+    expect(chip).toHaveAttribute('title', expect.stringContaining('Greek-aggregation bug'))
+  })
+
+  it('falls back to the raw flag name as the tooltip for an unknown flag', () => {
+    render(<CycleTrace detail={detail({ data_quality_flags: ['some_new_flag'] })} />)
+    expect(screen.getByText('some_new_flag')).toHaveAttribute('title', 'some_new_flag')
   })
 
   it('omits the proposal panel when there is no proposal', () => {

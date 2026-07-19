@@ -77,7 +77,12 @@ class OrderLink(BaseModel):
 
 
 class CycleDetail(BaseModel):
-    """Full trace for one cycle — GET /api/cycles/{cycle_id}."""
+    """Full trace for one cycle — GET /api/cycles/{cycle_id}.
+
+    data_quality_flags (WP-7): non-empty when a known historical data bug
+    tainted this cycle's context_snapshot or denormalized fields — see
+    obs/data_quality.py for flag descriptions. Empty for all unaffected rows.
+    """
 
     cycle_id: str
     timestamp: datetime
@@ -90,6 +95,7 @@ class CycleDetail(BaseModel):
     prompt_version: str
     limits_version: str
     context_hash: str
+    data_quality_flags: list[str]
 
     proposal: TradeProposal | None
     tool_calls_transcript: list[ToolCallRecord]
@@ -172,6 +178,7 @@ def get_cycle_detail(conn: Connection, cycle_id: str) -> CycleDetail | None:
         prompt_version=record.prompt_version,
         limits_version=record.limits_version,
         context_hash=record.context_snapshot.context_hash,
+        data_quality_flags=record.data_quality_flags,
         proposal=decision.proposal,
         tool_calls_transcript=record.context_snapshot.tool_calls_transcript,
         validation_result=decision.validation_result,

@@ -78,6 +78,7 @@ export const cycleDetailFixture: CycleDetail = {
   prompt_version: 'v3',
   limits_version: 'v2',
   context_hash: 'abc123',
+  data_quality_flags: [],
   proposal: null,
   tool_calls_transcript: [],
   validation_result: null,

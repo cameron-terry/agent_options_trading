@@ -28,7 +28,7 @@ from options_agent.contracts import (
 )
 from options_agent.contracts.state import LegStatus, PositionLeg
 from options_agent.state.crud import insert_position
-from options_agent.state.db import get_connection
+from options_agent.state.db import get_connection, journal_records_table
 from options_agent.state.journal import (
     _coerce_for_json,
     query_journal,
@@ -262,6 +262,42 @@ def test_write_read_preserves_context_snapshot(engine) -> None:
     assert restored.context_snapshot.assembled_context["iv_rank"] == 72
     assert restored.context_snapshot.assembled_context["chain_rows"] == 18
     assert restored.context_snapshot.context_hash == jr.context_snapshot.context_hash
+
+
+def test_write_read_data_quality_flags(engine) -> None:
+    jr = _make_journal_record(
+        cycle_id="cycle-flagged-001", data_quality_flags=["phantom_net_delta"]
+    )
+    with get_connection(engine) as conn:
+        write_journal_record(conn, jr)
+        restored = read_journal_record(conn, jr.cycle_id)
+    assert restored == jr
+    assert restored is not None
+    assert restored.data_quality_flags == ["phantom_net_delta"]
+
+
+def test_write_read_default_empty_data_quality_flags(engine) -> None:
+    jr = _make_journal_record(cycle_id="cycle-unflagged-001")
+    with get_connection(engine) as conn:
+        write_journal_record(conn, jr)
+        restored = read_journal_record(conn, jr.cycle_id)
+    assert restored is not None
+    assert restored.data_quality_flags == []
+
+
+def test_read_journal_record_coerces_null_data_quality_flags(engine) -> None:
+    """Pre-migration rows store NULL, not "[]", for never-flagged cycles."""
+    jr = _make_journal_record(cycle_id="cycle-null-flags-001")
+    with get_connection(engine) as conn:
+        write_journal_record(conn, jr)
+        conn.execute(
+            journal_records_table.update()
+            .where(journal_records_table.c.cycle_id == jr.cycle_id)
+            .values(data_quality_flags=None)
+        )
+        restored = read_journal_record(conn, jr.cycle_id)
+    assert restored is not None
+    assert restored.data_quality_flags == []
 
 
 def test_read_nonexistent_journal_record_returns_none(engine) -> None:

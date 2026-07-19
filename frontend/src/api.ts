@@ -236,6 +236,7 @@ export interface CycleDetail {
   prompt_version: string
   limits_version: string
   context_hash: string
+  data_quality_flags: string[]
   proposal: TradeProposal | null
   tool_calls_transcript: ToolCallRecord[]
   validation_result: ValidationResult | null

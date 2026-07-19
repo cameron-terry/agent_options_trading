@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, select, text
 
 from alembic import command
-from options_agent.state.db import build_engine, get_connection, metadata
+from options_agent.state.db import (
+    build_engine,
+    get_connection,
+    journal_records_table,
+    metadata,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -82,6 +88,7 @@ _JOURNAL_COLS = {
     "prompt_version",
     "model_id",
     "rejection_rule_ids",
+    "data_quality_flags",
 }
 
 _OUTCOME_COLS = {
@@ -278,6 +285,85 @@ def test_migration_columns_match_metadata(make_alembic_cfg):
         os.unlink(db_path)
 
     assert meta_cols == mig_cols
+
+
+# ---------------------------------------------------------------------------
+# Migration 008: data_quality_flags column + phantom-net-delta backfill
+# ---------------------------------------------------------------------------
+
+_PHANTOM_NET_DELTA_CYCLE_IDS = (
+    "05c9b8da-6d8e-4a79-b035-72af0f792ec1",
+    "e3b3290b-5861-43fe-b9d3-82d50a706856",
+    "fbb3bef4-c711-4ef2-8f80-fa0aee22c2ba",
+    "6a3a2b02-e7bf-4e03-afad-7e0621579e4f",
+)
+
+_JOURNAL_ROW_INSERT = (
+    "INSERT INTO journal_records (cycle_id, timestamp, action_taken, decision, "
+    "context_snapshot, position_ids, order_ids, limits_version, prompt_version, "
+    "model_id, rejection_rule_ids) VALUES (:cycle_id, '2026-07-09T17:00:00+00:00', "
+    "'OPENED', '{}', '{}', '[]', '[]', 'v1', 'v1', 'm1', '[]')"
+)
+
+
+def test_migration_008_backfills_only_the_four_phantom_cycles(make_alembic_cfg):
+    """Migration 008 flags exactly the 4 known phantom-net-delta cycles.
+
+    Seeds rows at revision 007 (pre-flag schema) for the 4 hardcoded cycle
+    IDs plus an unrelated control row, upgrades to head, and asserts only the
+    4 phantom rows carry the flag — the control row stays NULL.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+    try:
+        cfg = make_alembic_cfg(db_path)
+        command.upgrade(cfg, "007")
+
+        control_id = "cycle-unaffected-001"
+        eng = create_engine(f"sqlite:///{db_path}")
+        with eng.begin() as conn:
+            for cycle_id in (*_PHANTOM_NET_DELTA_CYCLE_IDS, control_id):
+                conn.execute(text(_JOURNAL_ROW_INSERT), {"cycle_id": cycle_id})
+        eng.dispose()
+
+        command.upgrade(cfg, "008")
+
+        # Read through the mapped Table (not a raw text() SELECT) so
+        # sqlalchemy's JSON type applies its own decode pass — this matches
+        # state/journal.py's read path, which layers a second, explicit
+        # json.loads() on top for the same reason rejection_rule_ids etc. do
+        # (see memory: pre-existing double-JSON-encoded JSON columns).
+        eng = create_engine(f"sqlite:///{db_path}")
+        with eng.connect() as conn:
+            rows = conn.execute(
+                select(
+                    journal_records_table.c.cycle_id,
+                    journal_records_table.c.data_quality_flags,
+                )
+            ).fetchall()
+        eng.dispose()
+
+        flags_by_id = {row.cycle_id: row.data_quality_flags for row in rows}
+        for cycle_id in _PHANTOM_NET_DELTA_CYCLE_IDS:
+            assert json.loads(flags_by_id[cycle_id]) == ["phantom_net_delta"]
+        assert flags_by_id[control_id] is None
+    finally:
+        os.unlink(db_path)
+
+
+def test_migration_008_downgrade_removes_data_quality_flags_column(make_alembic_cfg):
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+    try:
+        cfg = make_alembic_cfg(db_path)
+        command.upgrade(cfg, "008")
+        command.downgrade(cfg, "007")
+        eng = create_engine(f"sqlite:///{db_path}")
+        cols = {c["name"] for c in inspect(eng).get_columns("journal_records")}
+        eng.dispose()
+        assert "data_quality_flags" not in cols
+    finally:
+        os.unlink(db_path)
 
 
 # ---------------------------------------------------------------------------

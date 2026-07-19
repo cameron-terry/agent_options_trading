@@ -136,6 +136,11 @@ class JournalRecord(BaseModel):
     # when action_taken == REJECTED; empty for all other action_taken values
     rejection_rule_ids: list[ValidationRuleId] = []
 
+    # Retroactive data-quality annotations — empty for all rows unless a known
+    # data bug tainted this cycle's context_snapshot or denormalized fields.
+    # See obs/data_quality.py for known flag values and their descriptions.
+    data_quality_flags: list[str] = []
+
     @model_validator(mode="after")
     def _check_invariants(self) -> "JournalRecord":
         if self.action_taken != self.decision.action_taken:
