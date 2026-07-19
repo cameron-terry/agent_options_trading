@@ -801,4 +801,292 @@ def test_no_local_orders_produces_empty_diff(
     assert diff.newly_cancelled == []
     assert diff.orphans == []
     assert diff.unmatched_local == []
+
+
+# ---------------------------------------------------------------------------
+# WP-1: per-leg fill audit trail — backfill for orders that reached the DB
+# already at a terminal filled_qty (the synchronous-fill path). These orders
+# are invisible to the main loop above because list_pending_orders() excludes
+# terminal orders by design; reconcile() must still record their fills via
+# _backfill_missing_fill_events().
+# ---------------------------------------------------------------------------
+
+_LEG_SELL_PUT = Leg(
+    right="put", side="sell", strike=691.0, expiration=date(2026, 7, 24)
+)
+_LEG_BUY_PUT = Leg(right="put", side="buy", strike=687.0, expiration=date(2026, 7, 24))
+_LEG_SELL_CALL = Leg(
+    right="call", side="sell", strike=751.0, expiration=date(2026, 7, 24)
+)
+_LEG_BUY_CALL = Leg(
+    right="call", side="buy", strike=755.0, expiration=date(2026, 7, 24)
+)
+
+_OCC_SELL_PUT = "QQQ260724P00691000"
+_OCC_BUY_PUT = "QQQ260724P00687000"
+_OCC_SELL_CALL = "QQQ260724C00751000"
+_OCC_BUY_CALL = "QQQ260724C00755000"
+
+
+def _multi_leg_pos(
+    pos_id: str = "pos-ic", status: PositionStatus = PositionStatus.OPEN
+) -> Position:
+    return Position(
+        id=pos_id,
+        underlying="QQQ",
+        strategy="iron_condor",
+        legs=[
+            PositionLeg(
+                leg=_LEG_SELL_PUT,
+                filled_qty=6,
+                avg_fill_price=0.0,
+                status=LegStatus.OPEN,
+            ),
+            PositionLeg(
+                leg=_LEG_BUY_PUT,
+                filled_qty=6,
+                avg_fill_price=0.0,
+                status=LegStatus.OPEN,
+            ),
+            PositionLeg(
+                leg=_LEG_SELL_CALL,
+                filled_qty=6,
+                avg_fill_price=0.0,
+                status=LegStatus.OPEN,
+            ),
+            PositionLeg(
+                leg=_LEG_BUY_CALL,
+                filled_qty=6,
+                avg_fill_price=0.0,
+                status=LegStatus.OPEN,
+            ),
+        ],
+        quantity=6,
+        entry_net_amount=-2.09,
+        current_mark=-2.09,
+        marked_at=_NOW,
+        unrealized_pnl=0.0,
+        realized_pnl=None,
+        exit_plan=_EXIT_PLAN,
+        status=status,
+        opened_at=_NOW,
+        closed_at=None,
+        nearest_expiration=date(2026, 7, 24),
+        est_max_loss=1000.0,
+        est_max_profit=800.0,
+        opening_order_id="ord-ic",
+    )
+
+
+def _multi_leg_order(
+    order_id: str = "ord-ic",
+    broker_order_id: str = "broker-ic",
+    status: OrderStatus = OrderStatus.FILLED,
+    filled_qty: int = 6,
+    net_fill_price: float | None = -2.09,
+    position_id: str = "pos-ic",
+) -> Order:
+    return Order(
+        id=order_id,
+        broker_order_id=broker_order_id,
+        position_id=position_id,
+        role=OrderRole.OPEN,
+        status=status,
+        broker_status_raw="filled",
+        submitted_at=_NOW,
+        filled_at=_NOW,
+        limit_price=-2.10,
+        legs_filled=[],
+        net_fill_price=net_fill_price,
+        filled_qty=filled_qty,
+    )
+
+
+def _mock_leg(symbol: str, filled_qty: int, filled_avg_price: float) -> MagicMock:
+    leg = MagicMock()
+    leg.symbol = symbol
+    leg.filled_qty = filled_qty
+    leg.filled_avg_price = filled_avg_price
+    return leg
+
+
+def _multi_leg_alpaca_order(
+    broker_id: str = "broker-ic",
+    status: str = "filled",
+    filled_qty: int = 6,
+    filled_avg_price: float | None = -2.09,
+    filled_at: datetime | None = None,
+    leg_prices: tuple[float, float, float, float] = (13.09, 12.20, 9.84, 8.64),
+) -> MagicMock:
+    """Build a mock multi-leg AlpacaOrder with real, distinct per-leg fill data.
+
+    leg_prices default matches an empirically-observed QQQ iron condor fill
+    against Alpaca paper (verified 2026-07-19): signed sum
+    -13.09+12.20-9.84+8.64 == -2.09, matching the combo net_fill_price.
+    """
+    o = MagicMock()
+    o.id = broker_id
+    o.status.value = status
+    o.filled_qty = filled_qty
+    o.filled_avg_price = filled_avg_price
+    o.symbol = None
+    o.submitted_at = _NOW
+    o.filled_at = filled_at
+    o.legs = [
+        _mock_leg(_OCC_SELL_PUT, filled_qty, leg_prices[0]),
+        _mock_leg(_OCC_BUY_PUT, filled_qty, leg_prices[1]),
+        _mock_leg(_OCC_SELL_CALL, filled_qty, leg_prices[2]),
+        _mock_leg(_OCC_BUY_CALL, filled_qty, leg_prices[3]),
+    ]
+    return o
+
+
+def test_synchronous_single_leg_fill_is_backfilled(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the WP-1 bug: an order that fills inside
+    broker.submit()'s synchronous poll window is inserted directly at
+    status=FILLED, filled_qty=N (see orchestrator.py's PENDING_OPEN->OPEN
+    comment). list_pending_orders() excludes it from the main loop above, so
+    a fix confined to that loop alone would still silently produce zero
+    fill_events — the failure mode this ticket was filed against.
+    """
+    broker = _broker(monkeypatch)
+    already_filled = _order(status=OrderStatus.FILLED, filled_qty=5)
+    _seed(engine, _pos(), already_filled)
+
+    filled_alpaca = _alpaca_order(
+        status="filled", filled_qty=5, filled_avg_price=1.25, filled_at=_NOW
+    )
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=filled_alpaca)
+
+    with get_connection(engine) as conn:
+        diff = reconcile(broker, conn)
+
+    # Not a "newly filled" transition — it was already terminal when seeded.
+    assert diff.newly_filled == []
+
+    with get_connection(engine) as conn:
+        events = list_fill_events_for_order(conn, "ord-001")
+    assert len(events) == 1
+    assert events[0].filled_qty == 5
+    assert events[0].fill_price == 1.25
+    assert events[0].leg_symbol == _OCC
+
+
+def test_synchronous_fill_backfill_is_idempotent(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broker = _broker(monkeypatch)
+    already_filled = _order(status=OrderStatus.FILLED, filled_qty=5)
+    _seed(engine, _pos(), already_filled)
+
+    filled_alpaca = _alpaca_order(
+        status="filled", filled_qty=5, filled_avg_price=1.25, filled_at=_NOW
+    )
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=filled_alpaca)
+
+    with get_connection(engine) as conn:
+        reconcile(broker, conn)
+    with get_connection(engine) as conn:
+        reconcile(broker, conn)
+
+    with get_connection(engine) as conn:
+        events = list_fill_events_for_order(conn, "ord-001")
+    assert len(events) == 1
+    # Second pass should not need to re-fetch an order that's fully recorded.
+    assert broker.get_broker_order.call_count == 1
+
+
+def test_synchronous_multi_leg_fill_backfills_per_leg_fill_events(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broker = _broker(monkeypatch)
+    _seed(engine, _multi_leg_pos(), _multi_leg_order())
+
+    alp = _multi_leg_alpaca_order()
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=alp)
+
+    with get_connection(engine) as conn:
+        diff = reconcile(broker, conn)
+
     assert diff.anomalies == []
+
+    with get_connection(engine) as conn:
+        events = list_fill_events_for_order(conn, "ord-ic")
+    assert len(events) == 4
+    by_symbol = {e.leg_symbol: e for e in events}
+    assert by_symbol[_OCC_SELL_PUT].fill_price == 13.09
+    assert by_symbol[_OCC_BUY_PUT].fill_price == 12.20
+    assert by_symbol[_OCC_SELL_CALL].fill_price == 9.84
+    assert by_symbol[_OCC_BUY_CALL].fill_price == 8.64
+    assert all(e.filled_qty == 6 for e in events)
+
+    with get_connection(engine) as conn:
+        fetched = get_order(conn, "ord-ic")
+    assert fetched is not None
+    assert len(fetched.legs_filled) == 4
+    prices_by_strike = {lf.leg.strike: lf.fill_price for lf in fetched.legs_filled}
+    assert prices_by_strike[691.0] == 13.09
+    assert prices_by_strike[687.0] == 12.20
+    assert prices_by_strike[751.0] == 9.84
+    assert prices_by_strike[755.0] == 8.64
+
+
+def test_multi_leg_fill_sum_matches_net_price_no_anomaly(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broker = _broker(monkeypatch)
+    _seed(engine, _multi_leg_pos(), _multi_leg_order())
+
+    # -13.09 (sell) + 12.20 (buy) - 9.84 (sell) + 8.64 (buy) == -2.09
+    alp = _multi_leg_alpaca_order(filled_avg_price=-2.09)
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=alp)
+
+    with get_connection(engine) as conn:
+        diff = reconcile(broker, conn)
+
+    assert diff.anomalies == []
+
+
+def test_multi_leg_fill_sum_mismatch_produces_anomaly(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broker = _broker(monkeypatch)
+    _seed(engine, _multi_leg_pos(), _multi_leg_order(net_fill_price=-9.00))
+
+    # Combo net_fill_price disagrees with what the legs actually sum to.
+    alp = _multi_leg_alpaca_order(filled_avg_price=-9.00)
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=alp)
+
+    with get_connection(engine) as conn:
+        diff = reconcile(broker, conn)
+
+    assert len(diff.anomalies) == 1
+    assert "Leg-fill sum mismatch" in diff.anomalies[0].description
+    assert diff.anomalies[0].order_id == "ord-ic"
+
+
+def test_multi_leg_backfill_idempotent_no_duplicate_events(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broker = _broker(monkeypatch)
+    _seed(engine, _multi_leg_pos(), _multi_leg_order())
+
+    alp = _multi_leg_alpaca_order()
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=alp)
+
+    with get_connection(engine) as conn:
+        reconcile(broker, conn)
+    with get_connection(engine) as conn:
+        reconcile(broker, conn)
+
+    with get_connection(engine) as conn:
+        events = list_fill_events_for_order(conn, "ord-ic")
+    assert len(events) == 4

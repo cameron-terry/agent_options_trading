@@ -170,6 +170,26 @@ Both values remain **per-contract** (matching `TradeProposal`, `risk/sizing.py`,
 
 Positions opened before this fix landed carry a stale, mid-based `est_max_loss`/`est_max_profit`. `scripts/backfill_position_fill_metrics.py` corrects existing open positions from their opening order's `net_fill_price` — dry-run by default, `--apply` to write.
 
+### Per-leg fill audit trail
+
+Every broker fill is recorded as one or more immutable `fill_events` rows (`options_agent.state.crud.list_fill_events_for_order`), and `Order.legs_filled` is kept as a full per-leg breakdown (`LegFill`: leg spec, filled qty, fill price). For a multi-leg (mleg) order, Alpaca returns real, distinct per-leg fill data on a plain `get_order_by_id` fetch — no `nested=True` filter needed — so one `FillEvent` is written per leg, matched to the position's legs by OCC symbol. Single-leg orders get one order-granularity `FillEvent`.
+
+`reconcile()` records fills two ways:
+
+- **Incrementally**, inside the main per-order loop, for orders still non-terminal in the DB (`WORKING` / `PARTIALLY_FILLED`) when a broker fill is observed.
+- **Via a backfill pass** (`_backfill_missing_fill_events`, via `state.crud.list_orders_with_unrecorded_fills`), for orders that reached the DB *already* at a terminal `FILLED` status — e.g. an order that filled inside `broker.submit()`/`submit_multi_leg()`'s synchronous poll window. Such orders are invisible to the main loop (which reads `list_pending_orders()`, excluding terminal orders by design), so the backfill pass is the only thing that ever records their fills. It runs on every `reconcile()` call and is self-limiting: an order drops out of the candidate query as soon as its recorded `fill_events` qty catches up, so it costs nothing once caught up.
+
+A consistency check compares the signed sum of per-leg fill prices against the order's combo `net_fill_price` (tolerance 0.02) and appends a `ReconcileAnomaly` on mismatch — surfaced via `stat_diff.anomalies`, not a separate alert channel.
+
+```python
+from options_agent.state.crud import list_fill_events_for_order
+
+with get_connection(engine) as conn:
+    events = list_fill_events_for_order(conn, order.id)
+for fe in events:
+    print(fe.leg_symbol, fe.filled_qty, fe.fill_price, fe.occurred_at)
+```
+
 ## Rate limits and retries
 
 `BrokerClient` wraps every Alpaca call with exponential back-off on 429 / 5xx responses. `order_poll_interval_secs` and `order_poll_timeout_secs` in `config.toml` control fill-status polling behaviour. The client re-initialises its internal `alpaca-py` session automatically on auth expiry.
