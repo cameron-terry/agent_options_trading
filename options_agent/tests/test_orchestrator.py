@@ -463,6 +463,48 @@ def test_run_entry_cycle_journal_written(
     assert len(jr.order_ids) == 1
     assert jr.strategy == "bull_put_spread"
     assert jr.underlying == "SPY"
+    # 0.05 is compute_structure_metrics' deterministic net_delta for the mock
+    # SPY chain, not the stub proposal's self-reported 0.13 — _enrich_proposal
+    # (step 8) always overrides proposal.net_delta before either journal-write
+    # site runs (apply_structure_metrics: "Greeks are always overridden").
+    assert jr.net_delta_at_open == pytest.approx(0.05)
+    assert jr.iv_rank_at_open == pytest.approx(62.0)
+    assert jr.earnings_within_dte is False
+
+
+def test_run_entry_cycle_sized_to_zero_journal_fields(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SIZED_TO_ZERO journal rows carry the same analytics fields as OPENED.
+
+    conviction_floor is raised above the stub proposal's conviction (0.65) so
+    size() returns capped_to_zero=True via the CONVICTION_FLOOR gate — this is
+    the branch that previously left net_delta_at_open/iv_rank_at_open/
+    earnings_within_dte unset even though the proposal was already in scope.
+    """
+    broker = _make_broker(monkeypatch)
+    _wire_reconcile_only(broker)
+    config = Config(limits=Limits(conviction_floor=0.65))
+
+    with patch(_REASON_PATCH, return_value=stub_reasoner()):
+        result = run_entry_cycle(
+            config, broker=broker, engine=engine, _now=_MARKET_HOURS_NOW
+        )
+
+    assert result.action_taken == ActionTaken.SIZED_TO_ZERO
+    assert result.journal_record_id is not None
+    with get_connection(engine) as conn:
+        jr = read_journal_record(conn, result.journal_record_id)
+
+    assert jr is not None
+    assert jr.action_taken == ActionTaken.SIZED_TO_ZERO
+    # 0.05 is compute_structure_metrics' deterministic net_delta for the mock
+    # SPY chain, not the stub proposal's self-reported 0.13 — _enrich_proposal
+    # (step 8) always overrides proposal.net_delta before either journal-write
+    # site runs (apply_structure_metrics: "Greeks are always overridden").
+    assert jr.net_delta_at_open == pytest.approx(0.05)
+    assert jr.iv_rank_at_open == pytest.approx(62.0)
+    assert jr.earnings_within_dte is False
 
 
 def test_run_entry_cycle_broker_order_id_traceable(

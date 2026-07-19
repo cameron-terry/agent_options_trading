@@ -320,6 +320,12 @@ The current hit definition (`realized_pnl > 0`) is the v1 baseline. A richer met
 
 **Event-proximity uses the same definition as the entry gate.** The `earnings_within_dte` flag is baked in at write time using `Limits.event_blackout_days`, so "near catalyst" in the report means exactly the same thing as "near earnings" in the validator. There is no second proximity definition.
 
+### Entry-cycle analytics fields
+
+`iv_rank_at_open`, `net_delta_at_open`, and `earnings_within_dte` are populated by the orchestrator (`orchestrator._entry_analytics_fields()`) at journal-write time for both `OPENED` and `SIZED_TO_ZERO` cycles — the two action types where a `TradeProposal` exists. `iv_rank_at_open` comes from the proposal's underlying `SymbolSnapshot.iv_rank` in that cycle's `ContextBundle`; `earnings_within_dte` mirrors the entry-gate definition (`days_to_earnings is not None and days_to_earnings <= Limits.event_blackout_days`) so it means the same thing here as it does in the validator; `net_delta_at_open` is the proposal's per-contract net delta (not scaled by `sizing.contracts`).
+
+Rows written before this fix have `iv_rank_at_open`/`earnings_within_dte` NULL (and `net_delta_at_open` NULL on `SIZED_TO_ZERO` rows specifically) — `scripts/backfill_iv_rank_at_open.py` derives and patches these from each row's own stored `context_snapshot`/`decision` blobs via a direct `UPDATE` (the journal is otherwise write-once; see `state/journal.py`'s module docstring).
+
 ### Two metrics
 
 **(a) Delta skew (proposal-side):** mean `net_delta_at_open` across all OPENED proposals vs. the market-neutral baseline of 0.0. Accumulates faster than outcome metrics — no closed positions required. Classified as "bullish" / "bearish" / "neutral" / "insufficient_data".

@@ -121,6 +121,10 @@ class JournalRecord(BaseModel):
     # Denormalized analytics index — derived from decision/context_snapshot at write
     strategy: str | None = None
     underlying: str | None = None
+    # proposal.net_delta as reported by the reasoner — per-contract, NOT scaled
+    # by sizing.contracts and NOT the resulting portfolio net delta. Consistent
+    # with monitor/exits.py, risk/sizing.py, and risk/validator.py, which all
+    # multiply this by pos.quantity themselves rather than storing a total.
     net_delta_at_open: float | None = None
     earnings_within_dte: bool | None = None
     conviction: float | None = None
