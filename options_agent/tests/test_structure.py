@@ -8,8 +8,11 @@ from options_agent.contracts.data import (
     ChainFilterParams,
     FilteredChain,
     OptionContract,
+    PortfolioState,
 )
-from options_agent.contracts.proposal import Leg
+from options_agent.contracts.proposal import ExitPlan, Leg, TradeProposal
+from options_agent.risk.limits import Limits
+from options_agent.risk.sizing import size
 from options_agent.risk.structure import (
     apply_structure_metrics,
     compute_structure_metrics,
@@ -224,3 +227,151 @@ def test_apply_structure_metrics_overrides_and_falls_back() -> None:
     assert updates["net_delta"] == 0.15
     assert "est_max_loss" not in updates
     assert "est_max_profit" not in updates
+
+
+# ---------------------------------------------------------------------------
+# Incident-pattern regression (via risk.sizing.size)
+#
+# 2026-07-18 journal audit follow-up: two live QQQ cycles mis-sized because
+# the agent's self-reported est_max_loss didn't match its own legs —
+# eab4b54c put a 3-contract *total* in a per-contract field (SIZED_TO_ZERO
+# when it should have sized 2); 05c9b8da doubled the per-contract value
+# (sized 1 when it should have sized 3). Exact historical chain quotes from
+# those dates weren't preserved beyond the audit's summary numbers, so these
+# fixtures reproduce the *pattern* (total-instead-of-per-contract; doubled
+# value) at the same per-contract dollar magnitudes the audit recorded
+# ($491 and $295), not a byte-exact replay.
+# ---------------------------------------------------------------------------
+
+_INCIDENT_EXIT = ExitPlan(
+    profit_target_pct=0.50, stop_loss_max_loss_fraction=0.5, time_stop_dte=21
+)
+
+
+def _incident_proposal(
+    legs: list[Leg], est_max_loss: float, est_max_profit: float
+) -> TradeProposal:
+    return TradeProposal(
+        action="OPEN",
+        underlying="QQQ",
+        strategy="bull_put_spread",
+        legs=legs,
+        thesis="placeholder",
+        iv_rationale="placeholder",
+        catalyst_check="no earnings within 30 days",
+        conviction=0.70,
+        est_max_loss=est_max_loss,
+        est_max_profit=est_max_profit,
+        breakevens=[],
+        net_delta=0.0,
+        net_theta=0.0,
+        net_vega=0.0,
+        exit_plan=_INCIDENT_EXIT,
+        informed_by=[],
+    )
+
+
+def _incident_portfolio() -> PortfolioState:
+    return PortfolioState(
+        positions=[],
+        account_equity=100_000.0,  # -> $1,000 risk budget @ default 1% cap
+        buying_power=30_000.0,
+        options_buying_power=15_000.0,
+        unrealized_pnl=0.0,
+        realized_pnl_today=0.0,
+        approval_level=2,
+        net_dollar_delta=0.0,
+        net_dollar_gamma=0.0,
+        net_dollar_theta=50.0,
+        net_dollar_vega=-200.0,
+    )
+
+
+def test_total_instead_of_per_contract_pattern_corrects_sizing() -> None:
+    # width 7, credit 2.09 -> per-contract max loss (7 - 2.09) * 100 = $491
+    chain = _chain(
+        [
+            _contract(380.0, "put", 3.09),
+            _contract(373.0, "put", 1.00),
+        ]
+    )
+    legs = [_leg(380.0, "put", "sell"), _leg(373.0, "put", "buy")]
+    metrics = compute_structure_metrics(legs, chain)
+    assert metrics is not None
+    assert metrics.est_max_loss == 491.0
+
+    buggy = _incident_proposal(legs, est_max_loss=3 * 491.0, est_max_profit=3 * 209.0)
+    limits = Limits()
+    portfolio = _incident_portfolio()
+
+    # Uncorrected: sizer sees the 3x total and zeroes the trade out.
+    assert size(buggy, portfolio, limits).contracts == 0
+
+    updates = apply_structure_metrics(
+        {},
+        metrics,
+        agent_est_max_loss=buggy.est_max_loss,
+        agent_est_max_profit=buggy.est_max_profit,
+        log_context="cycle eab4b54c",
+    )
+    corrected = buggy.model_copy(update=updates)
+    assert size(corrected, portfolio, limits).contracts == 2
+
+
+def test_doubled_value_pattern_corrects_sizing() -> None:
+    # width 5, credit 2.05 -> per-contract max loss (5 - 2.05) * 100 = $295
+    chain = _chain(
+        [
+            _contract(380.0, "put", 3.05),
+            _contract(375.0, "put", 1.00),
+        ]
+    )
+    legs = [_leg(380.0, "put", "sell"), _leg(375.0, "put", "buy")]
+    metrics = compute_structure_metrics(legs, chain)
+    assert metrics is not None
+    assert metrics.est_max_loss == 295.0
+
+    buggy = _incident_proposal(legs, est_max_loss=2 * 295.0, est_max_profit=2 * 205.0)
+    limits = Limits()
+    portfolio = _incident_portfolio()
+
+    assert size(buggy, portfolio, limits).contracts == 1
+
+    updates = apply_structure_metrics(
+        {},
+        metrics,
+        agent_est_max_loss=buggy.est_max_loss,
+        agent_est_max_profit=buggy.est_max_profit,
+        log_context="cycle 05c9b8da",
+    )
+    corrected = buggy.model_copy(update=updates)
+    assert size(corrected, portfolio, limits).contracts == 3
+
+
+def test_correct_agent_value_passes_through_unchanged() -> None:
+    # When the agent's arithmetic already matches the legs, enrichment
+    # is a no-op on the resulting contract count.
+    chain = _chain(
+        [
+            _contract(380.0, "put", 3.05),
+            _contract(375.0, "put", 1.00),
+        ]
+    )
+    legs = [_leg(380.0, "put", "sell"), _leg(375.0, "put", "buy")]
+    metrics = compute_structure_metrics(legs, chain)
+    assert metrics is not None
+
+    correct = _incident_proposal(legs, est_max_loss=295.0, est_max_profit=205.0)
+    limits = Limits()
+    portfolio = _incident_portfolio()
+
+    before = size(correct, portfolio, limits)
+    updates = apply_structure_metrics(
+        {},
+        metrics,
+        agent_est_max_loss=correct.est_max_loss,
+        agent_est_max_profit=correct.est_max_profit,
+        log_context="cycle correct",
+    )
+    after = size(correct.model_copy(update=updates), portfolio, limits)
+    assert before.contracts == after.contracts == 3

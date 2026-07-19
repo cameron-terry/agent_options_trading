@@ -14,6 +14,7 @@ The deterministic hard layer that every `TradeProposal` passes through before an
 | `gates.py` | Pre-flight checks: market open, blackout windows, buying power, position cap |
 | `validator.py` | Per-proposal validation — structural, market-access, and risk-cap checks |
 | `sizing.py` | Conviction + risk budget → contract count |
+| `structure.py` | Recomputes `est_max_loss`/`est_max_profit`/Greeks from proposal legs + chain quotes, overriding the agent's self-reported values before validation and sizing |
 
 ## Loading limits from config
 
@@ -165,3 +166,28 @@ print(ok, reason)
 ```
 
 All four gate functions return `(bool, str)` — the string is a human-readable reason when the gate fails, empty string when it passes.
+
+## Structure metrics (don't trust LLM arithmetic)
+
+The agent's `TradeProposal` carries self-reported `est_max_loss`, `est_max_profit`, and net Greeks. Nothing about the LLM call guarantees those numbers actually match the legs it proposed — in practice they have arrived as per-position totals or doubled values instead of per-contract figures, corrupting sizing (see the 2026-07-18 journal audit incidents in `options_agent/tests/test_structure.py`'s incident-pattern regression tests).
+
+Every playbook strategy is a defined-risk, same-expiration structure, so its risk metrics are exactly computable from the legs and current chain quotes via expiration-payoff analysis — the payoff of a piecewise-linear combo attains its extrema at the strike kinks, so evaluating P&L at each strike (plus the tails) gives an exact max loss/profit, correctly handling asymmetric-wing structures (e.g. iron condors) where a naive "single wing width" formula would pick the wrong side.
+
+```python
+from options_agent.risk.structure import compute_structure_metrics, apply_structure_metrics
+
+metrics = compute_structure_metrics(proposal.legs, filtered_chain)
+if metrics is not None:
+    updates = apply_structure_metrics(
+        {},
+        metrics,
+        agent_est_max_loss=proposal.est_max_loss,
+        agent_est_max_profit=proposal.est_max_profit,
+        log_context=f"cycle {cycle_id}",
+    )
+    proposal = proposal.model_copy(update=updates)
+```
+
+`compute_structure_metrics` returns `None` if any leg is absent from the chain (the same condition `validate_market_access`'s liquidity check fails closed on). Greeks are always overridden; `est_max_loss`/`est_max_profit` are overridden only when the payoff analysis produces a finite positive bound (mixed-expiration proposals, or structures with genuinely unbounded risk on one side, fall back to the agent's value). `apply_structure_metrics` logs a warning when the agent's self-reported value deviates more than 20% from the computed one — that log line is the only current record of the discrepancy; it is not yet written to the journal as a queryable field.
+
+The orchestrator calls this before `size()` and `validate_risk_caps()` on every entry-cycle proposal (including the retry/feedback path), so the sizer never consumes raw LLM arithmetic for defined-risk structures.
