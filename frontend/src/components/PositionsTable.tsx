@@ -22,7 +22,10 @@ function DistanceBar({ position }: { position: PositionSummary }) {
   )
 }
 
-export function PositionsTable({ positions }: { positions: PositionSummary[] }) {
+export function PositionsTable({ positions }: { positions: PositionSummary[] | null }) {
+  if (positions === null) {
+    return <div className="positions-table positions-table--empty">loading positions…</div>
+  }
   if (positions.length === 0) {
     return <div className="positions-table positions-table--empty">no open positions</div>
   }

@@ -21,6 +21,12 @@ function position(overrides: Partial<PositionSummary> = {}): PositionSummary {
 }
 
 describe('PositionsTable', () => {
+  it('shows a loading state when positions have not loaded yet', () => {
+    render(<PositionsTable positions={null} />)
+    expect(screen.getByText('loading positions…')).toBeInTheDocument()
+    expect(screen.queryByText('no open positions')).not.toBeInTheDocument()
+  })
+
   it('shows an empty state when there are no positions', () => {
     render(<PositionsTable positions={[]} />)
     expect(screen.getByText('no open positions')).toBeInTheDocument()
