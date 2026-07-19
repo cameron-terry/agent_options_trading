@@ -210,8 +210,9 @@ def _entry_analytics_fields(
     """Derive the JournalRecord analytics fields tied to a proposal's underlying.
 
     net_delta_at_open is the proposal's per-contract net delta (not scaled by
-    sizing.contracts) — consistent with how monitor/exits.py, risk/sizing.py,
-    and risk/validator.py all treat proposal.net_delta elsewhere.
+    sizing.contracts) — consistent with risk/validator.py's dollar_delta check,
+    which multiplies this by contracts itself rather than expecting a
+    pre-scaled total.
 
     earnings_within_dte mirrors the event-blackout gate in
     risk/validator.py:validate_market_access — None (no known earnings date)

@@ -14,6 +14,14 @@ path) — this script deliberately bypasses that module and issues a raw
 SQLAlchemy Core UPDATE, following the precedent in state/crud.py's
 update_position()/patch_order_fill_metrics().
 
+earnings_within_dte is derived using the *current* config's
+Limits.event_blackout_days, not whatever was active when a historical row
+was written (JournalRecord.limits_version records that, but this script
+does not look up historical Limits by version — no such registry exists).
+Safe for a same-week backfill where the threshold hasn't changed; the
+script warns to stderr if a row's limits_version differs from the
+current config's, since that's the signal the assumption may not hold.
+
 Usage:
     uv run python scripts/backfill_iv_rank_at_open.py [--dry-run]
 
@@ -98,6 +106,17 @@ def main() -> None:
 
     updated = 0
     for record in records:
+        if record.limits_version != config.limits.limits_version:
+            print(
+                f"WARNING: {record.cycle_id} was written under "
+                f"limits_version={record.limits_version!r}, but this script is "
+                f"using the current config's event_blackout_days="
+                f"{config.limits.event_blackout_days} (limits_version="
+                f"{config.limits.limits_version!r}). earnings_within_dte may not "
+                "reflect the blackout window actually in effect at write time.",
+                file=sys.stderr,
+            )
+
         iv_rank_at_open, net_delta_at_open, earnings_within_dte = _derive_fields(
             record, config.limits.event_blackout_days
         )
