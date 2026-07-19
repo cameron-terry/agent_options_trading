@@ -5,13 +5,18 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 
 import exchange_calendars as xcals
+from pydantic import BaseModel
 from sqlalchemy.engine import Engine
 
 from options_agent.agent.reasoner import ReasonerError, reason
 from options_agent.agent.tools import TOOL_GET_FILTERED_CHAIN
 from options_agent.agent.tools_mock import MOCK_TOOL_IMPLS, ToolImpl
 from options_agent.config import Config
-from options_agent.context.assembler import assemble_context, to_context_snapshot
+from options_agent.context.assembler import (
+    ContextBundle,
+    assemble_context,
+    to_context_snapshot,
+)
 from options_agent.contracts.alerts import AlertEvent, AlertEventType, AlertSeverity
 from options_agent.contracts.data import FilteredChain
 from options_agent.contracts.journal import (
@@ -78,6 +83,7 @@ from options_agent.risk.gates import (
     under_position_cap,
     within_blackout_window,
 )
+from options_agent.risk.limits import Limits
 from options_agent.risk.sizing import size as _size
 from options_agent.risk.structure import (
     StructureMetrics,
@@ -187,6 +193,45 @@ def _fetch_chain_and_metrics(
     if not isinstance(chain, FilteredChain):
         return None, None
     return chain, compute_structure_metrics(proposal.legs, chain)
+
+
+class _EntryAnalyticsFields(BaseModel):
+    """JournalRecord analytics fields tied to a proposal's underlying."""
+
+    iv_rank_at_open: float | None
+    net_delta_at_open: float | None
+    earnings_within_dte: bool | None
+
+
+def _entry_analytics_fields(
+    proposal: TradeProposal,
+    bundle: ContextBundle,
+    limits: Limits,
+) -> _EntryAnalyticsFields:
+    """Derive the JournalRecord analytics fields tied to a proposal's underlying.
+
+    net_delta_at_open is the proposal's per-contract net delta (not scaled by
+    sizing.contracts) — consistent with risk/validator.py's dollar_delta check,
+    which multiplies this by contracts itself rather than expecting a
+    pre-scaled total.
+
+    earnings_within_dte mirrors the event-blackout gate in
+    risk/validator.py:validate_market_access — None (no known earnings date)
+    is "not within," not unknown-so-skip.
+    """
+    snapshot = bundle.universe.symbol_snapshots.get(proposal.underlying)
+    iv_rank_at_open = snapshot.iv_rank if snapshot is not None else None
+    earnings_within_dte = (
+        snapshot.days_to_earnings is not None
+        and snapshot.days_to_earnings <= limits.event_blackout_days
+        if snapshot is not None
+        else None
+    )
+    return _EntryAnalyticsFields(
+        iv_rank_at_open=iv_rank_at_open,
+        net_delta_at_open=proposal.net_delta,
+        earnings_within_dte=earnings_within_dte,
+    )
 
 
 def _enrich_proposal(
@@ -982,6 +1027,7 @@ def run_entry_cycle(
             sizing_result=sizing,
             action_taken=ActionTaken.SIZED_TO_ZERO,
         )
+        _analytics = _entry_analytics_fields(proposal, bundle, config.limits)
         journal_record = JournalRecord(
             cycle_id=cycle_id,
             timestamp=now,
@@ -994,6 +1040,9 @@ def run_entry_cycle(
             strategy=proposal.strategy,
             underlying=proposal.underlying,
             conviction=proposal.conviction,
+            iv_rank_at_open=_analytics.iv_rank_at_open,
+            net_delta_at_open=_analytics.net_delta_at_open,
+            earnings_within_dte=_analytics.earnings_within_dte,
         )
         with get_connection(engine) as conn:
             write_journal_record(conn, journal_record)
@@ -1216,6 +1265,7 @@ def run_entry_cycle(
         sizing_result=sizing,
         action_taken=ActionTaken.OPENED,
     )
+    _analytics = _entry_analytics_fields(proposal, bundle, config.limits)
     journal_record = JournalRecord(
         cycle_id=cycle_id,
         timestamp=now,
@@ -1229,8 +1279,10 @@ def run_entry_cycle(
         model_id=_model_id,
         strategy=proposal.strategy,
         underlying=proposal.underlying,
-        net_delta_at_open=proposal.net_delta,
         conviction=proposal.conviction,
+        iv_rank_at_open=_analytics.iv_rank_at_open,
+        net_delta_at_open=_analytics.net_delta_at_open,
+        earnings_within_dte=_analytics.earnings_within_dte,
     )
 
     _dispatch(
