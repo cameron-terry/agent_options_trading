@@ -195,21 +195,21 @@ def test_iv_rank_exact_formula(conn) -> None:
     assert result == pytest.approx(0.25)
 
 
-def test_iv_rank_current_above_window_not_clamped(conn) -> None:
-    # current_iv > historical high → rank > 1.0 (not clamped — signals extremity)
+def test_iv_rank_current_above_window_clamped_to_one(conn) -> None:
+    # current_iv > historical high → clamped to 1.0, not left unbounded.
     ivs = [0.20] * 30
     # Add a spread so denominator isn't zero
     ivs[0] = 0.10
     _insert_history(conn, _SYMBOL, ivs)
     result = compute_iv_rank(_SYMBOL, 0.50, conn, min_days=30)
-    assert result is not None and result > 1.0
+    assert result == pytest.approx(1.0)
 
 
-def test_iv_rank_current_below_window_not_clamped(conn) -> None:
+def test_iv_rank_current_below_window_clamped_to_zero(conn) -> None:
     ivs = [0.20] * 29 + [0.40]
     _insert_history(conn, _SYMBOL, ivs)
     result = compute_iv_rank(_SYMBOL, 0.05, conn, min_days=30)
-    assert result is not None and result < 0.0
+    assert result == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------

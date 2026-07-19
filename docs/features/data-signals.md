@@ -156,6 +156,8 @@ Unlike `get_filtered_chain`, no DTE window or delta range is applied — the ful
 
 **Missing data policy:** if fewer than `min_days=30` historical observations exist, `compute_iv_rank` / `compute_iv_percentile` return `None`. Symbols with `iv_rank=None` are labelled `ineligible (iv_rank unknown)` in the assembler context and excluded from entry candidates by WP-4 gates. This is the expected state during the first ~30 sessions of the paper run.
 
+**Bounds:** `compute_iv_rank` is clamped to `[0.0, 1.0]` — a `current_iv` beyond the trailing window (a new 52-week high/low) is clamped to the nearest bound rather than left unbounded, matching external references (Barchart, Market Chameleon) that fold today's observation into the window before ranking. `compute_iv_percentile` is already naturally bounded to `[0.0, 1.0]` by its `count_below / n` formula and needs no clamping.
+
 ```python
 from datetime import date
 from options_agent.data.greeks_iv import get_atm_iv

@@ -23,13 +23,22 @@ Cold-start behaviour:
   from "data pipeline never ran."
 
 IV-rank formula:
-    (current_iv - window_low) / (window_high - window_low)
+    (current_iv - window_low) / (window_high - window_low), clamped to [0.0, 1.0].
     Zero denominator (flat IV over the window) → None, not 0.5.
+    IV-rank is defined as current IV's position within its trailing-year range,
+    so a current_iv outside the stored window (e.g. today is a new 52-week high)
+    is clamped to the nearest bound rather than left unbounded. This matches
+    external references (Barchart, Market Chameleon) that fold today's
+    observation into the window before ranking — doing so can only ever push
+    the rank to exactly 0.0 or 1.0, the same result post-hoc clamping produces.
+    See WP-3 card "Clamp iv_rank to [0, 1]" (MSFT reported up to 1.072 pre-fix).
 
 IV-percentile formula:
     fraction of past 252 observations strictly below current_iv
     Ties (obs == current_iv) are excluded from the "below" count; this is the
     conventional definition and avoids ambiguity at boundary values.
+    Already naturally bounded to [0.0, 1.0] (count_below can't exceed or be
+    negative relative to n) — no clamping needed here.
 
 "Current IV" definition — identical rule for stored observations and live value:
     ATM call at nearest-to-30-DTE expiration.
@@ -121,15 +130,17 @@ def compute_iv_rank(
 ) -> float | None:
     """Compute IV-rank for the symbol against its trailing 252-day history.
 
-    IV-rank = (current_iv - window_low) / (window_high - window_low)
+    IV-rank = (current_iv - window_low) / (window_high - window_low),
+    clamped to [0.0, 1.0].
 
     Returns None when:
       - Fewer than min_days observations exist (insufficient history).
       - window_high == window_low (flat IV; denominator is zero — undefined).
 
-    Result is not clamped: a current_iv outside the historical window produces
-    a value < 0 or > 1. This is intentional — it signals that the current IV
-    is more extreme than any observation in the window, which is useful signal.
+    A current_iv outside the historical window (new 52-week high/low) is
+    clamped to 1.0 / 0.0 rather than left unbounded — IV-rank is defined as a
+    position within [0, 1], and an unclamped value silently breaks any
+    downstream percentile math or prompt text that assumes that range.
     """
     history = _fetch_history(symbol, conn)
     n = len(history)
@@ -158,7 +169,8 @@ def compute_iv_rank(
         )
         return None
 
-    return (current_iv - iv_low) / denom
+    rank = (current_iv - iv_low) / denom
+    return max(0.0, min(1.0, rank))
 
 
 def compute_iv_percentile(
