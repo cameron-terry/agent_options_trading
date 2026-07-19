@@ -79,6 +79,7 @@ def _make_journal_record(
     validation_result: ValidationResult | None = None,
     sizing_result: SizingResult | None = None,
     tool_calls_transcript: list[ToolCallRecord] | None = None,
+    data_quality_flags: list[str] | None = None,
 ) -> JournalRecord:
     context_snapshot = ContextSnapshot(
         assembled_context={"iv_rank": 62},
@@ -113,6 +114,7 @@ def _make_journal_record(
         prompt_version="v2.1.0",
         model_id="claude-sonnet-5",
         rejection_rule_ids=rejection_rule_ids or [],
+        data_quality_flags=data_quality_flags or [],
     )
 
 
@@ -283,6 +285,31 @@ def test_get_cycle_detail_renders_proposal_and_transcript(engine) -> None:
     assert detail.prompt_version == "v2.1.0"
     assert detail.limits_version == "v1.0.0"
     assert detail.context_hash == "sha256:9f3ac21e"
+
+
+def test_get_cycle_detail_exposes_data_quality_flags(engine) -> None:
+    with get_connection(engine) as conn:
+        write_journal_record(
+            conn,
+            _make_journal_record(
+                cycle_id="c1",
+                timestamp=_NOW,
+                data_quality_flags=["phantom_net_delta"],
+            ),
+        )
+        detail = get_cycle_detail(conn, "c1")
+
+    assert detail is not None
+    assert detail.data_quality_flags == ["phantom_net_delta"]
+
+
+def test_get_cycle_detail_default_data_quality_flags_empty(engine) -> None:
+    with get_connection(engine) as conn:
+        write_journal_record(conn, _make_journal_record(cycle_id="c1", timestamp=_NOW))
+        detail = get_cycle_detail(conn, "c1")
+
+    assert detail is not None
+    assert detail.data_quality_flags == []
 
 
 def test_get_cycle_detail_pre_wp64_record_has_empty_transcript(engine) -> None:

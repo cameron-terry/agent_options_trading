@@ -9,6 +9,14 @@ const BODY_TRUNCATE_LINES = 10
 // let straight through un-truncated.
 const BODY_TRUNCATE_CHARS = 800
 
+// Human-readable tooltips for known JournalRecord.data_quality_flags values.
+// Mirrors options_agent/obs/data_quality.py's DATA_QUALITY_FLAG_DESCRIPTIONS
+// registry (kept short here — this is a tooltip, not the full record).
+const DATA_QUALITY_FLAG_LABELS: Record<string, string> = {
+  phantom_net_delta:
+    'Net delta on this cycle is known-bad: a Greek-aggregation bug (fixed in PR #89) zeroed missing-leg contributions, producing a wildly inflated portfolio net delta. Do not trust net_dollar_delta or any thesis text that cites it for this cycle.',
+}
+
 // result_json is an opaque, heterogeneous blob (state/journal.py stores it
 // pre-serialized precisely because every tool's result shape differs) — no
 // schema exists to build a tool-aware one-line summary from it. A truncated
@@ -338,6 +346,19 @@ function CycleHeader({ detail }: { detail: CycleDetail }) {
           <b>tool calls</b> {detail.tool_calls_transcript.length}
         </span>
       </div>
+      {detail.data_quality_flags.length > 0 && (
+        <div className="cycle-header__flags">
+          {detail.data_quality_flags.map((flag) => (
+            <span
+              key={flag}
+              className="action-chip action-chip--warn"
+              title={DATA_QUALITY_FLAG_LABELS[flag] ?? flag}
+            >
+              {flag}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

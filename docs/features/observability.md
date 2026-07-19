@@ -2,7 +2,7 @@
 
 **Module:** `options_agent/obs/`  
 **Credentials required:** `DISCORD_WEBHOOK_URL` (alerting only; optional for review/kill-switch)  
-**Status:** kill-switch complete (WP-7.1); alerting complete (WP-7.2); review metrics complete (WP-7.3); bias detection complete (WP-7.4); kill-switch alert wiring complete (WP-8.9)
+**Status:** kill-switch complete (WP-7.1); alerting complete (WP-7.2); review metrics complete (WP-7.3); bias detection complete (WP-7.4); kill-switch alert wiring complete (WP-8.9); data-quality flags complete (WP-7)
 
 Runtime safety controls and operational visibility into the running agent. The module owns anything that lets an operator observe, pause, or stop the system without touching the core trading logic.
 
@@ -14,6 +14,7 @@ Runtime safety controls and operational visibility into the running agent. The m
 | `obs/__main__.py` | Observability CLI: kill-switch commands + `review` + `bias` |
 | `obs/alerts.py` | Alerting channel integration: Discord webhook, dispatcher, durable failure recording |
 | `obs/review.py` | Journal analytics: hit rate, P&L attribution, cycle funnel, bias detection |
+| `obs/data_quality.py` | Registry of known `JournalRecord.data_quality_flags` values and their descriptions |
 
 ---
 
@@ -376,3 +377,43 @@ if ep.near_catalyst.sufficient:
 if ep.baseline.sufficient:
     print("Baseline expectancy:", ep.baseline.expectancy)
 ```
+
+---
+
+## Data-quality flags (WP-7)
+
+Retroactive, append-only annotations on `JournalRecord` for cycles known to
+carry bad denormalized/context data from a bug fixed after the cycle was
+written. Distinct from the kill-switch and alerting above — this doesn't
+change runtime behaviour, it marks historical rows so downstream consumers
+don't reason from corrupted numbers.
+
+### Schema
+
+`journal_records.data_quality_flags` — nullable JSON `list[str]`, added by
+migration `008_journal_data_quality_flags.py`. `JournalRecord.data_quality_flags`
+defaults to `[]`; rows written before the column existed (or never flagged)
+read back as `[]`, not `None` (`state/journal.py::_row_to_journal_record`
+coerces `NULL` on read).
+
+### Known flags
+
+`obs/data_quality.py::DATA_QUALITY_FLAG_DESCRIPTIONS` is the single source of
+truth for flag names → human-readable descriptions. Add an entry here
+whenever a data bug is found and backfilled onto historical rows.
+
+| Flag | Meaning |
+|---|---|
+| `phantom_net_delta` | `context_snapshot.assembled_context.portfolio.net_dollar_delta` is unreliable — SPY condor legs fell out of the entry-filtered chain and `aggregate_portfolio_greeks()` zeroed their contribution (see `greek_warnings` on the same snapshot), producing a net delta of tens of thousands of dollars. Fixed going forward by PR #89 (held-leg Greek fetch). Backfilled onto the 4 cycles from 2026-07-09 17:00 through 2026-07-10 19:00 by migration 008. |
+
+### Consumers
+
+- **Ask-the-journal** (`agent/ask/prompts.py`): the `run_sql` system prompt
+  documents the column and instructs the model to exclude flagged cycles from
+  aggregate figures, or explicitly caveat any answer that cites one.
+- **Decision explorer** (`ui/cycles.py` → `CycleDetail.data_quality_flags`,
+  rendered by `frontend/src/components/CycleTrace.tsx`'s `CycleHeader`): a
+  cycle with any flags shows a warn-toned chip per flag, with a tooltip
+  describing the known issue.
+- Future consumers (prompt-version compare, eval loops) should check this
+  field the same way before trusting a flagged cycle's numbers.

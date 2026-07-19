@@ -119,6 +119,8 @@ with get_connection(engine) as conn:
 
 **Validation rendering reflects what's actually stored, not a synthesized rule catalog.** `ValidationResult.reasons` only contains rules that fired (ERROR or WARNING severity) — there's no record of which rules were evaluated and passed silently. REJECTED cycles show every failing rule's `rule_id` + `human_message` (+ `observed`/`limit` when present); passing cycles with no WARNING reasons show "no rule reasons recorded" rather than fabricating a full green checklist.
 
+**Data-quality flags (WP-7).** `CycleDetail.data_quality_flags` surfaces `JournalRecord.data_quality_flags` — non-empty when a known historical data bug (see [observability.md](observability.md#data-quality-flags-wp-7)) tainted this cycle. `CycleHeader` renders one warn-toned `.action-chip` per flag, with a tooltip describing the issue (client-side `DATA_QUALITY_FLAG_LABELS` in `CycleTrace.tsx`, kept short and mirroring `obs/data_quality.py`'s registry — not fetched from the API).
+
 ---
 
 ## Live activity stream (WP-9.4)

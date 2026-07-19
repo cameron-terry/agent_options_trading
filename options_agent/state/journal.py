@@ -197,6 +197,7 @@ def _journal_record_to_row(record: JournalRecord) -> dict[str, Any]:
         "prompt_version": record.prompt_version,
         "model_id": record.model_id,
         "rejection_rule_ids": json.dumps([r.value for r in record.rejection_rule_ids]),
+        "data_quality_flags": json.dumps(record.data_quality_flags),
     }
 
 
@@ -212,6 +213,13 @@ def _row_to_journal_record(row: Any) -> JournalRecord:
     ):
         raw = d[blob_col]
         d[blob_col] = json.loads(raw) if isinstance(raw, str) else raw
+
+    # Nullable column: rows written before this flag existed (or never flagged)
+    # store NULL, not "[]" — coerce to the model's empty-list default.
+    raw_flags = d["data_quality_flags"]
+    d["data_quality_flags"] = (
+        json.loads(raw_flags) if isinstance(raw_flags, str) else []
+    )
 
     d["timestamp"] = _ensure_utc(d["timestamp"])
 

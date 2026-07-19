@@ -14,6 +14,7 @@
   --accent: #3987e5;
   --accent-soft: #7fb4e5;
   --good: #0ca30c;
+  --warn: #fab219;
   --crit: #d03b3b;
   --gain: #1fb14b;
   --loss: #e05e5e;
@@ -530,6 +531,13 @@ body {
   font-weight: 400;
 }
 
+.cycle-header__flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
 /* Cycle filter bar */
 .cycle-filters {
   display: flex;
@@ -644,6 +652,12 @@ body {
   color: #e57373;
   border-color: rgba(208, 59, 59, 0.5);
   background: rgba(208, 59, 59, 0.1);
+}
+
+.action-chip--warn {
+  color: var(--warn);
+  border-color: rgba(250, 178, 25, 0.5);
+  background: rgba(250, 178, 25, 0.1);
 }
 
 /* Shared disclosure-toggle chevron. Any <details> that wants the rotating

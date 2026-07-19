@@ -185,6 +185,11 @@ journal_records_table = Table(
     # Rejection index — JSON list for portability; non-empty only when
     # action_taken == REJECTED
     Column("rejection_rule_ids", JSON, nullable=False),  # list[str]
+    # Data-quality annotations (WP-7 retroactive audit, e.g. "phantom_net_delta")
+    # — null/empty for all rows unless a known data bug tainted this cycle's
+    # context_snapshot or denormalized fields. See obs/data_quality.py for the
+    # known flag values and their descriptions.
+    Column("data_quality_flags", JSON, nullable=True),  # list[str] | None
 )
 
 # ---------------------------------------------------------------------------
