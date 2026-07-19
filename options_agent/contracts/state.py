@@ -304,9 +304,11 @@ class FillEvent(BaseModel):
 
     Idempotency is enforced via broker_exec_id — insert only if that key is
     not already present.  For Alpaca REST reconcile, broker_exec_id is
-    "{broker_order_id}@{cumulative_filled_qty}" since the REST API does not
-    surface per-execution IDs; each unique (order, qty-level) pair is one
-    execution observation.
+    "{broker_order_id}@{cumulative_filled_qty}" for single-leg orders (one
+    FillEvent per order) and "{broker_order_id}:{leg_symbol}@{cumulative_leg_qty}"
+    for multi-leg orders (one FillEvent per leg, since each leg fills and is
+    tracked independently) — the REST API does not surface per-execution IDs,
+    so each unique (order[, leg], qty-level) tuple is one execution observation.
 
     filled_qty is the INCREMENTAL quantity filled in this execution (derived
     from current broker cumulative minus previously-recorded cumulative).

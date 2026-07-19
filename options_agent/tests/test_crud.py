@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 
 from options_agent.contracts.state import (
     ExitPlan,
+    FillEvent,
     Leg,
     LegFill,
     LegStatus,
@@ -23,9 +24,11 @@ from options_agent.state.crud import (
     get_order,
     get_position,
     has_pending_close,
+    insert_fill_event_if_new,
     insert_order,
     insert_position,
     list_open_positions,
+    list_orders_with_unrecorded_fills,
     list_pending_orders,
     patch_order,
     update_position,
@@ -397,6 +400,109 @@ def test_list_pending_orders_excludes_terminal(engine):
 def test_list_pending_orders_empty(engine):
     with get_connection(engine) as conn:
         assert list_pending_orders(conn) == []
+
+
+# ---------------------------------------------------------------------------
+# Order — list_orders_with_unrecorded_fills (WP-1: per-leg fill audit trail)
+# ---------------------------------------------------------------------------
+
+
+def test_list_orders_with_unrecorded_fills_finds_terminal_order_with_no_events(
+    engine,
+):
+    """An order inserted already FILLED (the synchronous-fill path) with zero
+    fill_events rows must be surfaced — it is invisible to list_pending_orders
+    since it's terminal, so this is the only query that can find it.
+    """
+    pos = _pos()
+    filled = _order(
+        id="ord-filled", status=OrderStatus.FILLED, broker_order_id="b1", filled_qty=5
+    )
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, filled)
+
+    with get_connection(engine) as conn:
+        result = list_orders_with_unrecorded_fills(conn)
+
+    assert {o.id for o in result} == {"ord-filled"}
+
+
+def test_list_orders_with_unrecorded_fills_excludes_fully_recorded_order(
+    engine,
+):
+    pos = _pos()
+    filled = _order(
+        id="ord-filled", status=OrderStatus.FILLED, broker_order_id="b1", filled_qty=5
+    )
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, filled)
+        insert_fill_event_if_new(
+            conn,
+            FillEvent(
+                id="fe-1",
+                order_id="ord-filled",
+                broker_exec_id="b1@5",
+                leg_symbol="SPY260718P00450000",
+                filled_qty=5,
+                fill_price=1.25,
+                occurred_at=_NOW,
+                observed_at=_NOW,
+            ),
+        )
+
+    with get_connection(engine) as conn:
+        result = list_orders_with_unrecorded_fills(conn)
+
+    assert result == []
+
+
+def test_list_orders_with_unrecorded_fills_excludes_unfilled_order(engine):
+    pos = _pos()
+    working = _order(id="ord-working", status=OrderStatus.WORKING, filled_qty=0)
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, working)
+
+    with get_connection(engine) as conn:
+        result = list_orders_with_unrecorded_fills(conn)
+
+    assert result == []
+
+
+def test_list_orders_with_unrecorded_fills_finds_partially_recorded_order(
+    engine,
+):
+    """An order with some, but not all, of its filled_qty already recorded in
+    fill_events (e.g. an interrupted prior reconcile pass) must still be
+    surfaced — the gap is what matters, not whether any rows exist at all.
+    """
+    pos = _pos()
+    filled = _order(
+        id="ord-001", status=OrderStatus.FILLED, broker_order_id="b1", filled_qty=6
+    )
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+        insert_order(conn, filled)
+        insert_fill_event_if_new(
+            conn,
+            FillEvent(
+                id="fe-1",
+                order_id="ord-001",
+                broker_exec_id="b1@3",
+                leg_symbol="SPY260718P00450000",
+                filled_qty=3,
+                fill_price=1.25,
+                occurred_at=_NOW,
+                observed_at=_NOW,
+            ),
+        )
+
+    with get_connection(engine) as conn:
+        result = list_orders_with_unrecorded_fills(conn)
+
+    assert {o.id for o in result} == {"ord-001"}
 
 
 # ---------------------------------------------------------------------------

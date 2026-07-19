@@ -339,6 +339,53 @@ def list_pending_orders(conn: Connection) -> list[Order]:
     return [_row_to_order(r) for r in rows]
 
 
+def list_orders_with_unrecorded_fills(conn: Connection) -> list[Order]:
+    """Return every Order whose filled_qty exceeds what fill_events has recorded.
+
+    An order that fills synchronously inside broker.submit()/submit_multi_leg()'s
+    poll window is inserted already at its terminal filled_qty (see
+    orchestrator.py's PENDING_OPEN->OPEN comment). list_pending_orders() excludes
+    it from every future reconcile pass by design (it is no longer non-terminal),
+    so its FillEvent rows and legs_filled would otherwise never get recorded.
+    reconcile.py's backfill pass uses this query to find and catch up exactly
+    those orders — self-healing on the next reconcile() call regardless of when
+    the gap was introduced.
+
+    Known limitation: recorded_qty sums fill_events across *all* legs of an
+    order, while filled_qty is combo-level (one leg's recorded qty already
+    matches the combo's). A multi-leg order that somehow ends up with only
+    some legs recorded (e.g. legs filled at genuinely different times across
+    reconcile passes while the order was still non-terminal, each caught by
+    the main loop rather than this backfill pass) could read as "fully
+    recorded" here once any single leg's qty reaches filled_qty, even with
+    other legs still unrecorded. Not currently known to be reachable in
+    practice — reconcile() runs each pass inside one DB transaction, so a
+    mid-pass failure rolls back any partial FillEvent writes rather than
+    leaving this state behind — but flagged here since the qty-sum heuristic
+    doesn't fully rule it out for multi-leg orders.
+    """
+    recorded = (
+        sa.select(
+            fill_events_table.c.order_id,
+            sa.func.sum(fill_events_table.c.filled_qty).label("recorded_qty"),
+        )
+        .group_by(fill_events_table.c.order_id)
+        .subquery()
+    )
+    rows = conn.execute(
+        sa.select(orders_table)
+        .select_from(
+            orders_table.outerjoin(recorded, orders_table.c.id == recorded.c.order_id)
+        )
+        .where(
+            orders_table.c.filled_qty > 0,
+            sa.func.coalesce(recorded.c.recorded_qty, 0) < orders_table.c.filled_qty,
+        )
+        .order_by(orders_table.c.submitted_at)
+    ).fetchall()
+    return [_row_to_order(r) for r in rows]
+
+
 def has_pending_close(conn: Connection, position_id: str) -> bool:
     """Return True if any non-terminal CLOSE or ROLL order exists for position_id.
 
