@@ -1,81 +1,36 @@
 # First Paper Fill — Runbook
 
-> **Audience:** WP owners who need to confirm that the WP-0.5 vertical slice
-> works end-to-end and that their own integration point is reachable.
->
-> **Scope:** happy path only. The architecture doc (`options-agent-plan.md`)
-> covers design rationale; `WORKSTREAMS.md` covers the task breakdown.
+> **Audience:** anyone who needs to confirm the entry pipeline works end-to-end
+> against Alpaca paper. Happy path only. The pipeline itself is documented in
+> [docs/features/orchestrator.md](features/orchestrator.md).
 
 ---
 
 ## What this runbook does
 
-Running `run_entry_cycle()` against Alpaca **paper** exercises the full
-10-step WP-8.2 entry pipeline:
+Runs the full entry pipeline (`run_entry_cycle()`) against Alpaca **paper** via
+the smoke test. In dev/CI mode (`use_real_data_tools=false`, the default),
+context assembly uses fixed mock tool responses; everything else — kill switch,
+reconcile, gates, the LLM call, validation, sizing, broker submit, journal
+write — is real. A successful run produces:
 
-```
-kill_switch → reconcile → state_integrity → temporal_gates
-→ assemble_context → portfolio_gates → reason (LLM)
-→ validate_structural → size → submit_multi_leg + reconcile
-→ write_journal_record
-```
-
-The smoke test (`test_paper_smoke.py`) uses `use_real_data_tools=False`
-(the default), so context assembly uses fixed mock tool responses and the
-LLM call is real but operates on deterministic input data.
-
-A successful run produces:
 - A **limit order** on the Alpaca paper account dashboard
 - A **`JournalRecord`** in the DB with the broker order ID
 
-This is the integration target all subsequent WPs wire into.
-
----
-
-## Component map — stub vs. real
-
-| Pipeline step | Module | Dev/CI (`use_real_data_tools=False`) | Paper validation (`use_real_data_tools=True`) |
-|---|---|---|---|
-| Kill switch | `obs/killswitch.py` | **REAL** | **REAL** |
-| Reconcile (cycle-top) | `execution/reconcile.py` | **REAL** | **REAL** |
-| State integrity | `orchestrator.py` | **REAL** | **REAL** |
-| Temporal gates | `risk/gates.py` | **REAL** | **REAL** |
-| Assemble context | `context/assembler.py` | **REAL** — fixed mock tool responses (no network I/O) | **REAL** — live WP-3 data tools (WP-8.5 swap) |
-| Portfolio gates | `risk/gates.py` | **REAL** | **REAL** |
-| Reason (LLM) | `agent/reasoner.py` | **REAL** — Anthropic API call on mock tool data | **REAL** — Anthropic API call on live tool data |
-| Validate | `risk/validator.py` | **REAL** | **REAL** |
-| Size | `risk/sizing.py` | **REAL** | **REAL** |
-| Execute + reconcile | `execution/broker.py` + `execution/reconcile.py` | **REAL** — Alpaca paper | **REAL** — Alpaca paper |
-| Journal | `state/journal.py` | **REAL** | **REAL** |
-
-The smoke test runs in dev/CI mode (`use_real_data_tools=False`). Limit price is
-controlled by `slice_limit_price` in config (default `−1.50`; smoke test overrides
-to `−0.01` to guarantee a paper fill regardless of the LLM's proposed spread).
+The smoke test overrides the limit price to `−0.01` (a giveaway credit) to
+guarantee a paper fill regardless of the LLM's proposed spread.
 
 ---
 
 ## 1. Prerequisites
 
-**Alpaca paper account**
-- Sign up at [app.alpaca.markets](https://app.alpaca.markets) and switch to the
-  **Paper Trading** environment.
-- Enable **Level 2 Options** (or higher) in Account → Trading Experience.
-- Generate a **Paper Trading API Key** (not a live key) from the API Keys page.
-
-**Anthropic account**
-- An `ANTHROPIC_API_KEY` is required — `run_entry_cycle()` makes a real LLM call
-  via `agent/reasoner.py` even in dev/CI mode.
-
-**Python environment**
-```bash
-uv sync --dev
-```
-
----
+- **Alpaca paper account** ([app.alpaca.markets](https://app.alpaca.markets), Paper Trading environment) with **Level 2 Options** or higher enabled, and a **Paper Trading API key** (not a live key).
+- **`ANTHROPIC_API_KEY`** — the entry cycle makes a real LLM call even in dev/CI mode.
+- `uv sync --dev`
 
 ## 2. Credential setup
 
-Secrets go in environment variables — never in `config.toml`.
+Secrets go in environment variables — never in `config.toml`:
 
 ```bash
 export ALPACA_API_KEY="your-paper-api-key"
@@ -83,159 +38,55 @@ export ALPACA_SECRET_KEY="your-paper-secret-key"
 export ANTHROPIC_API_KEY="your-anthropic-api-key"
 ```
 
-Confirm `config.toml` has:
-```toml
-alpaca_paper = true
-```
-
-The `BrokerClient` reads the env vars at construction time and raises
-`OSError` if either is missing, naming the missing variable(s) in the message.
-
----
+Confirm `config.toml` has `alpaca_paper = true`. `BrokerClient` raises `OSError`
+naming any missing variable.
 
 ## 3. Run the smoke test
 
-This is the canonical verification path. It runs `run_entry_cycle()` against
-Alpaca paper, polls for a fill, reads back the `JournalRecord`, and asserts
-every acceptance criterion automatically.
-
 ```bash
-uv run pytest -m "integration and smoke" \
-    options_agent/tests/test_paper_smoke.py -v
+uv run pytest -m "integration and smoke" options_agent/tests/test_paper_smoke.py -v
 ```
 
-**Requirements:**
-- NYSE must be open (regular trading hours, Eastern time).
-- `ALPACA_API_KEY` must be set.
+Requires NYSE to be open and Alpaca keys set — it **skips** (not fails)
+otherwise. The test asserts every acceptance criterion itself: cycle completes,
+order appears on the paper account, reconcile detects a terminal state (fill,
+or cancel-fallback after 300 s — Alpaca paper doesn't reliably simulate
+multi-leg fills), and the `JournalRecord` round-trips with the broker order ID.
 
-The test skips (not fails) if either condition is not met.
+## 4. Verify on the Alpaca dashboard
 
-**Expected output (success):**
+Log in → Paper Trading → **Orders**. Look for a multi-leg options order on a
+universe symbol; the strategy and strikes are chosen by the LLM at runtime, so
+match against `result.proposal.underlying` / `.legs` if in doubt. Status
+`filled` (or `partially_filled` during polling) is success; `rejected` means
+the broker refused it — check options level, buying power, or a halted
+underlying.
 
-```
-options_agent/tests/test_paper_smoke.py::test_paper_smoke_run_entry_cycle PASSED
-```
+## 5. Verify the JournalRecord
 
-Pytest internally verifies:
-- AC #1: `run_entry_cycle()` completed without exception
-- AC #2: limit order appears in the Alpaca paper account
-- AC #3: `reconcile()` detects a terminal state — OPEN (fill) or CANCELLED (cancel
-  fallback). Alpaca paper does not reliably simulate multi-leg fills; if no fill is
-  detected within 300 s the test cancels the order and asserts reconcile sees CANCELLED.
-- AC #4: `JournalRecord` contains the broker order ID
-- AC #5: `JournalRecord` round-trips losslessly from the DB
-
----
-
-## 4. Verify: Alpaca paper order dashboard
-
-1. Log in at [app.alpaca.markets](https://app.alpaca.markets) and select **Paper Trading**.
-2. Navigate to **Orders**.
-3. Look for a multi-leg options order on one of the universe symbols (SPY, QQQ, IWM,
-   AAPL, or MSFT). The specific strategy and strikes are determined by the LLM at
-   runtime; check `result.proposal.underlying` and `result.proposal.legs` from the
-   Python snippet in Section 5 to match the order on the dashboard.
-
-**Success indicator:** the order status is `filled` (or `partially_filled`
-during the 90 s polling window). A `new` / `accepted` status means the fill
-hasn't been detected yet — the smoke test polls until it transitions.
-
-**Failure indicator:** status `rejected`. This means the broker refused the
-order (insufficient buying power, options level too low, or the spread was
-rejected because the underlying was halted). The smoke test will fail with a
-message explaining the broker status.
-
----
-
-## 5. Verify: JournalRecord in the DB
-
-The smoke test uses an in-memory SQLite database (isolated from
-`options_agent.db`). To inspect the record after the fact, run a short Python
-snippet that calls `run_entry_cycle()` against a file-based DB:
-
-```python
-import logging
-import sqlalchemy as sa
-from sqlalchemy.pool import StaticPool
-
-from options_agent.config import Config
-from options_agent.orchestrator import run_entry_cycle
-from options_agent.state.db import get_connection, metadata
-from options_agent.state.journal import read_journal_record
-from options_agent.contracts.state import ActionTaken
-
-logging.basicConfig(level=logging.INFO)
-
-# File-based DB so the record persists after the script exits.
-config = Config(alpaca_paper=True, slice_limit_price=-0.01)
-engine = sa.create_engine("sqlite:///slice_verify.db")
-metadata.create_all(engine)
-
-result = run_entry_cycle(config, engine=engine)
-print(f"action_taken : {result.action_taken}")
-print(f"cycle_id     : {result.journal_record_id}")
-
-with get_connection(engine) as conn:
-    jr = read_journal_record(conn, result.journal_record_id)
-
-print(f"order_ids    : {jr.order_ids}")
-print(f"position_ids : {jr.position_ids}")
-print(f"strategy     : {jr.strategy}")
-print(f"underlying   : {jr.underlying}")
-```
-
-Or query the DB directly via the `sqlite3` CLI:
+The smoke test uses an in-memory DB. To keep a record around, run
+`run_entry_cycle()` against a file-based engine (see the offline-testing
+section of [orchestrator.md](features/orchestrator.md) for the pattern), then:
 
 ```bash
 sqlite3 slice_verify.db \
   "SELECT cycle_id, action_taken, strategy, underlying, order_ids
-   FROM journal_records
-   ORDER BY timestamp DESC LIMIT 5;"
+   FROM journal_records ORDER BY timestamp DESC LIMIT 5;"
 ```
 
-**Success indicators:**
-- `action_taken = OPENED` — the order was submitted and the journal was written.
-- `order_ids` is a JSON list containing one ID (the local order UUID).
-- `strategy = bull_put_spread`, `underlying = SPY`.
+`action_taken = OPENED` with a populated `order_ids` list is success. Other
+outcomes: `REJECTED` (check `rejection_rule_ids` against `config.toml` limits),
+`SIZED_TO_ZERO` (conviction/equity capped the size), `EXECUTION_FAILED` (broker
+rejected post-sizing; the journal record is still written).
 
-**Other outcomes:**
+## 6. Checkpoint summary
 
-| `action_taken` | Meaning |
-|---|---|
-| `REJECTED` | Structural validation failed (`rejection_rule_ids` shows which rule). Proposal is hardcoded — this is unexpected and indicates a config or contract mismatch. |
-| `SIZED_TO_ZERO` | Sizing capped contracts to 0 (conviction below floor or equity too low). |
-| `EXECUTION_FAILED` | Broker rejected the order post-sizing. `JournalRecord` is still written; check Alpaca paper order status. |
-
----
-
-## 6. Step-by-step checkpoint summary
-
-| Step | What to check | Success looks like | Failure looks like |
-|---|---|---|---|
-| Credentials | `BrokerClient(config)` constructs without error | No exception | `OSError: Missing required environment variable(s): ALPACA_API_KEY` |
-| reason (LLM) | `agent/reasoner.py` returns a `TradeProposal` | Log: `reason() returned proposal strategy=...` | `ReasonerError` — check `ANTHROPIC_API_KEY` and model availability |
-| validate_structural | `ValidationResult.passed == True` | Log: `validation passed` | Log: `REJECTED [rule_ids]` — check `config.toml` limits |
-| size | `SizingResult.contracts > 0` | Log: `sized to N contracts` | `capped_to_zero=True` — insufficient equity or conviction below `conviction_floor` |
-| submit_multi_leg | Order appears in Alpaca paper | Log: `order submitted broker_id=...` | Log: `EXECUTION_FAILED` — check Alpaca options level and buying power |
-| reconcile | Position transitions `PENDING_OPEN → OPEN` | Log fill detected within 90 s | Position stays `PENDING_OPEN` — paper fill may be slow; re-run reconcile manually |
-| write_journal_record | Row in `journal_records` table | `action_taken = OPENED` | DB write error — check `db_url` and file permissions |
-
----
-
-## 7. Maintenance note: bump the stub expiry
-
-`stub_reasoner.py` is no longer called in the live `run_entry_cycle()` pipeline —
-`agent/reasoner.py` (the real LLM reasoner) is used instead. However,
-`stub_reasoner()` is used as a mock return value in `test_orchestrator.py` and
-`test_killswitch.py` to avoid Anthropic API calls in the unit test suite. When
-`_STUB_EXPIRY` is within 30 days, `stub_reasoner()` raises `RuntimeError` and
-those tests fail.
-
-When the guard fires:
-
-1. Open `options_agent/agent/stub_reasoner.py`.
-2. Update `_STUB_EXPIRY` to a real quarterly options expiration date (third
-   Friday of March, June, September, or December) at least 45 days out.
-3. The new expiry must be at least `_STUB_EXPIRY_GUARD_DTE` (30) days out — the
-   `min_dte`/`max_dte` chain filter in `config.toml` applies only to live chain
-   fetching (WP-3) and is not checked by the stub path.
+| Step | Success looks like | Failure looks like |
+|---|---|---|
+| Credentials | `BrokerClient(config)` constructs | `OSError: Missing required environment variable(s): ...` |
+| reason (LLM) | Log: `reason() returned proposal strategy=...` | `ReasonerError` — check `ANTHROPIC_API_KEY` / model availability |
+| validate | Log: `validation passed` | Log: `REJECTED [rule_ids]` — check `config.toml` limits |
+| size | Log: `sized to N contracts` | `capped_to_zero=True` — equity or conviction floor |
+| submit | Log: `order submitted broker_id=...` | `EXECUTION_FAILED` — check options level / buying power |
+| reconcile | Fill detected; position `PENDING_OPEN → OPEN` | Stays `PENDING_OPEN` — paper fills can be slow; re-run reconcile |
+| journal | `action_taken = OPENED` row | DB write error — check `db_url` / migrations |

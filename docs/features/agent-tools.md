@@ -1,10 +1,10 @@
 # Agent Tool Definitions & Mock Harness
 
-**Module:** `options_agent/agent/`  
-**Credentials required:** none (mock harness); WP-3 data credentials (real implementations)  
-**Status:** complete (WP-6.1) — schemas and mock harness ready for WP-6.4 prompt engineering
+**Module:** `options_agent/agent/`
+**Credentials required:** none (mock harness); data credentials (real implementations)
+**Status:** complete
 
-Defines the six read-only Anthropic SDK tool schemas the agent uses at each reasoning cycle, and provides a deterministic mock harness so WP-6.4 (`reasoner.py`) can be developed and tested without live data.
+Defines the six read-only Anthropic SDK tool schemas the agent uses each reasoning cycle, plus a deterministic mock harness so the reasoner can be developed and tested without live data.
 
 ## Files
 
@@ -12,11 +12,11 @@ Defines the six read-only Anthropic SDK tool schemas the agent uses at each reas
 |---|---|
 | `agent/tools.py` | Tool name constants, `AGENT_TOOLS` list, `PositionHistory` model, `JOURNAL_MAX_RECORDS` |
 | `agent/tools_mock.py` | Mock implementations for all 6 tools; `MOCK_TOOL_IMPLS` map |
-| `tests/test_tools.py` | 42 tests: schema structure, mock type-correctness, P&L arithmetic, end-to-end dispatch |
+| `agent/eval_scenarios.py` | `EvalScenario` fixtures for the prompt eval harness |
 
 ## Tool surface (read-only invariant)
 
-All 6 tools are read-only. No tool in `AGENT_TOOLS` can place, modify, or cancel an order. This is enforced by an inspection test in `test_tools.py`.
+All 6 tools are read-only — no tool can place, modify, or cancel an order (enforced by an inspection test).
 
 | Tool name | Args | Returns |
 |---|---|---|
@@ -24,142 +24,38 @@ All 6 tools are read-only. No tool in `AGENT_TOOLS` can place, modify, or cancel
 | `get_universe_snapshot` | _(none)_ | `UniverseSnapshot` |
 | `get_filtered_chain` | `symbol`, `strategy_hint?` | `FilteredChain` |
 | `get_events` | `symbols: list[str]` | `dict[str, EventInfo]` |
-| `get_journal_by_symbol` | `symbol` | `list[JournalRecord]` |
+| `get_journal_by_symbol` | `symbol` | `list[JournalRecord]` (capped at `JOURNAL_MAX_RECORDS = 20` — `state/journal.py` imports and enforces the same constant) |
 | `get_position_history` | `position_id` | `PositionHistory \| None` |
 
-## Imports from tools.py
+`AGENT_TOOLS` is ordered with no-argument, stable tools first so the tool-list prefix is prompt-cache-friendly — don't reorder casually. `PositionHistory` lives in `agent/tools.py` (an agent-tool concern, not a contract); its `opening_record=None` means a system anomaly — do not trade.
 
-```python
-from options_agent.agent.tools import (
-    AGENT_TOOLS,           # list[ToolParam] — pass directly to the Anthropic SDK
-    AGENT_TOOL_NAMES,      # frozenset[str] — use to validate tool call names at dispatch
-    JOURNAL_MAX_RECORDS,   # int = 20 — WP-2 must enforce the same limit
-    PositionHistory,       # Pydantic model returned by get_position_history
-    TOOL_GET_PORTFOLIO_STATE,
-    TOOL_GET_UNIVERSE_SNAPSHOT,
-    TOOL_GET_FILTERED_CHAIN,
-    TOOL_GET_EVENTS,
-    TOOL_GET_JOURNAL_BY_SYMBOL,
-    TOOL_GET_POSITION_HISTORY,
-)
-```
+## Semantic conventions encoded in the schemas
 
-## Tool ordering and prompt caching
+The tool descriptions encode conventions the LLM must apply correctly:
 
-`AGENT_TOOLS` is ordered with no-argument, stable tools first (`get_portfolio_state`, `get_universe_snapshot`) so the tool-list prefix is cache-friendly. Do not reorder without considering the Anthropic prompt cache TTL (5 minutes).
+- **`None` semantics in `get_universe_snapshot`:** `iv_rank: null` = warm-up / insufficient history → treat as **ineligible**, not as low IV. `days_to_earnings: null` = no earnings confirmed within the lookahead — not a guarantee of absence. `days_to_earnings: N` within `event_blackout_days` (default 5) will be rejected by the validator's `EVENT_BLACKOUT` rule.
+- **Dollar-Greek units in `get_portfolio_state`:** `net_dollar_delta` = USD per $1 underlying move; `net_dollar_gamma` = delta change per $1 move; `net_dollar_theta` = USD decay per calendar day; `net_dollar_vega` = USD per 1 vol-point.
+- **Delta signs in `get_filtered_chain`:** calls positive, puts negative; use `abs(delta)` for moneyness comparisons. `strategy_hint` narrows the chain to the relevant right(s) (puts-only, calls-only, or both for condors/butterflies).
 
-## Description conventions encoded in the schemas
+## Mock harness
 
-The tool descriptions encode WP-0 conventions the LLM must apply correctly. Key items:
+`MOCK_TOOL_IMPLS` (`dict[str, Callable]`) is importable from non-test code so the reasoner can run end-to-end, but it must never reach production — `reasoner.py` receives tool implementations by dependency injection with no default fallback to mocks.
 
-**`None` semantics in `get_universe_snapshot`:**
-- `iv_rank: null` / `iv_percentile: null` — warm-up period; insufficient IV history. Treat as **ineligible**, not as low IV or zero IV.
-- `days_to_earnings: null` — no earnings confirmed within the lookahead window. **Not** a guarantee of absence.
-- `days_to_earnings: N` — earnings confirmed N calendar days out. The validator's `EVENT_BLACKOUT` rule rejects OPEN proposals when `N < event_blackout_days` (default 5).
+The mock universe covers the three data states the real agent encounters — develop and test against all three, not just the happy path:
 
-**Dollar-Greek units in `get_portfolio_state`:**
-- `net_dollar_delta` — USD change per $1 move in the underlying
-- `net_dollar_gamma` — USD change in delta per $1 move in the underlying
-- `net_dollar_theta` — USD time decay per calendar day across all positions
-- `net_dollar_vega` — USD change per 1 vol-point (1 pct-point) move in IV
-
-**Delta sign convention in `get_filtered_chain`:**
-- Call deltas: positive (0 to 1). Put deltas: negative (-1 to 0). Use `abs(delta)` when reasoning about moneyness or comparing to the configured delta range.
-
-**`strategy_hint` in `get_filtered_chain`:**
-- Puts only: `bull_put_spread`, `bear_put_spread`, `cash_secured_put`
-- Calls only: `bear_call_spread`, `bull_call_spread`, `covered_call`
-- Both rights: `iron_condor`, `iron_butterfly`
-- Omit to receive both rights with the full delta window.
-
-## PositionHistory model
-
-`PositionHistory` is defined in `agent/tools.py` (not in `contracts/`) because it is an agent-tool concern.
-
-```python
-class PositionHistory(BaseModel):
-    opening_record: JournalRecord | None   # None = system anomaly; do not trade
-    outcome_records: list[OutcomeRecord]   # empty while position is still open
-```
-
-## Using the mock harness
-
-The mock harness is in `agent/tools_mock.py`. It is importable from non-test code so WP-6.4 can run `reasoner.py` end-to-end, but **it must never reach a production code path**. `reasoner.py` receives tool implementations by dependency injection — there is no default fallback to mocks.
-
-```python
-from options_agent.agent.tools_mock import MOCK_TOOL_IMPLS
-
-# MOCK_TOOL_IMPLS is: dict[str, Callable[[dict[str, Any]], Any]]
-# Pass it to the reasoner harness by DI:
-result = reason(context, tool_impls=MOCK_TOOL_IMPLS)
-
-# Dispatching a single call manually:
-impl = MOCK_TOOL_IMPLS["get_universe_snapshot"]
-snapshot = impl({})
-```
-
-### Mock universe — three representative data states
-
-The mock universe covers the three distinct states the real agent will encounter:
-
-| Symbol | State | Key signals |
-|---|---|---|
-| `SPY` | Clean, tradeable | `iv_rank=62.0`, `days_to_earnings=None`, no events |
-| `AAPL` | Earnings approaching | `days_to_earnings=5` — within the default blackout window; validator will `EVENT_BLACKOUT` any OPEN proposal |
-| `NVDA` | Warm-up period | `iv_rank=None`, `iv_percentile=None` — insufficient IV history; agent must treat as ineligible |
-
-WP-6.4 must develop and test against all three states, not only the SPY happy-path scenario.
-
-### Mock position (SPY bull put spread at 50% profit target)
-
-The mock portfolio holds one open position:
-
-```
-Strategy:      bull_put_spread on SPY
-Legs:          sell 530P / buy 525P, 2 contracts, expiry 2026-07-18 (~34 DTE)
-Entry credit:  $2.70 (= (2.45 - 1.10) × 2 contracts)
-Current mark:  $1.35 (halfway to worthless)
-Unrealized:    $135.0 (= (2.70 - 1.35) × 100)
-Est max loss:  $500.0 | Est max profit: $270.0
-```
-
-This places the position exactly at the 50% profit target, which is the default `profit_target_pct` in `ExitPlan`. It is a deliberate WP-6.4 test state: the agent should consider rolling or closing.
-
-### Mock journal
-
-`get_journal_by_symbol("SPY")` returns one `JournalRecord` (`action_taken=OPENED`, `cycle_id="cycle-20260607-001"`). AAPL and NVDA return empty lists. Unknown symbols also return empty lists.
-
-`get_position_history("pos-001")` returns the `PositionHistory` for the open SPY position with `outcome_records=[]` (no exit events yet). Unknown position IDs return `None`.
+| Symbol | State |
+|---|---|
+| `SPY` | Clean, tradeable (`iv_rank=62.0`, no events) — plus one open bull-put-spread position sitting exactly at its 50% profit target, a deliberate portfolio-awareness test state |
+| `AAPL` | Earnings in 5 days — inside the default blackout window; validator will reject any OPEN |
+| `NVDA` | Warm-up (`iv_rank=None`) — must be treated as ineligible |
 
 ## Prompt eval harness
 
-`options_agent/agent/eval_scenarios.py` packages the mock tool impls into `EvalScenario` objects — each scenario is a named context the agent reasons against, with **invariants** (must pass 100% of runs) and **preferences** (rate-based thresholds calibrated to baseline). Five scenarios ship with WP-6.5:
-
-| ID | Scenario |
-|---|---|
-| `A_high_iv_neutral` | SPY/AAPL/NVDA, SPY high-IV; AAPL in earnings blackout; NVDA iv_rank=None |
-| `B_low_iv_bullish` | QQQ-only, low-IV bullish regime — debit structures expected |
-| `C_earnings_blackout` | AAPL-only, confirmed earnings in 5 days — NO_ACTION expected |
-| `D_no_iv_history` | NVDA-only, iv_rank=None — NO_ACTION mandatory |
-| `E_portfolio_aware` | SPY-only, existing position at 50% profit — portfolio awareness tested |
-
-Run all five scenarios (requires `ANTHROPIC_API_KEY`; ~$1.50–2.50 per full suite at Sonnet 4.6 list pricing):
+`eval_scenarios.py` packages the mocks into named `EvalScenario`s, each with **invariants** (must pass 100% of runs) and **preferences** (rate-based thresholds): high-IV neutral, low-IV bullish, earnings blackout (NO_ACTION expected), no IV history (NO_ACTION mandatory), and portfolio-aware. Requires `ANTHROPIC_API_KEY`; costs real API money per suite, so run deliberately — not on every push:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-uv run pytest tests/evals/ -m eval -v -s --log-cli-level=INFO
+uv run pytest tests/evals/ -m eval --tb=line          # full suite
+uv run pytest tests/evals/ -m eval -k A_high_iv_neutral --tb=line
 ```
 
-Single scenario:
-
-```bash
-uv run pytest tests/evals/ -m eval -k A_high_iv_neutral -s --log-cli-level=INFO
-```
-
-`-s --log-cli-level=INFO` shows per-run progress, tool calls, token counts, and preference pass-rate summaries inline. Run deliberately — not on every push.
-
-## Cross-WP alignment notes
-
-**WP-2 (`state/journal.py`):** `JOURNAL_MAX_RECORDS = 20` is defined in `agent/tools.py` and imported by `tools_mock.py`. WP-2 must import and enforce this same constant in `query_journal` — it must not hard-code 20 or rely on prose documentation.
-
-**WP-3.5 (events data):** The `get_events` schema accepts `symbols: list[str]` (batch). WP-3.5 currently describes a single-symbol `get_events(symbol)` interface. WP-3.5 must either implement a batch interface directly, or the dispatch layer in `reasoner.py` must fan out individual calls and reassemble the `dict[str, EventInfo]` result.
+(`--tb=line` keeps fixture values — which can embed context — out of failure tracebacks; see CLAUDE.md's secret-safety notes.)

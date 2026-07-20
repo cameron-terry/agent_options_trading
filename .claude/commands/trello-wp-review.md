@@ -116,6 +116,7 @@ Output a structured review using exactly this template:
 - **Contract alignment** — check Produces / types / schemas against the contracts in options-agent-plan.md; flag mismatches
 - **Edge cases and error paths** — unhandled inputs, missing guards, silent failures
 - **Test coverage** — missing cases, wrong assertions, tests that pass vacuously
+- **Doc hygiene** — if the diff touches `docs/`, check it against `/trello-wp-start`'s Phase 5.5 conventions: high-level only, no WP-number bookkeeping in headers/status lines, no per-decision narratives (those belong in the PR body), no >10-line runnable walkthroughs, no duplication of a concept that already has a home doc, and stale text corrected in place rather than appended to. If the diff changes behaviour a feature doc describes but doesn't update that doc, flag it
 
 ### Design fidelity vs. reference artifact
 <Only for cards touched by Phase 2.6. State whether the comparison was live (Playwright) or static (fallback), then list findings: layout/color/interaction deviations from the reference mock, distinguishing documented (fine) from undocumented (a finding) gaps. If Phase 2.6 was skipped because this isn't a UI card, write "N/A — not a UI card.">

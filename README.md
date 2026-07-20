@@ -96,5 +96,4 @@ uv run pyright
 | Observability & safety | `options_agent/obs/` | Yes (SQLite) — [docs](docs/features/observability.md) |
 | Orchestration & scheduling | `options_agent/orchestrator.py`, `options_agent/scheduler.py` | No (needs Alpaca keys) — [docs](docs/features/orchestrator.md) |
 | Monitor — exit rules | `options_agent/monitor/` | Yes — [docs](docs/features/monitor.md) |
-| Vertical slice | `options_agent/orchestrator.py` | No (needs Alpaca keys) — [docs](docs/features/vertical-slice.md) |
 | Ops console | `options_agent/ui/`, `frontend/` | Yes (SQLite) — [docs](docs/features/ops-console.md) |

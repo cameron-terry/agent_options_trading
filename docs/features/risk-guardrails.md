@@ -1,8 +1,8 @@
 # Risk & Guardrails
 
-**Module:** `options_agent/risk/`  
-**Credentials required:** none  
-**Status:** complete (WP-4)
+**Module:** `options_agent/risk/`
+**Credentials required:** none
+**Status:** complete
 
 The deterministic hard layer that every `TradeProposal` passes through before an order is submitted. No LLM, no live data — inputs are plain Python objects.
 
@@ -10,184 +10,41 @@ The deterministic hard layer that every `TradeProposal` passes through before an
 
 | File | Responsibility |
 |---|---|
-| `limits.py` | `Limits` model — all numeric thresholds, loaded from `config.toml` |
+| `limits.py` | `Limits` model — all numeric thresholds, loaded from `config.toml` (`Config.from_toml(...).limits`, or `Limits()` for defaults) |
 | `gates.py` | Pre-flight checks: market open, blackout windows, buying power, position cap |
 | `validator.py` | Per-proposal validation — structural, market-access, and risk-cap checks |
 | `sizing.py` | Conviction + risk budget → contract count |
 | `structure.py` | Recomputes `est_max_loss`/`est_max_profit`/Greeks from proposal legs + chain quotes, overriding the agent's self-reported values before validation and sizing |
 
-## Loading limits from config
-
-```python
-from pathlib import Path
-from options_agent.config import Config
-
-config = Config.from_toml(Path("config.toml"))
-limits = config.limits       # fully typed Limits object
-```
-
-Or use defaults without a file:
-
-```python
-from options_agent.risk.limits import Limits
-limits = Limits()
-```
-
 ## Validator
 
-Three validation layers are applied in order by the orchestrator. Each returns a `ValidationResult(passed, reasons)`.
+Three validation layers, applied in order by the orchestrator. Each returns a `ValidationResult(passed, reasons)` where `reasons` is a list of structured `RejectionReason`s (`rule_id`, `message`) — every rejection is loggable and journaled.
 
-```python
-from pathlib import Path
-from options_agent.config import Config
-from options_agent.agent.stub_reasoner import stub_reasoner
-from options_agent.risk.validator import (
-    validate_structural,
-    validate_market_access,
-    validate_risk_caps,
-)
+- **`validate_structural(proposal, limits)`** — schema validity, playbook membership, naked-short rejection (unconditional). No market data needed.
+- **`validate_market_access(proposal, portfolio, events, limits)`** — event-proximity blackout, buying-power floor, duplicate/conflict detection.
+- **`validate_risk_caps(proposal, portfolio, limits)`** — max-loss cap, portfolio Greek bands, underlying concentration.
 
-config = Config.from_toml(Path("config.toml"))
-limits = config.limits
-proposal = stub_reasoner()
-
-result = validate_structural(proposal, limits)
-print(result.passed)        # True / False
-print(result.reasons)       # list[RejectionReason] — empty if passed
-
-for r in result.reasons:
-    print(r.rule_id, r.message)
-```
-
-**`validate_structural`** — schema validity, playbook membership, naked-short rejection. No market data needed.
-
-**`validate_market_access`** — event proximity blackout, buying power floor, duplicate/conflict detection. Requires a `PortfolioState` and `list[EventInfo]`.
-
-**`validate_risk_caps`** — max-loss cap, portfolio Greek bands, underlying concentration. Requires a `PortfolioState`.
-
-### Triggering specific rejections
-
-The test suite in [options_agent/tests/test_validator.py](../../options_agent/tests/test_validator.py) has one hand-built fixture per rejection rule. To see all rule IDs and what triggers them, browse the test file — each `test_reject_*` function is a minimal example that trips exactly one rule.
-
-```python
-# The stub proposal is designed to pass structural validation:
-result = validate_structural(proposal, limits)
-print(result.passed)   # True
-
-# To exercise a rejection rule interactively, copy the relevant fixture from
-# test_validator.py and call validate_structural (or validate_risk_caps /
-# validate_market_access) against it.
-```
+To see every rule ID and what trips it, browse `options_agent/tests/test_validator.py` — one hand-built fixture per rejection rule, each `test_reject_*` function a minimal example that trips exactly one rule.
 
 ## Sizing
 
-```python
-from pathlib import Path
-from options_agent.config import Config
-from options_agent.agent.stub_reasoner import stub_reasoner
-from options_agent.risk.sizing import size
-from options_agent.contracts.data import PortfolioState
-
-config = Config.from_toml(Path("config.toml"))
-proposal = stub_reasoner()
-
-portfolio = PortfolioState(
-    positions=[],
-    account_equity=50_000.0,
-    buying_power=25_000.0,
-    options_buying_power=25_000.0,
-    unrealized_pnl=0.0,
-    realized_pnl_today=0.0,
-    approval_level=2,
-    net_dollar_delta=0.0,
-    net_dollar_gamma=0.0,
-    net_dollar_theta=0.0,
-    net_dollar_vega=0.0,
-)
-
-sizing = size(proposal, portfolio, config.limits)
-print(sizing.contracts)           # int — 0 if capped
-print(sizing.capped_to_zero)      # True if conviction or budget forced to zero
-print(sizing.binding_constraint)  # which limit bound the result
-```
+`size(proposal, portfolio, limits) -> SizingResult` maps conviction + risk budget to a contract count. The result carries `contracts` (0 if capped), `capped_to_zero`, and `binding_constraint` (which limit bound the result).
 
 ## Pre-flight gates
 
-Gates are standalone functions — no proposal needed. They're called at the top of `run_entry_cycle()` before any data fetch.
+Standalone functions called at the top of `run_entry_cycle()` before any data fetch, all returning `(bool, reason: str)`:
 
-`market_is_open` and `within_blackout_window` take an `exchange_calendars` calendar object (not `Config` directly). `has_buying_power` and `under_position_cap` take a `PortfolioState`.
-
-```python
-import exchange_calendars as xcals
-from datetime import datetime, UTC
-from pathlib import Path
-from options_agent.config import Config
-from options_agent.contracts.data import PortfolioState
-from options_agent.risk.gates import (
-    market_is_open,
-    within_blackout_window,
-    has_buying_power,
-    under_position_cap,
-)
-
-config = Config.from_toml(Path("config.toml"))
-calendar = xcals.get_calendar(config.exchange_calendar)   # "XNYS" by default
-now = datetime.now(UTC)
-
-is_open, reason = market_is_open(now, calendar)
-print(is_open, reason)
-
-in_blackout, reason = within_blackout_window(
-    now, calendar,
-    config.session_open_blackout_minutes,
-    config.session_close_blackout_minutes,
-)
-print(in_blackout, reason)
-
-portfolio = PortfolioState(
-    positions=[],
-    account_equity=50_000.0,
-    buying_power=25_000.0,
-    options_buying_power=25_000.0,
-    unrealized_pnl=0.0,
-    realized_pnl_today=0.0,
-    approval_level=2,
-    net_dollar_delta=0.0,
-    net_dollar_gamma=0.0,
-    net_dollar_theta=0.0,
-    net_dollar_vega=0.0,
-)
-
-ok, reason = has_buying_power(portfolio, config.limits)
-print(ok, reason)
-
-ok, reason = under_position_cap(portfolio, config.limits)
-print(ok, reason)
-```
-
-All four gate functions return `(bool, str)` — the string is a human-readable reason when the gate fails, empty string when it passes.
+- `market_is_open(now, calendar)` and `within_blackout_window(now, calendar, open_mins, close_mins)` take an `exchange_calendars` calendar (`"XNYS"` by default).
+- `has_buying_power(portfolio, limits)` and `under_position_cap(portfolio, limits)` take a `PortfolioState`.
 
 ## Structure metrics (don't trust LLM arithmetic)
 
-The agent's `TradeProposal` carries self-reported `est_max_loss`, `est_max_profit`, and net Greeks. Nothing about the LLM call guarantees those numbers actually match the legs it proposed — in practice they have arrived as per-position totals or doubled values instead of per-contract figures, corrupting sizing (see the 2026-07-18 journal audit incidents in `options_agent/tests/test_structure.py`'s incident-pattern regression tests).
+The agent's `TradeProposal` carries self-reported `est_max_loss`, `est_max_profit`, and net Greeks. Nothing guarantees those numbers match the legs it proposed — in practice they have arrived as per-position totals or doubled values, corrupting sizing (see the incident-pattern regression tests in `options_agent/tests/test_structure.py`).
 
-Every playbook strategy is a defined-risk, same-expiration structure, so its risk metrics are exactly computable from the legs and current chain quotes via expiration-payoff analysis — the payoff of a piecewise-linear combo attains its extrema at the strike kinks, so evaluating P&L at each strike (plus the tails) gives an exact max loss/profit, correctly handling asymmetric-wing structures (e.g. iron condors) where a naive "single wing width" formula would pick the wrong side.
+Every playbook strategy is a defined-risk, same-expiration structure, so its risk metrics are exactly computable from the legs and chain quotes via expiration-payoff analysis: a piecewise-linear payoff attains its extrema at the strike kinks, so evaluating P&L at each strike (plus the tails) gives exact max loss/profit — correctly handling asymmetric-wing structures where a naive "wing width" formula picks the wrong side.
 
-```python
-from options_agent.risk.structure import compute_structure_metrics, apply_structure_metrics
+The orchestrator calls `compute_structure_metrics` + `apply_structure_metrics` before `size()` and `validate_risk_caps()` on every entry-cycle proposal (including the retry path), so the sizer never consumes raw LLM arithmetic. Rules:
 
-metrics = compute_structure_metrics(proposal.legs, filtered_chain)
-if metrics is not None:
-    updates = apply_structure_metrics(
-        {},
-        metrics,
-        agent_est_max_loss=proposal.est_max_loss,
-        agent_est_max_profit=proposal.est_max_profit,
-        log_context=f"cycle {cycle_id}",
-    )
-    proposal = proposal.model_copy(update=updates)
-```
-
-`compute_structure_metrics` returns `None` if any leg is absent from the chain (the same condition `validate_market_access`'s liquidity check fails closed on). Greeks are always overridden; `est_max_loss`/`est_max_profit` are overridden only when the payoff analysis produces a finite positive bound (mixed-expiration proposals, or structures with genuinely unbounded risk on one side, fall back to the agent's value). `apply_structure_metrics` logs a warning when the agent's self-reported value deviates more than 20% from the computed one — that log line is the only current record of the discrepancy; it is not yet written to the journal as a queryable field.
-
-The orchestrator calls this before `size()` and `validate_risk_caps()` on every entry-cycle proposal (including the retry/feedback path), so the sizer never consumes raw LLM arithmetic for defined-risk structures.
+- Returns `None` (falls through to liquidity-check rejection) if any leg is absent from the chain.
+- Greeks are always overridden; `est_max_loss`/`est_max_profit` only when the payoff analysis yields a finite positive bound — mixed-expiration or genuinely unbounded structures keep the agent's value.
+- A >20% deviation between the agent's number and the computed one logs a warning (not yet journaled as a queryable field).

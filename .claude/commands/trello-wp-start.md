@@ -95,17 +95,19 @@ uv run pytest                # tests
 
 ### Phase 5.5 — Update feature docs
 
-After CI passes, update `docs/features/` to reflect what landed in this WP:
+After CI passes, update `docs/` to reflect what landed. **Docs are high-level by policy** (established by the 2026-07-19 documentation audit, which stripped ~40% of accumulated per-ticket detail — do not reintroduce it). `docs/features/*.md` describe what a sub-system does, its module map, and the design invariants a maintainer must not break. They are not changelogs, PR summaries, or API references.
 
-- **Extending an existing sub-system** (new functions or behaviour added to `data/`, `state/`, `risk/`, etc.): update the matching `docs/features/*.md` — add or revise the relevant section, update the status line and sub-modules table if needed.
-- **New sub-system** (new top-level module or directory with no existing feature doc): create `docs/features/<name>.md` following the style of the other feature docs:
-  - Header block: Module path, credentials required, status (WP number)
-  - Sub-modules table
-  - Usage examples (runnable Python snippets or CLI commands)
-  - Any important invariants or failure modes
-- **New `docs/features/*.md` created**: add a row to the sub-systems table in `README.md`.
+Rules:
 
-Include all doc file changes in the same commit in Phase 6 (or as an immediately following commit on the same branch before the PR is opened).
+- **No WP/card bookkeeping in docs.** No WP numbers in headers, section titles, or status lines (write `Status: complete`, or `in progress (<what remains>)` — never `complete (WP-9.3)`). Ticket attribution lives in Trello and git history.
+- **No per-decision narratives.** "Why X, not Y (decision, date)" paragraphs belong in the PR body's "Decisions resolved" table. Promote a decision into the doc only if it is an invariant future code must preserve — then state the invariant, not the deliberation.
+- **No long runnable walkthroughs.** Don't paste multi-line object-construction examples; point to the canonical test file instead ("see `tests/test_crud.py`"). A snippet over ~10 lines must earn its place.
+- **One home per concept — link, don't duplicate.** Kill-switch states → `runbook_kill_switch.md`; entry pipeline → `features/orchestrator.md`; monitor exit rules → `features/monitor.md`; IV warm-up → `features/data-signals.md`; setup/env vars → `README.md`. Check for an existing home before writing a new section.
+- **Update in place, never append.** If a change makes existing doc text wrong or stale, correcting that text is part of the ticket — no dated addendum sections below stale prose.
+- **New sub-system:** create `docs/features/<name>.md` in the established style (header block: module, credentials, status; sub-modules table; invariants) and add a row to `README.md`'s sub-system table.
+- **WP completed by this ticket:** update the WP's Status line and tick its DoD boxes in `docs/WORKSTREAMS.md` in the same PR.
+
+Include all doc changes in the same commit in Phase 6 (or an immediately following commit on the same branch before the PR is opened).
 
 ### Phase 5.75 — Stand up the console demo (WP-9 only)
 

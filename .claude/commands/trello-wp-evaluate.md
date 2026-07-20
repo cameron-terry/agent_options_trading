@@ -47,6 +47,7 @@ Compare what was actually shipped (PR summaries + card acceptance criteria) agai
 - Scope shrinkage: items in the Produces list or DoD that are missing from any PR
 - Contract drift: the WP's Produces (typed outputs, function signatures, schemas) differ from what WORKSTREAMS.md specifies — even subtly (renamed fields, changed return types, dropped guarantees)
 - Design inversion: the implementation does something the spec explicitly placed out of scope (e.g. WP-6 placing orders, WP-4 fetching data)
+- Doc drift: the WP's Status line or DoD checkboxes in WORKSTREAMS.md disagree with the board/PR state, or the matching `docs/features/*.md` describes behaviour the PRs have since changed. Statuses and feature docs are part of the repo surface — flag stale ones as a recommended action (they must be corrected in-repo, per `/trello-wp-start` Phase 5.5's doc conventions)
 
 **B. Cross-WP concerns**
 Review each PR's "Decisions resolved" table and body for decisions that have downstream consequences. Flag any where:
