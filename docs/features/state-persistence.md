@@ -52,6 +52,10 @@ with get_connection(engine) as conn:
     ...
 ```
 
+## JSON-typed columns
+
+`legs`, `exit_plan`, `equity_legs` (positions), `legs_filled` (orders), and `decision`, `context_snapshot`, `position_ids`, `order_ids`, `rejection_rule_ids`, `data_quality_flags` (journal_records) are declared with SQLAlchemy's `JSON` column type in `db.py`, which already serializes/deserializes on bind/read. Writers (`crud.py`, `journal.py`) must hand these columns a native Python `list`/`dict` — never a pre-`json.dumps`-ed string — or the value gets encoded twice (a JSON string whose contents are another JSON document). Migration `009_fix_double_json_encoded_columns.py` repairs rows written before this invariant was enforced (2026-07-19 fix); it is idempotent, so it's safe to run against an already-clean DB.
+
 ## CRUD — positions and orders
 
 The examples below build a `Position` from the stub proposal and an `Order` from scratch, then exercise the CRUD layer against an in-memory DB.

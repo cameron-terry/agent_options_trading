@@ -20,7 +20,6 @@ Two-phase Order flow (crash-safety invariant):
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -79,7 +78,7 @@ def _pos_to_row(pos: Position) -> dict[str, Any]:
         "id": pos.id,
         "underlying": pos.underlying,
         "strategy": pos.strategy,
-        "legs": json.dumps([leg.model_dump(mode="json") for leg in pos.legs]),
+        "legs": [leg.model_dump(mode="json") for leg in pos.legs],
         "quantity": pos.quantity,
         "entry_net_amount": pos.entry_net_amount,
         "current_mark": pos.current_mark,
@@ -87,9 +86,7 @@ def _pos_to_row(pos: Position) -> dict[str, Any]:
         "unrealized_pnl": pos.unrealized_pnl,
         "realized_pnl": pos.realized_pnl,
         "exit_plan": (
-            json.dumps(pos.exit_plan.model_dump(mode="json"))
-            if pos.exit_plan is not None
-            else None
+            pos.exit_plan.model_dump(mode="json") if pos.exit_plan is not None else None
         ),
         "status": pos.status.value,
         "opened_at": pos.opened_at,
@@ -100,7 +97,7 @@ def _pos_to_row(pos: Position) -> dict[str, Any]:
         "opening_order_id": pos.opening_order_id,
         "asset_class": pos.asset_class.value,
         "equity_legs": (
-            json.dumps([el.model_dump(mode="json") for el in pos.equity_legs])
+            [el.model_dump(mode="json") for el in pos.equity_legs]
             if pos.equity_legs
             else None
         ),
@@ -110,17 +107,13 @@ def _pos_to_row(pos: Position) -> dict[str, Any]:
 
 def _row_to_pos(row: Any) -> Position:
     d = dict(row._mapping)
-    d["legs"] = json.loads(d["legs"]) if isinstance(d["legs"], str) else d["legs"]
-    raw_ep = d.get("exit_plan")
-    d["exit_plan"] = json.loads(raw_ep) if isinstance(raw_ep, str) else raw_ep
     d["marked_at"] = _ensure_utc(d["marked_at"])
     d["opened_at"] = _ensure_utc(d["opened_at"])
     d["closed_at"] = _ensure_utc(d["closed_at"])
     # WP-1.5 fields: default to option_strategy / empty for pre-migration rows
     if not d.get("asset_class"):
         d["asset_class"] = AssetClass.OPTION_STRATEGY.value
-    raw_el = d.get("equity_legs")
-    d["equity_legs"] = json.loads(raw_el) if isinstance(raw_el, str) else (raw_el or [])
+    d["equity_legs"] = d.get("equity_legs") or []
     # assigned_from_position_id may be absent from older rows → None
     d.setdefault("assigned_from_position_id", None)
     return Position.model_validate(d)
@@ -136,9 +129,7 @@ def _order_to_row(order: Order) -> dict[str, Any]:
         "broker_status_raw": order.broker_status_raw,
         "submitted_at": order.submitted_at,
         "filled_at": order.filled_at,
-        "legs_filled": json.dumps(
-            [lf.model_dump(mode="json") for lf in order.legs_filled]
-        ),
+        "legs_filled": [lf.model_dump(mode="json") for lf in order.legs_filled],
         "net_fill_price": order.net_fill_price,
         "filled_qty": order.filled_qty,
         "exit_reason": order.exit_reason.value
@@ -149,11 +140,6 @@ def _order_to_row(order: Order) -> dict[str, Any]:
 
 def _row_to_order(row: Any) -> Order:
     d = dict(row._mapping)
-    d["legs_filled"] = (
-        json.loads(d["legs_filled"])
-        if isinstance(d["legs_filled"], str)
-        else d["legs_filled"]
-    )
     d["submitted_at"] = _ensure_utc(d["submitted_at"])
     d["filled_at"] = _ensure_utc(d["filled_at"])
     return Order.model_validate(d)
@@ -306,9 +292,7 @@ def patch_order(
     if filled_at is not None:
         updates["filled_at"] = filled_at
     if legs_filled is not None:
-        updates["legs_filled"] = json.dumps(
-            [lf.model_dump(mode="json") for lf in legs_filled]
-        )
+        updates["legs_filled"] = [lf.model_dump(mode="json") for lf in legs_filled]
     if net_fill_price is not None:
         updates["net_fill_price"] = net_fill_price
     if filled_qty is not None:
