@@ -848,6 +848,35 @@ def test_duplicate_different_strategy_same_expiration_passes() -> None:
     assert not any(r.rule_id == ValidationRuleId.DUPLICATE_POSITION for r in reasons)
 
 
+def test_duplicate_pending_open_position_rejected() -> None:
+    """PENDING_OPEN counts as active for the duplicate check (validator.py's
+    active_statuses) — a same-underlying, same-strategy proposal must still
+    be rejected while the prior order hasn't confirmed a fill yet.
+    """
+    existing = _make_open_position(
+        status=PositionStatus.PENDING_OPEN, nearest_expiration=_EXP
+    )
+    portfolio = _make_portfolio(positions=[existing])
+    reasons = _run(portfolio=portfolio)
+    dup = [r for r in reasons if r.rule_id == ValidationRuleId.DUPLICATE_POSITION]
+    assert len(dup) == 1
+
+
+def test_duplicate_closed_position_does_not_block() -> None:
+    """Regression: a CLOSED position (e.g. one reconcile() closed out after its
+    opening order was cancelled/rejected with zero fill — see
+    execution/reconcile.py::_apply_cancellation_to_position) must not count
+    as active. Otherwise a position that never actually opened would
+    permanently block every future proposal for that underlying/strategy.
+    """
+    existing = _make_open_position(
+        status=PositionStatus.CLOSED, nearest_expiration=_EXP
+    )
+    portfolio = _make_portfolio(positions=[existing])
+    reasons = _run(portfolio=portfolio)
+    assert not any(r.rule_id == ValidationRuleId.DUPLICATE_POSITION for r in reasons)
+
+
 def test_conflict_opposing_delta_rejected() -> None:
     # Proposal is bull_put_spread (positive delta, net_delta=0.12 > tolerance=0.05).
     # Existing position is bear_call_spread (negative-delta strategy).
