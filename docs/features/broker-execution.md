@@ -159,6 +159,8 @@ print(stat_diff.reconciled_at)           # UTC timestamp of this pass
 
 Reconcile is idempotent — running it twice produces the same DB state.
 
+A `PENDING_OPEN` position whose only order ends `CANCELLED` or `REJECTED` with zero fill is closed out (`status=CLOSED`, `realized_pnl=0.0`) rather than left stranded — `PositionStatus` has no dedicated "failed to open" value, and `risk/validator.py`'s duplicate/conflict check treats `PENDING_OPEN` as an active position, so an unclosed one would silently and permanently affect future proposals for that underlying. An order that partially filled before the remainder was cancelled is left alone — that position has real, unclosed exposure.
+
 ## Fill-time risk correction (WP-1 follow-up)
 
 `Position.est_max_loss`/`est_max_profit` are set at position creation from the pre-trade chain-mid estimate (`risk/structure.py::compute_structure_metrics`, applied by the orchestrator's ENRICH+VALIDATE step). Once the order actually fills, `risk/structure.py::apply_fill_metrics` recomputes both values from the real `net_fill_price` — the same expiration-payoff analysis, just anchored to the confirmed price instead of the pre-trade mid. This runs automatically on both fill paths:

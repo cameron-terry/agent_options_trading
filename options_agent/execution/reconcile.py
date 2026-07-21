@@ -612,11 +612,13 @@ def reconcile(
             and local_order.status != OrderStatus.CANCELLED
         ):
             newly_cancelled.append(updated_order)
+            _apply_cancellation_to_position(conn, updated_order, now)
         elif (
             new_status == OrderStatus.REJECTED
             and local_order.status != OrderStatus.REJECTED
         ):
             newly_rejected.append(updated_order)
+            _apply_cancellation_to_position(conn, updated_order, now)
         elif (
             new_status == OrderStatus.EXPIRED
             and local_order.status != OrderStatus.EXPIRED
@@ -731,6 +733,48 @@ def _apply_fill_to_position(
         )
         update_position(conn, updated)
         closed_positions.append(updated)
+
+
+def _apply_cancellation_to_position(
+    conn: Connection,
+    order: Order,
+    now: datetime,
+) -> None:
+    """Close out a position whose opening order ended CANCELLED/REJECTED with
+    zero fill, instead of leaving it stuck at PENDING_OPEN forever.
+
+    Counterpart to _apply_fill_to_position's FILLED handling — without this,
+    a position whose only order fails to open has no code path that ever
+    moves it out of PENDING_OPEN, so it lingers as a phantom "active"
+    position (risk/validator.py's duplicate/conflict check treats
+    PENDING_OPEN as active) even though nothing was ever actually opened.
+
+    Guarded on order.filled_qty == 0: an order that partially filled before
+    the remainder was cancelled represents real, currently-unclosed exposure
+    and must not be closed out here. PositionStatus has no dedicated
+    "failed to open" value, so CLOSED (realized_pnl=0.0) is the closest
+    terminal fit among {CLOSED, EXPIRED, ASSIGNED}.
+
+    Deliberately not appended to StateDiff.closed_positions: that list feeds
+    _finalize_closed_positions' PENDING_CLOSE -> CLOSED fill-price/OutcomeRecord
+    path (it looks up a role=CLOSE order, which a never-opened position never
+    has), and this transition — PENDING_OPEN -> CLOSED with no fill — is a
+    distinct case that path isn't documented to handle.
+    """
+    if order.role != OrderRole.OPEN or order.filled_qty > 0:
+        return
+    pos = get_position(conn, order.position_id)
+    if pos is None or pos.status != PositionStatus.PENDING_OPEN:
+        return
+    updated = pos.model_copy(
+        update={
+            "status": PositionStatus.CLOSED,
+            "closed_at": now,
+            "realized_pnl": 0.0,
+            "unrealized_pnl": 0.0,
+        }
+    )
+    update_position(conn, updated)
 
 
 # ---------------------------------------------------------------------------
