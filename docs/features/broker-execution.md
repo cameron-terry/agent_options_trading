@@ -157,9 +157,7 @@ print(stat_diff.anomalies)               # list[ReconcileAnomaly] — needs huma
 print(stat_diff.reconciled_at)           # UTC timestamp of this pass
 ```
 
-Reconcile is idempotent — running it twice produces the same DB state.
-
-A `PENDING_OPEN` position whose only order ends `CANCELLED` or `REJECTED` with zero fill is closed out (`status=CLOSED`, `realized_pnl=0.0`) rather than left stranded — `PositionStatus` has no dedicated "failed to open" value, and `risk/validator.py`'s duplicate/conflict check treats `PENDING_OPEN` as an active position, so an unclosed one would silently and permanently affect future proposals for that underlying. An order that partially filled before the remainder was cancelled is left alone — that position has real, unclosed exposure.
+Reconcile is idempotent — running it twice produces the same DB state. A `PENDING_OPEN` position whose opening order ends CANCELLED/REJECTED with zero fill is closed rather than left stranded, since `risk/validator.py`'s duplicate/conflict check treats `PENDING_OPEN` as active; a partial fill followed by cancellation of the remainder is left alone.
 
 ## Fill-time risk correction (WP-1 follow-up)
 
