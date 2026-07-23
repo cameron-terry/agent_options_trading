@@ -1,6 +1,7 @@
 # AI-Driven Options Trading Agent — Architecture & Plan
 
-> **Status:** Planning / pre-build design doc
+> **Status:** Historical design reference — the pre-build plan, kept as the record of intent.
+> For current behaviour see `docs/features/`; for types see `options_agent/contracts/` (authoritative).
 > **Last updated:** 2026-06-06
 > **Broker target:** Alpaca (paper first)
 > **Agent structure:** Single-agent, designed to extend to multi-agent
@@ -164,6 +165,8 @@ Much simpler, runs far more often: for each open position, check stop / profit-t
 ## 6. The seam: structured proposal
 
 This object makes guardrails machine-checkable, the journal queryable, and the future challenger a clean bolt-on (it critiques *this*, nothing else changes).
+
+> **Note:** the snippet below is the original pre-freeze sketch. Fields have since evolved (e.g. `stop_loss_mult` → `stop_loss_max_loss_fraction`) — `contracts/proposal.py` is authoritative, with post-freeze changes tracked in `WORKSTREAMS.md`'s amendment tables.
 
 ```python
 class Leg(BaseModel):
