@@ -33,6 +33,7 @@ from options_agent.state.crud import (
     insert_order,
     insert_position,
     list_fill_events_for_order,
+    list_open_positions,
 )
 from options_agent.state.db import get_connection
 
@@ -597,6 +598,65 @@ def test_cancellation_detected(engine, monkeypatch: pytest.MonkeyPatch) -> None:
     assert fetched.status == OrderStatus.CANCELLED
 
 
+def test_cancellation_closes_pending_open_position(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a PENDING_OPEN position whose only order is CANCELLED with
+    zero fill must not be left stranded — reconcile() must close it out so it
+    stops counting as an "active" position (e.g. risk/validator.py's
+    duplicate/conflict check treats PENDING_OPEN as active).
+    """
+    broker = _broker(monkeypatch)
+    _seed(engine, _pos(status=PositionStatus.PENDING_OPEN), _order())
+
+    cancelled_alpaca = _alpaca_order(
+        status="canceled", filled_qty=0, filled_avg_price=None, filled_at=None
+    )
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=cancelled_alpaca)
+
+    with get_connection(engine) as conn:
+        reconcile(broker, conn, _clock=_NOW)
+
+    with get_connection(engine) as conn:
+        pos = get_position(conn, "pos-001")
+        open_positions = list_open_positions(conn)
+
+    assert pos is not None
+    assert pos.status == PositionStatus.CLOSED
+    assert pos.closed_at is not None
+    assert pos.realized_pnl == 0.0
+    assert pos.id not in [p.id for p in open_positions]
+
+
+def test_cancellation_after_partial_fill_leaves_position_alone(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial fill followed by cancellation of the remainder represents
+    real, unclosed exposure — the position must NOT be closed out as if
+    nothing filled.
+    """
+    broker = _broker(monkeypatch)
+    _seed(engine, _pos(status=PositionStatus.PENDING_OPEN), _order())
+
+    cancelled_alpaca = _alpaca_order(
+        status="canceled", filled_qty=2, filled_avg_price=1.25, filled_at=_NOW
+    )
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=cancelled_alpaca)
+
+    with get_connection(engine) as conn:
+        diff = reconcile(broker, conn, _clock=_NOW)
+
+    assert len(diff.newly_cancelled) == 1
+    assert diff.newly_cancelled[0].filled_qty == 2
+
+    with get_connection(engine) as conn:
+        pos = get_position(conn, "pos-001")
+    assert pos is not None
+    assert pos.status == PositionStatus.PENDING_OPEN
+
+
 # ---------------------------------------------------------------------------
 # Rejection
 # ---------------------------------------------------------------------------
@@ -617,6 +677,54 @@ def test_rejection_detected(engine, monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert len(diff.newly_rejected) == 1
     assert diff.newly_rejected[0].status == OrderStatus.REJECTED
+
+
+def test_rejection_closes_pending_open_position(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broker = _broker(monkeypatch)
+    _seed(engine, _pos(status=PositionStatus.PENDING_OPEN), _order())
+
+    rejected_alpaca = _alpaca_order(
+        status="rejected", filled_qty=0, filled_avg_price=None, filled_at=None
+    )
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=rejected_alpaca)
+
+    with get_connection(engine) as conn:
+        reconcile(broker, conn, _clock=_NOW)
+
+    with get_connection(engine) as conn:
+        pos = get_position(conn, "pos-001")
+    assert pos is not None
+    assert pos.status == PositionStatus.CLOSED
+
+
+def test_cancellation_of_close_role_order_does_not_touch_position(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled CLOSE-role order (e.g. a failed exit attempt) must not
+    trigger the PENDING_OPEN cleanup path — that guard is role==OPEN only.
+    The position (still OPEN, mid-exit-attempt) must be left untouched.
+    """
+    broker = _broker(monkeypatch)
+    pos = _pos(status=PositionStatus.PENDING_CLOSE)
+    ord_ = _order(role=OrderRole.CLOSE)
+    _seed(engine, pos, ord_)
+
+    cancelled_alpaca = _alpaca_order(
+        status="canceled", filled_qty=0, filled_avg_price=None, filled_at=None
+    )
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=cancelled_alpaca)
+
+    with get_connection(engine) as conn:
+        reconcile(broker, conn, _clock=_NOW)
+
+    with get_connection(engine) as conn:
+        pos_after = get_position(conn, "pos-001")
+    assert pos_after is not None
+    assert pos_after.status == PositionStatus.PENDING_CLOSE
 
 
 # ---------------------------------------------------------------------------
