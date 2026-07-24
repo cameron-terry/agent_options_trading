@@ -624,6 +624,7 @@ def reconcile(
             and local_order.status != OrderStatus.EXPIRED
         ):
             newly_expired.append(updated_order)
+            _apply_cancellation_to_position(conn, updated_order, now)
 
     # ------------------------------------------------------------------
     # Orphans: broker open orders with no matching local record.
