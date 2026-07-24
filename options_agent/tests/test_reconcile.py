@@ -728,6 +728,93 @@ def test_cancellation_of_close_role_order_does_not_touch_position(
 
 
 # ---------------------------------------------------------------------------
+# Expiry
+# ---------------------------------------------------------------------------
+
+
+def test_expiry_detected(engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    broker = _broker(monkeypatch)
+    _seed(engine, _pos(), _order())
+
+    expired_alpaca = _alpaca_order(
+        status="expired", filled_qty=0, filled_avg_price=None, filled_at=None
+    )
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=expired_alpaca)
+
+    with get_connection(engine) as conn:
+        diff = reconcile(broker, conn)
+
+    assert len(diff.newly_expired) == 1
+    assert diff.newly_expired[0].status == OrderStatus.EXPIRED
+    assert len(diff.newly_filled) == 0
+
+    with get_connection(engine) as conn:
+        fetched = get_order(conn, "ord-001")
+    assert fetched is not None
+    assert fetched.status == OrderStatus.EXPIRED
+
+
+def test_expiry_closes_pending_open_position(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a PENDING_OPEN position whose only order expires worthless
+    with zero fill must not be left stranded — reconcile() must close it out
+    so it stops counting as an "active" position (risk/validator.py's
+    duplicate/conflict check treats PENDING_OPEN as active).
+    """
+    broker = _broker(monkeypatch)
+    _seed(engine, _pos(status=PositionStatus.PENDING_OPEN), _order())
+
+    expired_alpaca = _alpaca_order(
+        status="expired", filled_qty=0, filled_avg_price=None, filled_at=None
+    )
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=expired_alpaca)
+
+    with get_connection(engine) as conn:
+        reconcile(broker, conn, _clock=_NOW)
+
+    with get_connection(engine) as conn:
+        pos = get_position(conn, "pos-001")
+        open_positions = list_open_positions(conn)
+
+    assert pos is not None
+    assert pos.status == PositionStatus.CLOSED
+    assert pos.closed_at is not None
+    assert pos.realized_pnl == 0.0
+    assert pos.id not in [p.id for p in open_positions]
+
+
+def test_expiry_after_partial_fill_leaves_position_alone(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial fill followed by expiration of the remainder represents
+    real, unclosed exposure — the position must NOT be closed out as if
+    nothing filled.
+    """
+    broker = _broker(monkeypatch)
+    _seed(engine, _pos(status=PositionStatus.PENDING_OPEN), _order())
+
+    expired_alpaca = _alpaca_order(
+        status="expired", filled_qty=2, filled_avg_price=1.25, filled_at=_NOW
+    )
+    broker.list_open_orders = MagicMock(return_value=[])
+    broker.get_broker_order = MagicMock(return_value=expired_alpaca)
+
+    with get_connection(engine) as conn:
+        diff = reconcile(broker, conn, _clock=_NOW)
+
+    assert len(diff.newly_expired) == 1
+    assert diff.newly_expired[0].filled_qty == 2
+
+    with get_connection(engine) as conn:
+        pos = get_position(conn, "pos-001")
+    assert pos is not None
+    assert pos.status == PositionStatus.PENDING_OPEN
+
+
+# ---------------------------------------------------------------------------
 # Orphans: open at broker, no local record
 # ---------------------------------------------------------------------------
 
