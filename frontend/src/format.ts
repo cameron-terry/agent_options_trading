@@ -6,6 +6,17 @@ export function formatCurrency(value: number): string {
   })}`
 }
 
+/** Per-contract option price in points (e.g. entry_net_amount, current_mark) —
+ * distinct from formatCurrency's whole-position dollar totals, since these
+ * are sub-$5 values where the cents carry the signal. */
+export function formatPrice(value: number): string {
+  const sign = value < 0 ? '-' : ''
+  return `${sign}$${Math.abs(value).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`
+}
+
 export function formatSignedCurrency(value: number): string {
   const sign = value >= 0 ? '+' : ''
   return `${sign}${formatCurrency(value)}`
