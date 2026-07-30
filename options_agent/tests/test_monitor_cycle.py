@@ -458,6 +458,64 @@ def test_outcome_record_written_on_fill_confirmation(
     assert row.realized_pnl == pytest.approx(27395.0)
 
 
+def test_outcome_record_written_on_synchronous_fill(
+    engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OutcomeRecord is written the same cycle when the closing order fills
+    synchronously inside broker.submit()'s poll window.
+
+    Regression test: a synchronous fill sets pos.status straight to CLOSED
+    without ever passing through PENDING_CLOSE, so state_diff.closed_positions
+    (built from reconcile's PENDING_CLOSE -> CLOSED detection) never includes
+    it. Before the fix, this position's OutcomeRecord was never written by any
+    future cycle either, since the closing order is inserted already FILLED
+    and reconcile only revisits pending orders.
+    """
+    config = Config()
+    broker = _make_broker(monkeypatch, config)
+    _wire_broker_noop(broker)
+
+    # est_max_profit=275, pct=0.50 → threshold=137.50; pnl=150 triggers.
+    pos = _make_position(unrealized_pnl=150.0)
+    close_order = _make_close_order(pos.id, ExitReason.PROFIT_TARGET).model_copy(
+        update={
+            "status": OrderStatus.FILLED,
+            "filled_at": _MARKET_OPEN_NOW,
+            "net_fill_price": 1.05,
+            "filled_qty": pos.quantity,
+        }
+    )
+    _wire_submit_close(broker, close_order)
+
+    with get_connection(engine) as conn:
+        insert_position(conn, pos)
+
+    run_monitor_cycle(config, broker=broker, engine=engine, _now=_MARKET_OPEN_NOW)
+
+    with get_connection(engine) as conn:
+        db_pos = get_position(conn, pos.id)
+        from options_agent.state.db import outcome_records_table
+
+        row = conn.execute(
+            outcome_records_table.select().where(
+                outcome_records_table.c.position_id == pos.id
+            )
+        ).first()
+
+    assert db_pos is not None
+    assert db_pos.status == PositionStatus.CLOSED
+
+    assert row is not None, (
+        "OutcomeRecord must be written the same cycle for a synchronous fill"
+    )
+    assert row.exit_reason == ExitReason.PROFIT_TARGET.value
+    assert row.event_type == OutcomeEventType.FULL_CLOSE.value
+    assert row.fill_price == pytest.approx(1.05)
+    # realized_pnl = (-entry_net_amount - fill_price) * qty * 100
+    # = (-(-275.0) - 1.05) * 1 * 100 = 27395.0
+    assert row.realized_pnl == pytest.approx(27395.0)
+
+
 # ---------------------------------------------------------------------------
 # WP-8.3 — alert dispatch
 # ---------------------------------------------------------------------------

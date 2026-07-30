@@ -1535,6 +1535,7 @@ def run_monitor_cycle(
     exits_triggered: list[str] = []
     orders_submitted: list[str] = []
     errors: list[CycleError] = []
+    _sync_filled: list[Position] = []
 
     for pos in open_positions:
         try:
@@ -1551,6 +1552,15 @@ def run_monitor_cycle(
                 if order is not None:
                     exits_triggered.append(pos.id)
                     orders_submitted.append(order.id)
+                    if order.status == OrderStatus.FILLED:
+                        # Closed synchronously inside broker.submit()'s poll
+                        # window — reconcile() never sees a PENDING_CLOSE
+                        # for this position (it went straight to CLOSED), so
+                        # state_diff.closed_positions won't include it. Only
+                        # status/closed_at changed on pos; feed the
+                        # pre-trigger pos through to step 6 so its
+                        # OutcomeRecord still gets written.
+                        _sync_filled.append(pos)
                     # EXIT_SUBMITTED fires at close-order-submit time. The order
                     # may still be WORKING; FILL fires later (step 6) once the
                     # fill is confirmed and realized_pnl is known.
@@ -1598,13 +1608,17 @@ def run_monitor_cycle(
 
     # ── Step 6: FINALIZE — write OutcomeRecords for fills detected this cycle ─
     # These are positions whose closing orders filled during step 3's reconcile,
-    # plus any closed by a fill-race during the step-3b reprice pass. We write
-    # the OutcomeRecord NOW (not at trigger time) so realized_pnl uses the
-    # actual fill price, not a placeholder. The exit_reason is carried on the
-    # closing Order written at trigger time. FILL alert fires here — at the
-    # moment the position is confirmed CLOSED with known realized_pnl.
+    # plus any closed by a fill-race during the step-3b reprice pass, plus any
+    # closed synchronously during step 5's exit evaluation. We write the
+    # OutcomeRecord NOW (not at trigger time) so realized_pnl uses the actual
+    # fill price, not a placeholder. The exit_reason is carried on the closing
+    # Order written at trigger time. FILL alert fires here — at the moment the
+    # position is confirmed CLOSED with known realized_pnl.
     _finalize_closed_positions(
-        engine, now, [*state_diff.closed_positions, *_race_filled], dispatcher
+        engine,
+        now,
+        [*state_diff.closed_positions, *_race_filled, *_sync_filled],
+        dispatcher,
     )
 
     return MonitorResult(
