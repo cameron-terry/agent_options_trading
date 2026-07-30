@@ -10,8 +10,8 @@ function position(overrides: Partial<PositionSummary> = {}): PositionSummary {
     strategy: 'iron_condor',
     strikes: '520/525/580/585',
     quantity: 2,
-    entry_net_amount: -180,
-    current_mark: -140,
+    entry_net_amount: -2.1,
+    current_mark: -1.45,
     marked_at: '2026-07-12T14:00:00Z',
     unrealized_pnl: 80,
     dte: 21,
@@ -32,12 +32,15 @@ describe('PositionsTable', () => {
     expect(screen.getByText('no open positions')).toBeInTheDocument()
   })
 
-  it('renders entry credit and mark as absolute currency values', () => {
+  it('renders entry credit and mark as absolute per-contract prices with cents', () => {
     render(<PositionsTable positions={[position()]} />)
     const row = screen.getByRole('row', { name: /SPY/ })
-    // entry_net_amount -180 and current_mark -140 shown as magnitudes.
-    expect(within(row).getByText('$180')).toBeInTheDocument()
-    expect(within(row).getByText('$140')).toBeInTheDocument()
+    // entry_net_amount -2.10 and current_mark -1.45 shown as magnitudes;
+    // these are per-contract point values, not whole-dollar totals, so cents
+    // must survive (a whole-dollar rounding would collapse -0.18/-0.15 to
+    // the same "$0" — see format.test.ts's formatPrice cases).
+    expect(within(row).getByText('$2.10')).toBeInTheDocument()
+    expect(within(row).getByText('$1.45')).toBeInTheDocument()
   })
 
   it('signs and classes unrealized P&L', () => {

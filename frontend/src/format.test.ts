@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { formatCurrency, formatSignedCurrency, formatPct, formatTime } from './format'
+import { formatCurrency, formatPrice, formatSignedCurrency, formatPct, formatTime } from './format'
 
 describe('formatCurrency', () => {
   it('formats a whole dollar amount with no cents', () => {
@@ -20,6 +20,26 @@ describe('formatCurrency', () => {
 
   it('groups thousands', () => {
     expect(formatCurrency(1234)).toBe('$1,234')
+  })
+})
+
+describe('formatPrice', () => {
+  it('keeps two decimal places even for sub-dollar values', () => {
+    expect(formatPrice(0.18)).toBe('$0.18')
+    expect(formatPrice(0.15)).toBe('$0.15')
+  })
+
+  it('does not collapse distinct values that formatCurrency would round together', () => {
+    expect(formatPrice(2.1)).toBe('$2.10')
+    expect(formatPrice(1.45)).toBe('$1.45')
+  })
+
+  it('prefixes negatives with a minus before the dollar sign', () => {
+    expect(formatPrice(-2.1)).toBe('-$2.10')
+  })
+
+  it('groups thousands', () => {
+    expect(formatPrice(1234.5)).toBe('$1,234.50')
   })
 })
 

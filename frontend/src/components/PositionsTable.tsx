@@ -1,5 +1,5 @@
 import type { PositionSummary } from '../api'
-import { formatCurrency, formatPct, formatSignedCurrency } from '../format'
+import { formatPct, formatPrice, formatSignedCurrency } from '../format'
 
 function DistanceBar({ position }: { position: PositionSummary }) {
   const dtt = position.distance_to_trigger
@@ -53,8 +53,8 @@ export function PositionsTable({ positions }: { positions: PositionSummary[] | n
               <span className="positions-table__strikes">{pos.strikes}</span>
             </td>
             <td className="num">{pos.quantity}</td>
-            <td className="num">{formatCurrency(Math.abs(pos.entry_net_amount))}</td>
-            <td className="num">{formatCurrency(Math.abs(pos.current_mark))}</td>
+            <td className="num">{formatPrice(Math.abs(pos.entry_net_amount))}</td>
+            <td className="num">{formatPrice(Math.abs(pos.current_mark))}</td>
             <td className={`num ${pos.unrealized_pnl >= 0 ? 'pnl-positive' : 'pnl-negative'}`}>
               {formatSignedCurrency(pos.unrealized_pnl)}
             </td>
